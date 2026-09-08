@@ -1777,7 +1777,7 @@ export default function App() {
                 <div className="flex justify-between items-center">
                   <div>
                     <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2">
-                      <Plus className="w-4 h-4 text-blue-600" /> 4. One-Off Injections (by Wrapper)
+                      <Plus className="w-4 h-4 text-blue-600" /> 4. One-Off Deposits (by Wrapper)
                     </h3>
                   </div>
                   <button onClick={addOneOffContrib} className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer border border-slate-200">
