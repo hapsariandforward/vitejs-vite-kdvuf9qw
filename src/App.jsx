@@ -32,15 +32,15 @@ import {
   UserCheck
 } from 'lucide-react';
 
-const STORAGE_KEY = 'rp_plan_full_v21';
+const STORAGE_KEY = 'rp_plan_full_v22';
 
 export const DEFAULT_RISK_PROFILES = {
-  'High Risk': { label: '80–100% Equities', real: 4.44, unlucky: 1.66, lucky: 7.31, nominal: 7.05 },
-  'Medium/High Risk': { label: '60–80% Equities', real: 3.72, unlucky: 1.38, lucky: 6.13, nominal: 6.31 },
-  'Medium Risk': { label: '40–60% Equities', real: 3.00, unlucky: 1.10, lucky: 4.95, nominal: 5.58 },
-  'Medium/Low Risk': { label: '20–40% Equities', real: 2.28, unlucky: 0.82, lucky: 3.77, nominal: 4.84 },
-  'Low Risk': { label: 'High interest Cash Savings, Fixed Income, Bonds', real: 1.56, unlucky: 0.54, lucky: 2.59, nominal: 4.10 },
-  'Cash Equivalents': { label: 'instant cash savings/money market', real: -0.50, unlucky: -1.00, lucky: 0.00, nominal: 1.99 }
+  'High Risk': { label: '80–100% Equities', real: 4.44, unlucky: 1.66, lucky: 7.31, nominal: 7.05, volatility: 15.5 },
+  'Medium/High Risk': { label: '60–80% Equities', real: 3.72, unlucky: 1.38, lucky: 6.13, nominal: 6.31, volatility: 11.5 },
+  'Medium Risk': { label: '40–60% Equities', real: 3.00, unlucky: 1.10, lucky: 4.95, nominal: 5.58, volatility: 8.0 },
+  'Medium/Low Risk': { label: '20–40% Equities', real: 2.28, unlucky: 0.82, lucky: 3.77, nominal: 4.84, volatility: 5.5 },
+  'Low Risk': { label: 'High interest Cash Savings, Fixed Income, Bonds', real: 1.56, unlucky: 0.54, lucky: 2.59, nominal: 4.10, volatility: 3.0 },
+  'Cash Equivalents': { label: 'instant cash savings/money market', real: -0.50, unlucky: -1.00, lucky: 0.00, nominal: 1.99, volatility: 0.5 }
 };
 
 const parseInputNumber = (val) => {
@@ -74,9 +74,10 @@ const BLANK_PLAN = {
   },
   spending: {
     targetSpend: '',
-    staggeredSpend: '',
-    taperAge: '',
-    taperRate: '',
+    taper1Age: '',
+    taper1Rate: '',
+    taper2Age: '',
+    taper2Rate: '',
     drawdownStrategy: 'Phased Drawdown',
     decumulationPolicy: 'Bracket Fill'
   },
@@ -106,7 +107,6 @@ const BLANK_PLAN = {
     additionalTaxRate: 45.0,
     pclsProportion: 25.0,
     pclsMaxCap: 268275,
-    annualVolatility: 13.5,
     solvencyFloor: 0
   }
 };
@@ -245,7 +245,7 @@ export default function App() {
   };
 
   // =========================================================================
-  // 3. UNIFIED SIMULATION ENGINE
+  // 3. UNIFIED SIMULATION ENGINE (Asset-Specific Volatilities & 2-Stage Taper)
   // =========================================================================
   const runEngineYear = (t, potsMap, planState, regimeOrShock = 'expected', tracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false }) => {
     const planIsCouple = planState.demographics.planningMode !== 'single';
@@ -256,14 +256,7 @@ export default function App() {
     const privatePenAge = Number(planState.demographics.privatePensionAge) || 58;
     const statePenAge = Number(planState.demographics.statePensionAge) || 68;
 
-    const taperFraction = (Number(planState.spending.taperRate) || 0) / 100;
-    const taperAge = Number(planState.spending.taperAge) || 75;
     const targetSpend = Number(planState.spending.targetSpend) || 0;
-    
-    const staggeredSpend = (planState.spending.staggeredSpend !== '' && planState.spending.staggeredSpend !== undefined)
-      ? Number(planState.spending.staggeredSpend)
-      : (targetSpend * 0.6);
-
     const lsaCap = Number(planState.config.pclsMaxCap) || 268275;
     const pclsProp = (Number(planState.config.pclsProportion) || 25) / 100;
     const paAllowance = Number(planState.config.personalAllowance) || 12570;
@@ -397,7 +390,7 @@ export default function App() {
       return taxFreeTaken + (newNet - currentNet);
     };
 
-    // 5. One-off Capital Costs
+    // 5. One-off Capital Costs (Grossed up for tax if spilled into pensions)
     let pre58Insolvent = false;
     const costThisYear = planState.oneOffCosts.filter(c => {
       const itemYear = c.date ? parseInt(c.date.slice(0, 4)) : (Number(c.year) || year);
@@ -432,21 +425,31 @@ export default function App() {
       }
     }
 
-    // 6. Target Spend Demand
+    // 6. Target Spend Demand (Two Optional Taper Phases)
     let annualLivingTarget = 0;
-    if (!planIsCouple) {
-      if (!workingSelf) {
-        annualLivingTarget = ageSelf >= taperAge ? targetSpend * (1 - taperFraction) : targetSpend;
+    const isRetired = planIsCouple ? (!workingSelf || !workingPart) : !workingSelf;
+
+    if (isRetired && targetSpend > 0) {
+      let currentSpend = targetSpend;
+      
+      // Taper 1 (Optional)
+      const t1Age = Number(planState.spending.taper1Age);
+      const t1Rate = (Number(planState.spending.taper1Rate) || 0) / 100;
+      if (t1Age > 0 && ageSelf >= t1Age && t1Rate > 0) {
+        currentSpend *= (1 - t1Rate);
       }
-    } else {
-      if (!workingSelf && !workingPart) {
-        annualLivingTarget = ageSelf >= taperAge ? targetSpend * (1 - taperFraction) : targetSpend;
-      } else if (!workingSelf || !workingPart) {
-        annualLivingTarget = staggeredSpend;
+
+      // Taper 2 (Optional)
+      const t2Age = Number(planState.spending.taper2Age);
+      const t2Rate = (Number(planState.spending.taper2Rate) || 0) / 100;
+      if (t2Age > 0 && ageSelf >= t2Age && t2Rate > 0) {
+        currentSpend *= (1 - t2Rate);
       }
+
+      annualLivingTarget = currentSpend;
     }
 
-    // 7. Decumulation Waterfall & Surplus Reinvestment
+    // 7. Decumulation Waterfall & Surplus Reinvestment (6-Month Buffer Cap)
     let netDemand = Math.max(0, annualLivingTarget - totalNetGuaranteed);
     let demandSelf = 0;
     let demandPart = 0;
@@ -647,7 +650,7 @@ export default function App() {
       }
     }
 
-    // 8. Asset-Specific Return Compounding
+    // 8. Asset-Specific Return Compounding with Individual Volatilities
     const compoundFactor = isYearZero ? yf : 1.0;
     planState.accounts.forEach(acc => {
       if (!planIsCouple && acc.owner === 'Partner') return;
@@ -658,6 +661,7 @@ export default function App() {
       const realRate = (Number(profile.real) || 0) / 100;
       const luckyRate = (Number(profile.lucky) || 0) / 100;
       const unluckyRate = (Number(profile.unlucky) || 0) / 100;
+      const assetVol = (Number(profile.volatility) || 12.0) / 100;
 
       let growthRate = realRate;
 
@@ -667,9 +671,6 @@ export default function App() {
         growthRate = unluckyRate;
       } else if (typeof regimeOrShock === 'object' && regimeOrShock !== null) {
         const z = regimeOrShock.z;
-        const assetVol = acc.risk === 'Cash Equivalents' 
-          ? 0.005 
-          : Math.max(0.01, regimeOrShock.sigma * Math.max(0.1, realRate / 0.0444));
         const assetDrift = realRate - 0.5 * assetVol * assetVol;
         growthRate = Math.exp(assetDrift + assetVol * z) - 1;
       }
@@ -781,17 +782,10 @@ export default function App() {
   const executeSimulation = (spendAmount, trials = 1000) => {
     let solventCount = 0;
     const terminalPots = [];
-    const sigma = (Number(plan.config.annualVolatility) || 13.5) / 100;
     const floor = Number(plan.config.solvencyFloor) || 0;
     const ageSelfStart = Number(plan.demographics.currentAgeSelf) || 40;
     const terminalAge = Number(plan.demographics.terminalAge) || 100;
     const totalYears = Math.max(1, terminalAge - ageSelfStart);
-
-    const targetSpend = Number(plan.spending.targetSpend) || 0;
-    const staggeredSpend = (plan.spending.staggeredSpend !== '' && plan.spending.staggeredSpend !== undefined)
-      ? Number(plan.spending.staggeredSpend)
-      : (targetSpend * 0.6);
-    const stagRatio = targetSpend > 0 ? (staggeredSpend / targetSpend) : 0.6;
 
     const minRetireAge = isCouple
       ? Math.min(Number(plan.demographics.retireAgeSelf) || 60, Number(plan.demographics.retireAgePart) || 60)
@@ -801,8 +795,7 @@ export default function App() {
       ...plan,
       spending: {
         ...plan.spending,
-        targetSpend: spendAmount,
-        staggeredSpend: spendAmount * stagRatio
+        targetSpend: spendAmount
       }
     };
 
@@ -817,7 +810,7 @@ export default function App() {
         const u2 = Math.random();
         const z = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
 
-        const step = runEngineYear(t, trialPots, trialPlan, { z, sigma }, trialTracking);
+        const step = runEngineYear(t, trialPots, trialPlan, { z }, trialTracking);
 
         if (step.ageSelf >= minRetireAge) {
           if (step.totalCombined <= floor || step.unmetDemand > 5 || step.pre58Insolvent) {
@@ -1224,27 +1217,54 @@ export default function App() {
                   </div>
                 )}
 
-                <div>
+                <div className="sm:col-span-2">
                   <label className="text-slate-600 font-semibold block mb-1">{isCouple ? 'Joint Net Living Spend (£/yr)' : 'Net Living Spend (£/yr)'}</label>
                   <input type="number" step="1000" placeholder="e.g. 30000" onFocus={handleFocus} value={plan.spending.targetSpend} onChange={(e) => updateSpending('targetSpend', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                 </div>
+              </div>
 
-                {isCouple && (
+              {/* Two-Stage Optional Taper Controls */}
+              <div className="pt-3 border-t border-slate-100">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
                   <div>
-                    <label className="text-slate-600 font-semibold block mb-1">Staggered Spend (1 Retired £/yr)</label>
-                    <input type="number" step="1000" placeholder="e.g. 20000" onFocus={handleFocus} value={plan.spending.staggeredSpend} onChange={(e) => updateSpending('staggeredSpend', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                    <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Lifestyle Spending Tapers (Optional)</h4>
+                    <span className="text-[11px] text-slate-500">Model gradual reductions in later life (e.g. Go-Go to Slow-Go phases).</span>
                   </div>
-                )}
-
-                <div>
-                  <label className="text-slate-600 font-semibold block mb-1">Spend Taper Age</label>
-                  <input type="number" placeholder="e.g. 75" onFocus={handleFocus} value={plan.spending.taperAge} onChange={(e) => updateSpending('taperAge', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTab('docs');
+                      setTimeout(() => scrollToDocSection('doc-taper'), 80);
+                    }}
+                    className="text-xs text-blue-600 hover:text-blue-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer self-start sm:self-auto"
+                  >
+                    <HelpCircle className="w-3.5 h-3.5" />
+                    How two-stage spending tapers work →
+                  </button>
                 </div>
-                <div>
-                  <label className="text-slate-600 font-semibold block mb-1">Spend Taper Reduction (%)</label>
-                  <div className="relative">
-                    <input type="number" step="1" placeholder="e.g. 10" onFocus={handleFocus} value={plan.spending.taperRate} onChange={(e) => updateSpending('taperRate', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold pr-8 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                    <span className="absolute right-3 top-2 text-slate-400 font-bold">%</span>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
+                  <div>
+                    <label className="text-slate-600 font-semibold block mb-1">Taper 1 Age (Optional)</label>
+                    <input type="number" placeholder="e.g. 75" onFocus={handleFocus} value={plan.spending.taper1Age} onChange={(e) => updateSpending('taper1Age', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-slate-600 font-semibold block mb-1">Taper 1 Reduction (%)</label>
+                    <div className="relative">
+                      <input type="number" step="1" placeholder="e.g. 10" onFocus={handleFocus} value={plan.spending.taper1Rate} onChange={(e) => updateSpending('taper1Rate', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold pr-8 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                      <span className="absolute right-3 top-2 text-slate-400 font-bold">%</span>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-slate-600 font-semibold block mb-1">Taper 2 Age (Optional)</label>
+                    <input type="number" placeholder="e.g. 85" onFocus={handleFocus} value={plan.spending.taper2Age} onChange={(e) => updateSpending('taper2Age', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-slate-600 font-semibold block mb-1">Taper 2 Reduction (%)</label>
+                    <div className="relative">
+                      <input type="number" step="1" placeholder="e.g. 15" onFocus={handleFocus} value={plan.spending.taper2Rate} onChange={(e) => updateSpending('taper2Rate', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold pr-8 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                      <span className="absolute right-3 top-2 text-slate-400 font-bold">%</span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1254,7 +1274,7 @@ export default function App() {
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2">
-                  <Wallet className="w-4 h-4 text-blue-600" /> 2. Current Balances, Annual Savings & Risk Profiles
+                  <Wallet className="w-4 h-4 text-blue-600" /> 2. Current Balances, Annual Contributions & Risk Profiles
                 </h3>
                 <button
                   type="button"
@@ -1275,7 +1295,7 @@ export default function App() {
                     <th className="pb-2">Account Wrapper</th>
                     {isCouple && <th className="pb-2">Owner</th>}
                     <th className="pb-2">Balance Today (£)</th>
-                    <th className="pb-2">Annual Savings (£)</th>
+                    <th className="pb-2">Annual Contribution (£)</th>
                     <th className="pb-2">Contrib Growth (%/yr)</th>
                     <th className="pb-2">Asset Allocation (Risk Tier)</th>
                   </tr>
@@ -1607,7 +1627,7 @@ export default function App() {
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
                 <Settings className="w-4 h-4 text-blue-600" /> Global Economic & Calculation Configuration
               </h2>
-              <p className="text-xs text-slate-500">Economic and regulatory tax settings used throughout the projection engine. Note this not 'todays' value but a predicted average throughout the timespan of the simulation. </p>
+              <p className="text-xs text-slate-500">Economic and regulatory tax settings used throughout the projection engine.</p>
 
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-xs pt-3">
                 <div>
@@ -1633,10 +1653,6 @@ export default function App() {
                   <input type="number" placeholder="0" onFocus={handleFocus} value={plan.demographics.statePensionAge} onChange={(e) => updateDemographics('statePensionAge', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                 </div>
                 <div>
-                  <label className="text-slate-600 font-semibold block mb-1">Annual Volatility (Sigma %)</label>
-                  <input type="number" step="0.5" placeholder="0" onFocus={handleFocus} value={plan.config.annualVolatility} onChange={(e) => updateConfig('annualVolatility', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                </div>
-                <div>
                   <label className="text-slate-600 font-semibold block mb-1">Solvency Floor (£ at Age 100)</label>
                   <input
                     type="number"
@@ -1652,12 +1668,12 @@ export default function App() {
               </div>
             </div>
 
-            {/* Editable Risk Profiles Matrix */}
+            {/* Editable Risk Profiles & Multi-Sigma Matrix */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
               <div className="flex justify-between items-center">
                 <div>
-                  <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">Asset Allocations & Return Matrix Assumptions</h3>
-                  <span className="text-[11px] text-slate-500">Real annual returns net of fees. Modify these only if you have a specific portfolio thesis.</span>
+                  <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">Asset Allocations, Return Matrix & Specific Volatilities (σ)</h3>
+                  <span className="text-[11px] text-slate-500">Each risk tier has its own annual volatility (σ) driving the Monte Carlo simulation. Click Edit to customize.</span>
                 </div>
                 <button
                   onClick={() => setIsEditingRisk(!isEditingRisk)}
@@ -1677,7 +1693,8 @@ export default function App() {
                     <th className="pb-2">Expected Real Return (% pa)</th>
                     <th className="pb-2">Unlucky Real Return (% pa)</th>
                     <th className="pb-2">Lucky Real Return (% pa)</th>
-                    <th className="pb-2">Nominal Return (Expected % pa)</th>
+                    <th className="pb-2">Nominal Return (% pa)</th>
+                    <th className="pb-2">Annual Volatility (σ % pa)</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 font-mono">
@@ -1740,6 +1757,20 @@ export default function App() {
                           <span className="text-purple-700 font-bold">{Number(val.nominal).toFixed(2)}%</span>
                         )}
                       </td>
+                      <td className="py-2.5">
+                        {isEditingRisk ? (
+                          <input
+                            type="number"
+                            step="0.5"
+                            onFocus={handleFocus}
+                            value={val.volatility !== undefined ? val.volatility : 12.0}
+                            onChange={(e) => updateRiskField(key, 'volatility', e.target.value)}
+                            className="w-20 p-1 bg-slate-50 border border-slate-300 rounded font-mono text-amber-700 font-bold focus:bg-white focus:ring-1 focus:ring-blue-500"
+                          />
+                        ) : (
+                          <span className="text-amber-700 font-bold">{Number(val.volatility !== undefined ? val.volatility : 12.0).toFixed(1)}%</span>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -1776,6 +1807,54 @@ export default function App() {
                 </div>
               </div>
             </div>
+
+            {/* BASELINE MODEL ASSUMPTIONS REFERENCE TABLE */}
+            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
+              <div>
+                <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-blue-600" /> Baseline Model Assumptions
+                </h3>
+                <span className="text-[11px] text-slate-500">Core architectural, actuarial, and fiscal baselines applied across all projection regimes.</span>
+              </div>
+
+              <table className="w-full text-left text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-200 text-slate-500 font-semibold">
+                    <th className="pb-2 w-1/4">Model Parameter</th>
+                    <th className="pb-2 w-1/5">Baseline Setting</th>
+                    <th className="pb-2">Explanatory Notes & Methodology</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 leading-relaxed text-slate-700">
+                  <tr className="hover:bg-slate-50/60">
+                    <td className="py-2.5 font-bold text-slate-900">State Pension Inflation Indexation</td>
+                    <td className="py-2.5 font-mono text-blue-700 font-semibold">Triple Lock (CPI)</td>
+                    <td className="py-2.5 text-slate-600">State Pension payments are assumed to increase annually in line with inflation (Triple Lock / CPI), maintaining constant real purchasing power throughout retirement.</td>
+                  </tr>
+                  <tr className="hover:bg-slate-50/60">
+                    <td className="py-2.5 font-bold text-slate-900">Target Spend Indexation</td>
+                    <td className="py-2.5 font-mono text-blue-700 font-semibold">100% (CPI)</td>
+                    <td className="py-2.5 text-slate-600">Target retirement living expenditures adjust annually with inflation (100% CPI) to ensure lifestyle purchasing power is fully preserved over time.</td>
+                  </tr>
+                  <tr className="hover:bg-slate-50/60">
+                    <td className="py-2.5 font-bold text-slate-900">Surplus Income Allocation</td>
+                    <td className="py-2.5 font-mono text-emerald-700 font-semibold">Cash Buffer (with ISA Sweep)</td>
+                    <td className="py-2.5 text-slate-600">Any surplus retirement income generated beyond annual living expenditures is swept into Tier 1 Cash Savings up to a 6-month buffer; excess beyond this cap is reinvested into S&S ISAs to eliminate cash drag.</td>
+                  </tr>
+                  <tr className="hover:bg-slate-50/60">
+                    <td className="py-2.5 font-bold text-slate-900">Projection Horizon</td>
+                    <td className="py-2.5 font-mono text-slate-900 font-semibold">Age 100 (60–65 Yrs)</td>
+                    <td className="py-2.5 text-slate-600">Cash flows, withdrawals, and portfolio balances are continuously modeled from current age through to Age 100 to eliminate longevity risk.</td>
+                  </tr>
+                  <tr className="hover:bg-slate-50/60">
+                    <td className="py-2.5 font-bold text-slate-900">Spousal Expenditure Split</td>
+                    <td className="py-2.5 font-mono text-indigo-700 font-semibold">50% / 50%</td>
+                    <td className="py-2.5 text-slate-600">Joint living expenditures are drawn equally between spouses until one partner's liquid assets deplete, after which the remaining partner covers remaining costs with marginal tax band tracking.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
           </div>
         )}
 
@@ -1787,7 +1866,7 @@ export default function App() {
               <div>
                 <strong className="text-blue-900 block font-semibold mb-0.5">Simulation Modes:</strong>
                 <span>
-                  <strong>Test Current Spend</strong> evaluates your target annual spend against 1,000 market paths. <strong>Safe Max Annual Spend</strong> determines the highest annual budget that survives to age 100 at your chosen confidence level.
+                  <strong>Test Current Spend</strong> evaluates your target annual spend against 1,000 market paths using asset-specific volatilities. <strong>Safe Max Annual Spend</strong> determines the highest annual budget that survives to age 100 at your chosen confidence level.
                 </span>
               </div>
             </div>
@@ -2185,16 +2264,17 @@ export default function App() {
               <nav className="space-y-1 text-xs">
                 {[
                   { id: 'doc-philosophy', label: '1. Architecture & Real Terms' },
-                  { id: 'doc-timeline', label: '2. Timeline & Mid-Year Starts' },
-                  { id: 'doc-incomes', label: '3. Guaranteed Income & UK Tax' },
-                  { id: 'doc-gia-tax', label: '4. Note on GIA / Other Tax' },
-                  { id: 'doc-surplus', label: '5. Surplus Income & 6-Mo Cash Cap' },
-                  { id: 'doc-decumulation', label: '6. Decumulation Policies (UK FIRE vs Tax Smoothing)' },
-                  { id: 'doc-pension-rules', label: '7. Phased vs 25% Lump Sum' },
-                  { id: 'doc-spousal', label: '8. Spousal Absorption & Single Mode' },
-                  { id: 'doc-one-offs', label: '9. One-Off Costs & Pension Tax Math' },
-                  { id: 'doc-monte-carlo', label: '10. Monte Carlo & Static Drawdown Limitation' },
-                  { id: 'doc-risk-profiles', label: '11. Asset Allocations & Fund Types' }
+                  { id: 'doc-taper', label: '2. Two-Stage Spending Tapers' },
+                  { id: 'doc-timeline', label: '3. Timeline & Mid-Year Starts' },
+                  { id: 'doc-incomes', label: '4. Guaranteed Income & UK Tax' },
+                  { id: 'doc-gia-tax', label: '5. Note on GIA / Other Tax' },
+                  { id: 'doc-surplus', label: '6. Surplus Income & 6-Mo Cash Cap' },
+                  { id: 'doc-decumulation', label: '7. Decumulation Policies' },
+                  { id: 'doc-pension-rules', label: '8. Phased vs 25% Lump Sum' },
+                  { id: 'doc-spousal', label: '9. Spousal Absorption & Single Mode' },
+                  { id: 'doc-one-offs', label: '10. One-Off Costs & Pension Tax Math' },
+                  { id: 'doc-monte-carlo', label: '11. Monte Carlo & Multi-Sigma Volatility' },
+                  { id: 'doc-risk-profiles', label: '12. Asset Allocations & Fund Types' }
                 ].map(item => (
                   <button
                     key={item.id}
@@ -2233,38 +2313,63 @@ export default function App() {
                     </p>
                   </div>
                   <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl text-xs space-y-1">
-                    <strong className="text-slate-900 block font-semibold">Single Step-Down Taper Note</strong>
+                    <strong className="text-slate-900 block font-semibold">Dedicated Account Wrappers</strong>
                     <p className="text-slate-600">
-                      This version models retirement spending with a <strong>single step-down taper</strong> at your chosen age (e.g. 10–15% at age 75 or 80) rather than a continuous multi-phase "spending smile" (Go-Go, Slow-Go, and No-Go years).
+                      Wealth is divided across four accounts per person: Pensions, S&S ISAs, Other Investments (GIA), and Cash. Each wrapper has its own access age and tax rules.
                     </p>
                   </div>
                 </div>
               </section>
 
-              {/* 2. Timeline */}
-              <section id="doc-timeline" className="space-y-3 pt-4 border-t border-slate-100">
+              {/* 2. Two-Stage Spending Tapers */}
+              <section id="doc-taper" className="space-y-3 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
                   <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">2</span>
+                  Two-Stage Lifestyle Spending Tapers
+                </h3>
+                <p>
+                  In empirical retirement research (often described as the "retirement spending smile"), spending naturally declines across distinct life phases:
+                </p>
+                <div className="space-y-2 text-xs">
+                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
+                    <strong className="text-slate-900 font-bold block">Phase 1: The "Go-Go" Years (Retirement to Age 70–75)</strong>
+                    <p className="text-slate-600">Active lifestyle with peak travel, hobbies, home projects, and discretionary spending. Funded at 100% of your target living spend.</p>
+                  </div>
+                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
+                    <strong className="text-slate-900 font-bold block">Phase 2: The "Slow-Go" Years (Taper 1, e.g. Age 75)</strong>
+                    <p className="text-slate-600">Energy levels gradually ease, overseas travel becomes domestic or less frequent, and dining out slows. Optional Taper 1 applies a percentage reduction (e.g. 10%–15%).</p>
+                  </div>
+                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
+                    <strong className="text-slate-900 font-bold block">Phase 3: The "No-Go" Years (Taper 2, e.g. Age 85)</strong>
+                    <p className="text-slate-600">Lifestyle centers largely around the home and local community. Baseline living expenditures hit their lowest point. Optional Taper 2 applies a further reduction (e.g. an additional 10%–20%).</p>
+                  </div>
+                </div>
+                <p className="text-xs text-slate-500">
+                  Both tapers are completely optional. If left blank, your target spend remains flat in real terms all the way to age 100.
+                </p>
+              </section>
+
+              {/* 3. Timeline */}
+              <section id="doc-timeline" className="space-y-3 pt-4 border-t border-slate-100">
+                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">3</span>
                   Timeline & Mid-Year Starts
                 </h3>
                 <p>
                   The model projects annually from the year of your valuation date to age 100.
                 </p>
-                <p>
-                  Because life rarely starts on January 1st, Year 0 ($t=0$) is prorated:
-                </p>
                 <div className="p-3.5 bg-blue-50/50 border border-blue-100 rounded-xl text-xs text-slate-700 space-y-1 font-mono">
                   <div>Year Fraction Remaining = (End of Year - Valuation Date) / 365 Days</div>
                   <div className="text-slate-500 font-sans mt-1">
-                    For example, starting in September leaves roughly 31.5% of the year. In Year 0, contributions and annual growth are scaled by 0.315 so balances reflect where you will actually be at year-end.
+                    In Year 0 ($t=0$), contributions and annual growth are scaled by the remaining fraction of the year so balances reflect where you will actually be at year-end.
                   </div>
                 </div>
               </section>
 
-              {/* 3. Guaranteed Incomes */}
+              {/* 4. Guaranteed Incomes */}
               <section id="doc-incomes" className="space-y-3 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">3</span>
+                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">4</span>
                   Guaranteed Income & UK Income Tax
                 </h3>
                 <p>
@@ -2275,28 +2380,12 @@ export default function App() {
                   <li><strong>Tax-Free Income:</strong> Certain DB lump sums or allowances bypass the tax engine and reduce net spending needs pound-for-pound.</li>
                   <li><strong>Taxable Income:</strong> DB pensions, annuities, and consulting income combine with your State Pension.</li>
                 </ul>
-                <p>
-                  Taxable income is routed through standard UK tax bands:
-                </p>
-                <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl text-xs space-y-2">
-                  <div className="flex justify-between border-b border-slate-200 pb-1 font-semibold text-slate-900">
-                    <span>Tax Bracket</span>
-                    <span>Rate</span>
-                  </div>
-                  <div className="flex justify-between"><span>£0 to £12,570 (Personal Allowance)</span><span className="font-bold text-emerald-700">0%</span></div>
-                  <div className="flex justify-between"><span>£12,570 to £50,270 (Basic Rate)</span><span className="font-bold text-blue-700">20%</span></div>
-                  <div className="flex justify-between"><span>£50,270 to £125,140 (Higher Rate)</span><span className="font-bold text-amber-700">40%</span></div>
-                  <div className="flex justify-between"><span>Over £125,140 (Additional Rate)</span><span className="font-bold text-rose-700">45%</span></div>
-                  <div className="text-[11px] text-slate-500 pt-1 border-t border-slate-200">
-                    The £100k taper is included: £1 of Personal Allowance is removed for every £2 of income above £100,000.
-                  </div>
-                </div>
               </section>
 
-              {/* 4. GIA Note */}
+              {/* 5. GIA Note */}
               <section id="doc-gia-tax" className="space-y-3 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-amber-800 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center text-xs font-bold">4</span>
+                  <span className="w-6 h-6 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center text-xs font-bold">5</span>
                   Note on GIA / Other Investment Taxation
                 </h3>
                 <div className="p-4 bg-amber-50/80 border border-amber-200 rounded-xl text-xs text-amber-900 space-y-2">
@@ -2305,52 +2394,36 @@ export default function App() {
                     Capital Gains & Dividend Tax Not Modeled
                   </div>
                   <p>
-                    In this version, withdrawals from <strong>Other Investments (GIAs)</strong> are treated as gross = net. We don't model Capital Gains Tax (CGT) or dividend tax because they depend heavily on individual circumstances:
-                  </p>
-                  <ul className="list-disc pl-5 space-y-1 text-slate-700">
-                    <li>Your historical purchase price and Section 104 cost pooling.</li>
-                    <li>How much growth comes from share price increases vs dividend payouts.</li>
-                    <li>Whether you harvest gains annually inside the £3,000 CGT exemption.</li>
-                    <li>Bed & ISA transfers made over several years.</li>
-                  </ul>
-                  <p className="pt-1 font-semibold text-amber-950 border-t border-amber-200/80">
-                    What this means: If a significant portion of your retirement spending comes from taxable brokerage accounts rather than pensions and ISAs, your projected portfolio balance will be slightly higher than reality.
+                    In this version, withdrawals from <strong>Other Investments (GIAs)</strong> are treated as gross = net. We don't model Capital Gains Tax (CGT) or dividend tax because they depend heavily on individual circumstances (e.g. historical Section 104 cost pooling, Bed & ISA transfers, and dividend yields).
                   </p>
                 </div>
               </section>
 
-              {/* 5. Surplus Income */}
+              {/* 6. Surplus Income */}
               <section id="doc-surplus" className="space-y-3 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">5</span>
+                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">6</span>
                   Surplus Income & 6-Month Emergency Buffer Cap
                 </h3>
                 <p>
-                  If guaranteed income (like State Pensions or DB payouts) exceeds your living spend in a given year, portfolio withdrawals drop to £0.
-                </p>
-                <p>
-                  To eliminate cash drag (-0.5% real return), the model does not let excess cash accumulate indefinitely:
+                  If guaranteed income exceeds your living spend in a given year, portfolio withdrawals drop to £0.
                 </p>
                 <div className="p-3.5 bg-emerald-50/70 border border-emerald-200 rounded-xl text-xs space-y-1.5 text-slate-700">
                   <strong className="text-emerald-950 font-bold block">Automatic Reinvestment into Stocks & Shares ISA:</strong>
                   <p>
                     1. The model maintains a maximum emergency buffer of <strong>6 months of living expenses</strong> in Cash Savings.<br />
                     2. Any excess income beyond this 6-month buffer is swept directly into the owner's <strong>Stocks & Shares ISA</strong>.<br />
-                    3. Reinvested funds compound at whatever asset allocation and risk profile you have assigned to your S&S ISA, preserving long-term purchasing power.
+                    3. Reinvested funds compound at whatever asset allocation you have assigned to your S&S ISA, preventing cash drag.
                   </p>
                 </div>
               </section>
 
-              {/* 6. Decumulation Waterfall */}
+              {/* 7. Decumulation Waterfall */}
               <section id="doc-decumulation" className="space-y-3 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">6</span>
+                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">7</span>
                   Decumulation Policies: UK FIRE vs Tax Smoothing vs Sequential
                 </h3>
-                <p>
-                  Inside the <strong>Config & Assumptions</strong> tab, you can select between three decumulation methodologies:
-                </p>
-
                 <div className="space-y-3 pt-1">
                   <div className="p-4 bg-emerald-50/50 border border-emerald-200 rounded-xl space-y-2 text-xs">
                     <div className="flex items-center gap-1.5 text-emerald-800 font-bold text-sm">
@@ -2358,14 +2431,8 @@ export default function App() {
                       Option A: UK FIRE Bracket Fill (PA Only)
                     </div>
                     <p className="text-slate-700">
-                      Prioritizes paying 0% tax today:
+                      Draws pension money up to the £12,570 Personal Allowance, then drains ISAs to keep current income tax at 0%.
                     </p>
-                    <ol className="list-decimal pl-5 space-y-1 text-slate-700">
-                      <li><strong>Before 58:</strong> Spends Cash $\rightarrow$ GIA $\rightarrow$ ISAs to bridge to age 58.</li>
-                      <li><strong>Age 58+:</strong> Draws pension money first to fill your remaining 0% Personal Allowance (£12,570 taxable).</li>
-                      <li><strong>Next:</strong> Drains taxable GIA, then draws from <strong>S&S ISAs</strong> to keep current tax at 0%.</li>
-                      <li><strong>Last:</strong> Returns to pensions for the 20% basic rate band only after ISAs are completely depleted.</li>
-                    </ol>
                   </div>
 
                   <div className="p-4 bg-blue-50/50 border border-blue-200 rounded-xl space-y-2 text-xs">
@@ -2374,183 +2441,103 @@ export default function App() {
                       Option B: Tax Smoothing (Fill 20% Basic Rate First, Preserve ISAs)
                     </div>
                     <p className="text-slate-700">
-                      Advocated by UK financial planners to avoid the "State Pension cliff":
-                    </p>
-                    <ol className="list-decimal pl-5 space-y-1 text-slate-700">
-                      <li><strong>Before 58:</strong> Spends Cash $\rightarrow$ GIA $\rightarrow$ ISAs to bridge to age 58.</li>
-                      <li><strong>Age 58+:</strong> Fills both the 0% Personal Allowance and the <strong>20% Basic Rate Band (up to £50,270)</strong> with pension withdrawals before touching ISAs.</li>
-                      <li><strong>Preserves ISAs:</strong> Leaves S&S ISAs intact to compound tax-free as an untaxed emergency buffer for your 70s and 80s, when dual State Pensions will consume your entire Personal Allowance.</li>
-                      <li><strong>Surge Shield:</strong> ISAs are tapped only if spending exceeds the basic rate band, shielding you from 40% Higher Rate income tax.</li>
-                    </ol>
-                  </div>
-
-                  <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2 text-xs">
-                    <div className="flex items-center gap-1.5 text-slate-800 font-bold text-sm">
-                      Option C: Sequential Drawdown (Spreadsheet Classic)
-                    </div>
-                    <p className="text-slate-600">
-                      Drains accounts in rigid order: <code>Cash → Other (GIA) → ISAs → Pensions (58+)</code>. Liquidates every penny of ISAs before taking a single pound from pensions.
+                      Fills both the 0% Personal Allowance and the 20% Basic Rate Band (up to £50,270) with pension withdrawals before touching ISAs, preserving ISAs as a tax-free emergency buffer for late retirement.
                     </p>
                   </div>
                 </div>
               </section>
 
-              {/* 7. Pension Rules */}
+              {/* 8. Pension Rules */}
               <section id="doc-pension-rules" className="space-y-3 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">7</span>
+                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">8</span>
                   Phased Drawdown vs 25% Lump Sum & LSA Cap
                 </h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
                     <strong className="text-slate-900 block font-semibold">Phased Drawdown (Default)</strong>
                     <p className="text-slate-600">
-                      Each withdrawal is split: <strong>25% tax-free cash (PCLS)</strong> and <strong>75% taxable income</strong>. The rest of the pot stays invested in the pension wrapper. The model solves for the exact gross amount needed to meet your target after tax.
+                      Each withdrawal is split: <strong>25% tax-free cash (PCLS)</strong> and <strong>75% taxable income</strong>.
                     </p>
                   </div>
                   <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
                     <strong className="text-slate-900 block font-semibold">Full 25% Lump Sum</strong>
                     <p className="text-slate-600">
-                      At retirement (or age 58), 25% of the total pension is taken immediately and moved into Cash Savings. Subsequent pension withdrawals are 100% taxable as regular income.
+                      At retirement (or age 58), 25% of the pension is taken immediately into Cash Savings. Subsequent draws are 100% taxable.
                     </p>
                   </div>
                 </div>
-                <div className="p-3 bg-amber-50/60 border border-amber-200 rounded-xl text-xs text-amber-900">
-                  <strong>The £268,275 Lump Sum Allowance (LSA) Cap:</strong> In both options, the model tracks total tax-free cash taken. Once an individual hits the statutory £268,275 cap, further pension withdrawals become 100% taxable.
-                </div>
               </section>
 
-              {/* 8. Spousal Absorption & Single Mode */}
+              {/* 9. Spousal Absorption */}
               <section id="doc-spousal" className="space-y-3 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">8</span>
+                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">9</span>
                   Spousal Absorption & Single Planner Logic
                 </h3>
                 <p>
-                  The engine supports both individual and couple planning:
+                  In couple mode, net living spend is split 50/50 and cross-absorbed at each tier. In single mode, 100% of spending demand routes to your own accounts without partner fallbacks.
                 </p>
-                <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl text-xs space-y-1.5">
-                  <strong className="text-slate-900 block font-semibold">Couple Mode (50/50 Split & Cross-Absorption):</strong>
-                  <p className="text-slate-600">
-                    Net living spend is split 50/50. If one partner's pot empties at any tier, the other partner's account covers the difference. When one partner takes extra pension money to cover the other, the engine tracks their personal taxable income so additional withdrawals are taxed at their true marginal bracket.
-                  </p>
-                  <strong className="text-slate-900 block font-semibold pt-1">Single Mode:</strong>
-                  <p className="text-slate-600">
-                    When toggled to <em>Single</em>, all partner fields are omitted. 100% of spending demand is assigned directly to you, full target spend activates immediately upon your retirement without staggered work delays, and the Monte Carlo solver only checks your own retirement timeline.
-                  </p>
-                </div>
               </section>
 
-              {/* 9. One-Offs */}
+              {/* 10. One-Offs */}
               <section id="doc-one-offs" className="space-y-3 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">9</span>
+                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">10</span>
                   One-Off Costs & Pension Tax Math
                 </h3>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 block font-semibold">One-Off Injections (Section 4)</strong>
-                    <p className="text-slate-600">
-                      Adds money to a chosen account in a specific calendar year. The money begins compounding immediately at that wrapper's assigned return rate.
-                    </p>
-                  </div>
-                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 block font-semibold">One-Off Costs & Tax Spillover (Section 5)</strong>
-                    <p className="text-slate-600">
-                      Pulls sequentially: <code>Cash → Other (GIA) → ISAs → Pensions (58+)</code>. If non-pension accounts run out, emergency withdrawals from pensions are <strong>properly grossed up for income tax and PCLS</strong>, eliminating phantom tax-free money.
-                    </p>
-                  </div>
-                </div>
+                <p>
+                  If one-off capital expenses deplete Cash, GIA, and ISAs, emergency withdrawals from pensions are <strong>grossed up for income tax and PCLS</strong>, preventing phantom tax-free capital.
+                </p>
               </section>
 
-              {/* 10. Monte Carlo */}
+              {/* 11. Monte Carlo */}
               <section id="doc-monte-carlo" className="space-y-3 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">10</span>
-                  Monte Carlo & Static Drawdown Limitation
+                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">11</span>
+                  Monte Carlo & Multi-Sigma Volatility
                 </h3>
                 <p>
-                  The engine runs 1,000 randomized 65-year retirement paths using Geometric Brownian Motion based on the volatility of each risk tier.
+                  The engine runs 1,000 randomized 60-year paths using Geometric Brownian Motion. Rather than applying a single global volatility, <strong>each asset wrapper uses its own specific annual volatility ($\sigma$)</strong>:
                 </p>
-                <div className="p-3.5 bg-amber-50/70 border border-amber-200 rounded-xl text-xs space-y-2 text-amber-950">
-                  <strong className="font-bold block flex items-center gap-1.5">
-                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                    Important Modeling Limitation: The Static Withdrawal Assumption
-                  </strong>
-                  <p>
-                    The stochastic engine assumes <strong>fixed, non-negotiable withdrawals</strong>. If a market crash occurs in year two of retirement, the simulation forces the portfolio to liquidate depreciated assets to fund the exact same expenditure target.
-                  </p>
-                  <p>
-                    In reality, real retirees practice dynamic spending (such as Guyton-Klinger guardrails), trimming discretionary spending or pausing travel during bear markets. Because this model does not simulate adaptive spending cuts, the Safe Max Annual Spend figure represents a <strong>rigid, conservative lower bound</strong>.
-                  </p>
-                </div>
+                <ul className="list-disc pl-5 space-y-1 text-xs text-slate-600">
+                  <li><strong>80–100% Equities:</strong> 15.5% annual volatility (capturing realistic market swings).</li>
+                  <li><strong>Bonds / Fixed Income:</strong> 3.0% annual volatility.</li>
+                  <li><strong>Cash / Money Market:</strong> 0.5% annual volatility (extremely low fluctuation).</li>
+                </ul>
               </section>
 
-              {/* 11. Asset Allocations & Fund Types */}
+              {/* 12. Asset Allocations & Fund Types */}
               <section id="doc-risk-profiles" className="space-y-4 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">11</span>
+                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">12</span>
                   Asset Allocations & Fund Types
                 </h3>
-                <p>
-                  The model categorizes portfolio holdings by their underlying equity and fixed income composition rather than subjective risk labels. Each category carries an expected real return (net of inflation) that drives both the baseline forecast and Monte Carlo trials:
-                </p>
-
                 <div className="space-y-3 text-xs">
                   <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 font-bold block">80–100% Equities (Expected Real Return: ~4.44% pa / Nominal: 7.05%)</strong>
-                    <p className="text-slate-600">
-                      <strong>Typical Holdings:</strong> Global index trackers, broad market equity ETFs, all-cap funds (e.g., Vanguard FTSE Global All Cap, MSCI World, S&P 500, Vanguard LifeStrategy 100).
-                    </p>
+                    <strong className="text-slate-900 font-bold block">80–100% Equities (Expected Real: ~4.44% pa / σ: 15.5%)</strong>
+                    <p className="text-slate-600">Global index trackers, all-cap funds, S&P 500, Vanguard LifeStrategy 100.</p>
                   </div>
-
                   <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 font-bold block">60–80% Equities (Expected Real Return: ~3.72% pa / Nominal: 6.31%)</strong>
-                    <p className="text-slate-600">
-                      <strong>Typical Holdings:</strong> Growth-oriented multi-asset funds and standard workplace pension default funds (e.g., Vanguard LifeStrategy 80, HSBC Global Strategy Dynamic).
-                    </p>
+                    <strong className="text-slate-900 font-bold block">60–80% Equities (Expected Real: ~3.72% pa / σ: 11.5%)</strong>
+                    <p className="text-slate-600">Vanguard LifeStrategy 80, workplace default growth funds.</p>
                   </div>
-
                   <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 font-bold block">40–60% Equities (Expected Real Return: ~3.00% pa / Nominal: 5.58%)</strong>
-                    <p className="text-slate-600">
-                      <strong>Typical Holdings:</strong> Classic balanced portfolios with moderate bond diversification (e.g., traditional 60/40 or 50/50 portfolios, Vanguard LifeStrategy 60).
-                    </p>
+                    <strong className="text-slate-900 font-bold block">40–60% Equities (Expected Real: ~3.00% pa / σ: 8.0%)</strong>
+                    <p className="text-slate-600">Classic balanced 60/40 portfolios, Vanguard LifeStrategy 60.</p>
                   </div>
-
                   <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 font-bold block">20–40% Equities (Expected Real Return: ~2.28% pa / Nominal: 4.84%)</strong>
-                    <p className="text-slate-600">
-                      <strong>Typical Holdings:</strong> Cautious allocation funds emphasizing capital preservation (e.g., Vanguard LifeStrategy 20 or 40, defensive multi-asset funds).
-                    </p>
+                    <strong className="text-slate-900 font-bold block">20–40% Equities (Expected Real: ~2.28% pa / σ: 5.5%)</strong>
+                    <p className="text-slate-600">Cautious capital preservation funds, Vanguard LifeStrategy 20/40.</p>
                   </div>
-
                   <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 font-bold block">High interest Cash Savings, Fixed Income, Bonds (Expected Real Return: ~1.56% pa / Nominal: 4.10%)</strong>
-                    <p className="text-slate-600">
-                      <strong>Typical Holdings:</strong> UK Gilts, global aggregate bond index funds, investment-grade corporate bond funds, and competitive fixed-term cash deposits.
-                    </p>
+                    <strong className="text-slate-900 font-bold block">High interest Cash Savings, Fixed Income, Bonds (Expected Real: ~1.56% pa / σ: 3.0%)</strong>
+                    <p className="text-slate-600">UK Gilts, investment-grade corporate bonds, fixed-term bonds.</p>
                   </div>
-
                   <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 font-bold block">instant cash savings/money market (Expected Real Return: ~-0.50% pa / Nominal: 1.99%)</strong>
-                    <p className="text-slate-600">
-                      <strong>Typical Holdings:</strong> Standard easy-access bank accounts, short-term treasury bills, and overnight money market funds (e.g., SONIA-tracking funds like CSH2).
-                    </p>
+                    <strong className="text-slate-900 font-bold block">instant cash savings/money market (Expected Real: ~-0.50% pa / σ: 0.5%)</strong>
+                    <p className="text-slate-600">Easy-access bank savings, short-term treasury bills, SONIA funds (e.g. CSH2).</p>
                   </div>
-                </div>
-
-                <div className="p-3.5 bg-blue-50/60 border border-blue-200/80 rounded-xl text-xs space-y-2 text-slate-700">
-                  <strong className="text-blue-950 font-bold block">Key Principles Regarding Returns & Volatility:</strong>
-                  <p>
-                    <strong>1. Today's Returns vs. Long-Term Generalized Averages:</strong> Current cash savings yields and gilt yields change with the central bank base rate. The return figures above are generalized, multi-decade historical real averages (net of CPI inflation) used to drive the baseline forecast and Monte Carlo simulations.
-                  </p>
-                  <p>
-                    <strong>2. Risk and Return Relationship:</strong> Higher-equity allocations carry higher year-to-year volatility and sharper drawdowns during market corrections, but have historically delivered higher net compounding growth over 20+ year retirement horizons.
-                  </p>
-                  <p>
-                    <strong>3. Customizing Return Rates:</strong> You can edit the real and nominal percentage returns for each allocation tier inside the <strong>Config & Assumptions</strong> tab. Small changes compound significantly over a 40–60 year simulation, so modify them only if you have a specific, deliberate investment basis.
-                  </p>
                 </div>
               </section>
 
