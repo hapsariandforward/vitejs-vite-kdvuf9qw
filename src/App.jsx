@@ -3019,5 +3019,3 @@ export default function App() {
                         <text y={24} textAnchor="middle" fill="#b45309" fontSize="10" fontWeight="bold">Retire M ({Number(plan.demographics.retireAgeSelf) || 60})</text>
                       </g>
                     )}
-
-                    {(NumberI encountered an error doing what you asked. Could you try again?
