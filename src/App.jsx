@@ -252,7 +252,9 @@ export default function App() {
       if (cached) {
         const parsed = JSON.parse(cached);
         if (!parsed.riskProfiles) parsed.riskProfiles = DEFAULT_RISK_PROFILES;
+        if (!parsed.demographics) parsed.demographics = BLANK_PLAN.demographics;
         if (!parsed.demographics.planningMode) parsed.demographics.planningMode = 'couple';
+        if (!parsed.spending) parsed.spending = BLANK_PLAN.spending;
         if (!parsed.spending.decumulationPolicy) parsed.spending.decumulationPolicy = 'Bracket Fill';
         return parsed;
       }
@@ -408,7 +410,6 @@ export default function App() {
       setActiveScenarioId(id);
       setPlan(JSON.parse(JSON.stringify(selected.data)));
       setSimResult(null);
-      // Reset sandbox adjustments to loaded plan
       const fresh = {};
       selected.data.accounts.forEach(a => {
         fresh[a.id] = { contrib: Number(a.contrib) || 0, growth: Number(a.growth) || 0 };
@@ -431,7 +432,7 @@ export default function App() {
   };
 
   // =========================================================================
-  // 3. UNIFIED SIMULATION ENGINE
+  // UNIFIED SIMULATION ENGINE
   // =========================================================================
   const runEngineYear = (t, potsMap, planState, regimeOrShock = 'expected', tracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false }) => {
     const planIsCouple = planState.demographics.planningMode !== 'single';
@@ -553,7 +554,7 @@ export default function App() {
 
       const pclsHeadroom = Math.max(0, lsaCap - (potOwner === 'Myself' ? tracking.cumPclsSelf : tracking.cumPclsPart));
       const taxBase = potOwner === 'Myself' ? currentTaxableSelf : currentTaxablePart;
-      
+
       if (taxBase >= maxTaxableCeiling) return 0;
 
       const grossNeeded = grossPensionNeededForNet(netNeeded, taxBase, planState.config, isFullLump, pclsHeadroom, maxTaxableCeiling);
@@ -570,17 +571,17 @@ export default function App() {
         else tracking.cumPclsPart += taxFreeTaken;
       }
       const taxableTaken = actualGross - taxFreeTaken;
-      
+
       const currentNet = calculateUKNetIncome(taxBase, planState.config);
       const newNet = calculateUKNetIncome(taxBase + taxableTaken, planState.config);
-      
+
       if (potOwner === 'Myself') currentTaxableSelf += taxableTaken;
       else currentTaxablePart += taxableTaken;
 
       return taxFreeTaken + (newNet - currentNet);
     };
 
-    // 5. One-off Capital Costs (Grossed up for tax if spilled into pensions)
+    // 5. One-off Capital Costs
     let pre58Insolvent = false;
     const costThisYear = planState.oneOffCosts.filter(c => {
       const itemYear = c.date ? parseInt(c.date.slice(0, 4)) : (Number(c.year) || year);
@@ -592,7 +593,7 @@ export default function App() {
       const priority = planIsCouple
         ? ['cash_self', 'cash_part', 'other_self', 'other_part', 'isa_self', 'isa_part']
         : ['cash_self', 'other_self', 'isa_self'];
-      
+
       for (const pid of priority) {
         if (rem <= 0) break;
         const p = Math.min(potsMap[pid] || 0, rem);
@@ -615,13 +616,13 @@ export default function App() {
       }
     }
 
-    // 6. Target Spend Demand (Two Optional Taper Phases)
+    // 6. Target Spend Demand
     let annualLivingTarget = 0;
     const isRetired = planIsCouple ? (!workingSelf || !workingPart) : !workingSelf;
 
     if (isRetired && targetSpend > 0) {
       let currentSpend = targetSpend;
-      
+
       const t1Age = Number(planState.spending.taper1Age);
       const t1Rate = (Number(planState.spending.taper1Rate) || 0) / 100;
       if (t1Age > 0 && ageSelf >= t1Age && t1Rate > 0) {
@@ -637,7 +638,7 @@ export default function App() {
       annualLivingTarget = currentSpend;
     }
 
-    // 7. Decumulation Waterfall & Surplus Reinvestment (6-Month Buffer Cap)
+    // 7. Decumulation Waterfall & Surplus Reinvestment
     let netDemand = Math.max(0, annualLivingTarget - totalNetGuaranteed);
     let demandSelf = 0;
     let demandPart = 0;
@@ -681,12 +682,12 @@ export default function App() {
       }
 
       const drawTier = (pSelfId, pPartId) => {
-        const pullS = Math.min(potsMap[pSelfId], demandSelf);
+        const pullS = Math.min(potsMap[pSelfId] || 0, demandSelf);
         potsMap[pSelfId] -= pullS;
         demandSelf -= pullS;
 
         if (planIsCouple) {
-          const pullP = Math.min(potsMap[pPartId], demandPart);
+          const pullP = Math.min(potsMap[pPartId] || 0, demandPart);
           potsMap[pPartId] -= pullP;
           demandPart -= pullP;
 
@@ -838,14 +839,14 @@ export default function App() {
       }
     }
 
-    // 8. Asset Compounding (Stochastic vs 100% Empirical Historical)
+    // 8. Asset Compounding (Stochastic vs Empirical Historical)
     const compoundFactor = isYearZero ? yf : 1.0;
     planState.accounts.forEach(acc => {
       if (!planIsCouple && acc.owner === 'Partner') return;
       const profile = (planState.riskProfiles && planState.riskProfiles[acc.risk]) 
         ? planState.riskProfiles[acc.risk] 
         : (DEFAULT_RISK_PROFILES[acc.risk] || DEFAULT_RISK_PROFILES['High Risk']);
-      
+
       const realRate = (Number(profile.real) || 0) / 100;
       const luckyRate = (Number(profile.lucky) || 0) / 100;
       const unluckyRate = (Number(profile.unlucky) || 0) / 100;
@@ -864,13 +865,13 @@ export default function App() {
           const wStock = RISK_EQUITY_WEIGHTS[acc.risk] !== undefined ? RISK_EQUITY_WEIGHTS[acc.risk] : 0.90;
           growthRate = (wStock * histPoint.s + (1 - wStock) * histPoint.b) / 100;
         }
-      } else if (typeof regimeOrShock === 'object' && regimeOrShock !== null) {
+      } else if (typeof regimeOrShock === 'object' && regimeOrShock !== null && regimeOrShock.z !== undefined) {
         const z = regimeOrShock.z;
         const assetDrift = realRate - 0.5 * assetVol * assetVol;
         growthRate = Math.exp(assetDrift + assetVol * z) - 1;
       }
 
-      potsMap[acc.id] = Math.max(0, potsMap[acc.id] * (1 + growthRate * compoundFactor));
+      potsMap[acc.id] = Math.max(0, (potsMap[acc.id] || 0) * (1 + growthRate * compoundFactor));
     });
 
     const totalSelf = (potsMap.pen_self || 0) + (potsMap.isa_self || 0) + (potsMap.other_self || 0) + (potsMap.cash_self || 0);
@@ -901,7 +902,7 @@ export default function App() {
     };
   };
 
-  // 4. Deterministic Multi-Regime Timeline (Baseline)
+  // Deterministic Multi-Regime Timeline (Baseline)
   const timelineData = useMemo(() => {
     const rows = [];
     const ageSelfStart = Number(plan.demographics.currentAgeSelf) || 40;
@@ -1008,7 +1009,6 @@ export default function App() {
     const sbRetRow = sandboxTimeline.find(r => r.ageSelf === retAge) || sandboxTimeline[0];
     const retirementDelta = sbRetRow.totalCombined - baseRetRow.totalCombined;
 
-    // Calculate total extra capital contributed over accumulation period
     const ageStart = Number(plan.demographics.currentAgeSelf) || 40;
     const accumYears = Math.max(0, retAge - ageStart);
 
@@ -1088,7 +1088,7 @@ export default function App() {
     });
   };
 
-  // 4B. Dedicated Historical Backtest Timeline (Starts from Today at selected start year)
+  // Dedicated Historical Backtest Timeline
   const historicalTimeline = useMemo(() => {
     const rows = [];
     const ageSelfStart = Number(plan.demographics.currentAgeSelf) || 40;
@@ -1120,7 +1120,6 @@ export default function App() {
     return rows;
   }, [plan, isCouple, activeHistoricalStartYear]);
 
-  // Historical Backtest Analysis Metrics
   const historicalMetrics = useMemo(() => {
     if (!historicalTimeline.length) return null;
     const startVal = historicalTimeline[0]?.totalCombined || 0;
@@ -1153,6 +1152,135 @@ export default function App() {
       };
     });
   }, [timelineData, plan.activeProfileView, isCouple]);
+
+  // =========================================================================
+  // MONTE CARLO STOCHASTIC SIMULATION HANDLERS
+  // =========================================================================
+  const runSingleTrial = (planState, spendOverride = null) => {
+    const testPlan = spendOverride !== null
+      ? { ...planState, spending: { ...planState.spending, targetSpend: spendOverride } }
+      : planState;
+
+    const ageSelfStart = Number(testPlan.demographics.currentAgeSelf) || 40;
+    const terminalAge = Number(testPlan.demographics.terminalAge) || 100;
+    const totalYears = Math.max(1, terminalAge - ageSelfStart);
+
+    const pots = {};
+    testPlan.accounts.forEach(acc => {
+      pots[acc.id] = Number(acc.balance) || 0;
+    });
+
+    const tracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false };
+    let failed = false;
+
+    for (let t = 0; t <= totalYears; t++) {
+      let u1 = 0, u2 = 0;
+      while (u1 === 0) u1 = Math.random();
+      while (u2 === 0) u2 = Math.random();
+      const z = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+
+      const step = runEngineYear(t, pots, testPlan, { z }, tracking);
+
+      if (step.totalCombined <= (Number(testPlan.config.solvencyFloor) || 0) || step.unmetDemand > 5 || step.pre58Insolvent) {
+        failed = true;
+      }
+    }
+
+    const terminalPot = (pots.pen_self || 0) + (pots.isa_self || 0) + (pots.other_self || 0) + (pots.cash_self || 0) +
+      (testPlan.demographics.planningMode !== 'single'
+        ? ((pots.pen_part || 0) + (pots.isa_part || 0) + (pots.other_part || 0) + (pots.cash_part || 0))
+        : 0);
+
+    return {
+      survived: !failed,
+      terminalPot: Math.max(0, terminalPot)
+    };
+  };
+
+  const handleRunMC = () => {
+    setIsSimulating(true);
+    setTimeout(() => {
+      const NUM_TRIALS = 1000;
+      const terminalPots = [];
+      let successCount = 0;
+      const currentSpend = Number(plan.spending.targetSpend) || 0;
+
+      for (let i = 0; i < NUM_TRIALS; i++) {
+        const res = runSingleTrial(plan);
+        if (res.survived) successCount++;
+        terminalPots.push(res.terminalPot);
+      }
+
+      terminalPots.sort((a, b) => a - b);
+      const p10 = terminalPots[Math.floor(NUM_TRIALS * 0.10)] || 0;
+      const median = terminalPots[Math.floor(NUM_TRIALS * 0.50)] || 0;
+      const p90 = terminalPots[Math.floor(NUM_TRIALS * 0.90)] || 0;
+
+      setSimResult({
+        type: 'test',
+        title: 'Monte Carlo Stress Test',
+        spend: currentSpend,
+        successRate: (successCount / NUM_TRIALS) * 100,
+        p10Terminal: p10,
+        medianTerminal: median,
+        p90Terminal: p90
+      });
+      setIsSimulating(false);
+    }, 30);
+  };
+
+  const handleOptimize = () => {
+    setIsOptimizing(true);
+    setTimeout(() => {
+      const targetRate = targetConfidence;
+      let low = 0;
+      let high = 150000;
+
+      // Fast binary search across 10 iterations to locate sustainable threshold
+      for (let iter = 0; iter < 10; iter++) {
+        const mid = Math.round((low + high) / 2 / 250) * 250;
+        let succ = 0;
+        const testTrials = 250;
+        for (let i = 0; i < testTrials; i++) {
+          if (runSingleTrial(plan, mid).survived) succ++;
+        }
+        const rate = (succ / testTrials) * 100;
+        if (rate >= targetRate) {
+          low = mid;
+        } else {
+          high = mid;
+        }
+      }
+
+      const optimalSpend = Math.round(low / 250) * 250;
+
+      // Rigorous 1,000 trial verification run
+      const NUM_TRIALS = 1000;
+      const terminalPots = [];
+      let finalSucc = 0;
+      for (let i = 0; i < NUM_TRIALS; i++) {
+        const res = runSingleTrial(plan, optimalSpend);
+        if (res.survived) finalSucc++;
+        terminalPots.push(res.terminalPot);
+      }
+
+      terminalPots.sort((a, b) => a - b);
+      const p10 = terminalPots[Math.floor(NUM_TRIALS * 0.10)] || 0;
+      const median = terminalPots[Math.floor(NUM_TRIALS * 0.50)] || 0;
+      const p90 = terminalPots[Math.floor(NUM_TRIALS * 0.90)] || 0;
+
+      setSimResult({
+        type: 'optimize',
+        title: `Safe Max Annual Spend (${targetConfidence}% Target)`,
+        spend: optimalSpend,
+        successRate: (finalSucc / NUM_TRIALS) * 100,
+        p10Terminal: p10,
+        medianTerminal: median,
+        p90Terminal: p90
+      });
+      setIsOptimizing(false);
+    }, 30);
+  };
 
   // D3 Geometry for Baseline Chart
   const visibleData = useMemo(() => {
@@ -1208,7 +1336,6 @@ export default function App() {
     return paths;
   }, [visibleData, activeSeries, xScale, yScale]);
 
-  // Sandbox overlaid line on main chart
   const sandboxLinePath = useMemo(() => {
     if (!isSandboxModified || !sandboxTimeline.length) return null;
     const visibleSandbox = sandboxTimeline.filter(d => d.ageSelf <= maxVisibleAge);
@@ -1219,7 +1346,6 @@ export default function App() {
     return lineGen(visibleSandbox);
   }, [isSandboxModified, sandboxTimeline, maxVisibleAge, xScale, yScale]);
 
-  // D3 Geometry for Historical Chart
   const histMaxY = useMemo(() => {
     let max = 0;
     historicalTimeline.forEach(d => {
@@ -1347,7 +1473,9 @@ export default function App() {
         try {
           const parsed = JSON.parse(event.target.result);
           if (!parsed.riskProfiles) parsed.riskProfiles = DEFAULT_RISK_PROFILES;
+          if (!parsed.demographics) parsed.demographics = BLANK_PLAN.demographics;
           if (!parsed.demographics.planningMode) parsed.demographics.planningMode = 'couple';
+          if (!parsed.spending) parsed.spending = BLANK_PLAN.spending;
           if (!parsed.spending.decumulationPolicy) parsed.spending.decumulationPolicy = 'Bracket Fill';
           setPlan(parsed);
         } catch (err) {
@@ -1450,7 +1578,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* PERSISTENT SCENARIO TOOLBAR (Visible across all tabs) */}
+        {/* PERSISTENT SCENARIO TOOLBAR */}
         <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3 flex-wrap">
             <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
@@ -1978,7 +2106,6 @@ export default function App() {
         {/* TAB 2: CONFIG & ASSUMPTIONS */}
         {activeTab === 'config' && (
           <div className="space-y-6">
-            {/* Decumulation Strategies Card */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
                 <Sliders className="w-4 h-4 text-blue-600" /> Decumulation & Pension Withdrawal Methodology
@@ -2206,54 +2333,6 @@ export default function App() {
                 </div>
               </div>
             </div>
-
-            {/* BASELINE MODEL ASSUMPTIONS REFERENCE TABLE */}
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
-              <div>
-                <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                  <ShieldCheck className="w-4 h-4 text-blue-600" /> Baseline Model Assumptions
-                </h3>
-                <span className="text-[11px] text-slate-500">Core architectural, actuarial, and fiscal baselines applied across all projection regimes.</span>
-              </div>
-
-              <table className="w-full text-left text-xs border-collapse">
-                <thead>
-                  <tr className="border-b border-slate-200 text-slate-500 font-semibold">
-                    <th className="pb-2 w-1/4">Model Parameter</th>
-                    <th className="pb-2 w-1/5">Baseline Setting</th>
-                    <th className="pb-2">Explanatory Notes & Methodology</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 leading-relaxed text-slate-700">
-                  <tr className="hover:bg-slate-50/60">
-                    <td className="py-2.5 font-bold text-slate-900">State Pension Inflation Indexation</td>
-                    <td className="py-2.5 font-mono text-blue-700 font-semibold">Triple Lock (CPI)</td>
-                    <td className="py-2.5 text-slate-600">State Pension payments are assumed to increase annually in line with inflation (Triple Lock / CPI), maintaining constant real purchasing power throughout retirement.</td>
-                  </tr>
-                  <tr className="hover:bg-slate-50/60">
-                    <td className="py-2.5 font-bold text-slate-900">Target Spend Indexation</td>
-                    <td className="py-2.5 font-mono text-blue-700 font-semibold">100% (CPI)</td>
-                    <td className="py-2.5 text-slate-600">Target retirement living expenditures adjust annually with inflation (100% CPI) to ensure lifestyle purchasing power is fully preserved over time.</td>
-                  </tr>
-                  <tr className="hover:bg-slate-50/60">
-                    <td className="py-2.5 font-bold text-slate-900">Surplus Income Allocation</td>
-                    <td className="py-2.5 font-mono text-emerald-700 font-semibold">Cash Buffer (with ISA Sweep)</td>
-                    <td className="py-2.5 text-slate-600">Any surplus retirement income generated beyond annual living expenditures is swept into Tier 1 Cash Savings up to a 6-month buffer; excess beyond this cap is reinvested into S&S ISAs to eliminate cash drag.</td>
-                  </tr>
-                  <tr className="hover:bg-slate-50/60">
-                    <td className="py-2.5 font-bold text-slate-900">Projection Horizon</td>
-                    <td className="py-2.5 font-mono text-slate-900 font-semibold">Age 100 (60–65 Yrs)</td>
-                    <td className="py-2.5 text-slate-600">Cash flows, withdrawals, and portfolio balances are continuously modeled from current age through to Age 100 to eliminate longevity risk.</td>
-                  </tr>
-                  <tr className="hover:bg-slate-50/60">
-                    <td className="py-2.5 font-bold text-slate-900">Spousal Expenditure Split</td>
-                    <td className="py-2.5 font-mono text-indigo-700 font-semibold">50% / 50%</td>
-                    <td className="py-2.5 text-slate-600">Joint living expenditures are drawn equally between spouses until one partner's liquid assets deplete, after which the remaining partner covers remaining costs with marginal tax band tracking.</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-
           </div>
         )}
 
@@ -2455,7 +2534,6 @@ export default function App() {
                       </g>
                     ))}
 
-                    {/* Milestones */}
                     {(Number(plan.demographics.retireAgeSelf) || 60) <= maxVisibleAge && (
                       <g transform={`translate(${xScale(Number(plan.demographics.retireAgeSelf) || 60)}, 0)`}>
                         <line y2={innerHeight} stroke="#f59e0b" strokeWidth="1.5" strokeDasharray="4,4" />
@@ -2488,7 +2566,6 @@ export default function App() {
                       </g>
                     )}
 
-                    {/* Standard Series */}
                     {SERIES_CONFIG.map(s => {
                       if (!activeSeries[s.id] || !pathGenerators[s.id]) return null;
                       return (
@@ -2496,7 +2573,6 @@ export default function App() {
                       );
                     })}
 
-                    {/* Overlaid Sandbox Trajectory */}
                     {sandboxLinePath && (
                       <path
                         d={sandboxLinePath}
@@ -2578,7 +2654,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* CONTRIBUTION & ESCALATION SANDBOX (Replaces Plan Benchmarks) */}
+            {/* CONTRIBUTION & ESCALATION SANDBOX */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-5">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
                 <div>
@@ -2799,7 +2875,6 @@ export default function App() {
               </p>
             </div>
 
-            {/* Scenario Preset Selector & Dynamic Start Year */}
             <div className="bg-white border border-slate-200/90 rounded-2xl p-5 shadow-xs space-y-4">
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                 <div>
@@ -2819,7 +2894,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Presets */}
               <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
                 {HISTORICAL_PRESETS.map(p => {
                   const isValid = p.year <= maxHistoricalStartYear;
@@ -2850,7 +2924,6 @@ export default function App() {
                 })}
               </div>
 
-              {/* Slider */}
               <div className="pt-2 flex items-center gap-3">
                 <span className="text-xs font-mono text-slate-400">1928</span>
                 <input
@@ -2865,7 +2938,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Historical Outcome Metrics */}
             {historicalMetrics && (
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
                 <div className={`p-4 rounded-2xl border shadow-xs ${
@@ -2915,7 +2987,6 @@ export default function App() {
               </div>
             )}
 
-            {/* Historical Trajectory Chart */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex justify-between items-center">
                 <div>
@@ -2941,7 +3012,6 @@ export default function App() {
                       </g>
                     ))}
 
-                    {/* Milestones */}
                     {(Number(plan.demographics.retireAgeSelf) || 60) <= maxVisibleAge && (
                       <g transform={`translate(${xScale(Number(plan.demographics.retireAgeSelf) || 60)}, 0)`}>
                         <line y2={innerHeight} stroke="#f59e0b" strokeWidth="1.5" strokeDasharray="4,4" />
@@ -2950,497 +3020,4 @@ export default function App() {
                       </g>
                     )}
 
-                    {(Number(plan.demographics.statePensionAge) || 68) <= maxVisibleAge && (
-                      <g transform={`translate(${xScale(Number(plan.demographics.statePensionAge) || 68)}, 0)`}>
-                        <line y2={innerHeight} stroke="#059669" strokeWidth="1.5" strokeDasharray="4,4" />
-                        <rect x={-38} y={32} width={76} height={20} rx={4} fill="#d1fae5" stroke="#a7f3d0" />
-                        <text y={46} textAnchor="middle" fill="#065f46" fontSize="10" fontWeight="bold">State Pen ({Number(plan.demographics.statePensionAge) || 68})</text>
-                      </g>
-                    )}
-
-                    {/* Historical Curve */}
-                    <path
-                      d={histLinePath}
-                      fill="none"
-                      stroke="#4f46e5"
-                      strokeWidth="3.5"
-                      strokeLinecap="round"
-                    />
-
-                    {/* Interactive overlay */}
-                    <rect
-                      width={innerWidth}
-                      height={innerHeight}
-                      fill="transparent"
-                      onMouseMove={(e) => {
-                        const rect = e.currentTarget.getBoundingClientRect();
-                        const age = Math.round(xScale.invert(e.clientX - rect.left));
-                        const point = historicalTimeline.find(d => d.ageSelf === age);
-                        if (point) setHoveredHistPoint(point);
-                        else setHoveredHistPoint(null);
-                      }}
-                    />
-
-                    {hoveredHistPoint && (
-                      <g transform={`translate(${xScale(hoveredHistPoint.ageSelf)}, 0)`}>
-                        <line y2={innerHeight} stroke="#6366f1" strokeWidth="1.5" strokeDasharray="2,2" />
-                        <circle cy={histYScale(hoveredHistPoint.totalCombined)} r="5" fill="#4f46e5" stroke="#ffffff" strokeWidth="2" />
-                      </g>
-                    )}
-                  </g>
-                </svg>
-
-                {hoveredHistPoint && (
-                  <div className="absolute top-4 left-24 bg-white/95 border border-slate-200 p-3 rounded-xl shadow-lg text-xs space-y-1 backdrop-blur-md pointer-events-none font-mono">
-                    <div className="font-bold text-slate-800 border-b border-slate-100 pb-1 flex justify-between gap-4 font-sans">
-                      <span>Age {hoveredHistPoint.ageSelf} ({hoveredHistPoint.year})</span>
-                      <span className="text-indigo-600 font-bold">Historical Year: {hoveredHistPoint.histYear}</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-1">
-                      <div className="text-indigo-700 font-bold">Total Pot: {formatGBP(hoveredHistPoint.totalCombined)}</div>
-                      <div className="text-slate-600">Spend: {formatGBP(hoveredHistPoint.targetSpend)}/yr</div>
-                      <div className={hoveredHistPoint.histStockReturn >= 0 ? 'text-emerald-600' : 'text-rose-600'}>
-                        Stocks: {hoveredHistPoint.histStockReturn > 0 ? '+' : ''}{hoveredHistPoint.histStockReturn}%
-                      </div>
-                      <div className={hoveredHistPoint.histBondReturn >= 0 ? 'text-emerald-600' : 'text-rose-600'}>
-                        Bonds: {hoveredHistPoint.histBondReturn > 0 ? '+' : ''}{hoveredHistPoint.histBondReturn}%
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Historical Ledger Table */}
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
-              <div className="flex justify-between items-center">
-                <div>
-                  <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                    <FileSpreadsheet className="w-4 h-4 text-indigo-600" />
-                    Historical Backtest Cash Flow Ledger
-                  </h3>
-                  <span className="text-xs text-slate-500">Year-by-year cash flows and historical returns applied from start year {activeHistoricalStartYear}.</span>
-                </div>
-              </div>
-
-              <div className="overflow-x-auto max-h-[500px] border border-slate-200 rounded-xl">
-                <table className="w-full text-left text-xs border-collapse font-mono whitespace-nowrap">
-                  <thead className="sticky top-0 bg-slate-100 border-b border-slate-200 text-slate-600 z-10 font-bold">
-                    <tr>
-                      <th className="p-2.5 sticky left-0 bg-slate-100">Year</th>
-                      <th className="p-2.5">t</th>
-                      <th className="p-2.5">Age (M)</th>
-                      <th className="p-2.5 text-indigo-700 font-bold">Simulated Year</th>
-                      <th className="p-2.5 text-emerald-700">Hist Stocks</th>
-                      <th className="p-2.5 text-sky-700">Hist Bonds</th>
-                      <th className="p-2.5">Work</th>
-                      <th className="p-2.5">Spend Demand</th>
-                      <th className="p-2.5">State Pension</th>
-                      <th className="p-2.5 text-amber-700">Net Drawdown</th>
-                      <th className="p-2.5 text-indigo-900 font-black">Combined Real Pot</th>
-                      <th className="p-2.5 text-sky-700">Pensions</th>
-                      <th className="p-2.5 text-teal-700">ISAs</th>
-                      <th className="p-2.5 text-amber-700">Other</th>
-                      <th className="p-2.5 text-slate-500">Cash</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {historicalTimeline.map((r, idx) => (
-                      <tr key={r.year} className={`${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'} hover:bg-indigo-50/40 transition-colors`}>
-                        <td className="p-2.5 font-bold text-slate-900 sticky left-0 bg-inherit border-r border-slate-100">{r.year}</td>
-                        <td className="p-2.5 text-slate-400">{r.t}</td>
-                        <td className="p-2.5">{r.ageSelf}</td>
-                        <td className="p-2.5 font-bold text-indigo-700 bg-indigo-50/30">{r.histYear}</td>
-                        <td className={`p-2.5 font-bold ${r.histStockReturn >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
-                          {r.histStockReturn > 0 ? '+' : ''}{r.histStockReturn}%
-                        </td>
-                        <td className={`p-2.5 font-bold ${r.histBondReturn >= 0 ? 'text-sky-700' : 'text-rose-700'}`}>
-                          {r.histBondReturn > 0 ? '+' : ''}{r.histBondReturn}%
-                        </td>
-                        <td className="p-2.5 text-center">{r.workingSelf}</td>
-                        <td className="p-2.5 text-slate-700">{formatGBP(r.targetSpend)}</td>
-                        <td className="p-2.5 text-slate-500">{formatGBP(r.spSelf)}</td>
-                        <td className="p-2.5 text-amber-700 font-bold">{formatGBP(r.netDrawdown)}</td>
-                        <td className="p-2.5 font-black text-indigo-950 bg-indigo-50/50">{formatGBP(r.totalCombined)}</td>
-                        <td className="p-2.5 text-sky-700">{formatGBP(r.pensions)}</td>
-                        <td className="p-2.5 text-teal-700">{formatGBP(r.isas)}</td>
-                        <td className="p-2.5 text-amber-700">{formatGBP(r.other)}</td>
-                        <td className="p-2.5 text-slate-500">{formatGBP(r.cash)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* TAB 5: AUDIT DATA TABLE */}
-        {activeTab === 'audit' && (
-          <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
-            <div className="flex justify-between items-center flex-wrap gap-2">
-              <div>
-                <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                  <FileSpreadsheet className="w-4 h-4 text-blue-600" /> Year-by-Year Cash Flow Audit
-                </h2>
-                <p className="text-xs text-slate-500">Granular annual ledger matching the underlying spreadsheet columns.</p>
-              </div>
-              <button
-                onClick={handleExportJSON}
-                className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border border-slate-200"
-              >
-                <Download className="w-3.5 h-3.5" /> Export Audit JSON
-              </button>
-            </div>
-
-            <div className="overflow-x-auto max-h-[600px] border border-slate-200 rounded-xl">
-              <table className="w-full text-left text-xs border-collapse font-mono whitespace-nowrap">
-                <thead className="sticky top-0 bg-slate-100 border-b border-slate-200 text-slate-600 z-10 font-bold">
-                  <tr>
-                    <th className="p-2.5 sticky left-0 bg-slate-100">Year</th>
-                    <th className="p-2.5">t</th>
-                    <th className="p-2.5">Age (M)</th>
-                    {isCouple && <th className="p-2.5">Age (P)</th>}
-                    <th className="p-2.5">Work (M)</th>
-                    {isCouple && <th className="p-2.5">Work (P)</th>}
-                    <th className="p-2.5">Spend Demand</th>
-                    <th className="p-2.5">SP (M)</th>
-                    {isCouple && <th className="p-2.5">SP (P)</th>}
-                    <th className="p-2.5">Net Drawdown</th>
-                    <th className="p-2.5 text-blue-700 font-bold">Combined (Real)</th>
-                    <th className="p-2.5 text-purple-700">Combined (Nominal)</th>
-                    <th className="p-2.5 text-emerald-700">Lucky (Real)</th>
-                    <th className="p-2.5 text-rose-700">Unlucky (Real)</th>
-                    <th className="p-2.5">Pensions</th>
-                    <th className="p-2.5">ISAs</th>
-                    <th className="p-2.5">Other</th>
-                    <th className="p-2.5">Cash</th>
-                    <th className="p-2.5">Drawdown Pensions</th>
-                    <th className="p-2.5 text-emerald-700">Pre-58 Liquid Equity</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {timelineData.map((r, idx) => (
-                    <tr key={r.year} className={`${idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'} hover:bg-blue-50/50 transition-colors`}>
-                      <td className="p-2.5 font-bold text-slate-900 sticky left-0 bg-inherit border-r border-slate-100">{r.year}</td>
-                      <td className="p-2.5 text-slate-400">{r.t}</td>
-                      <td className="p-2.5">{r.ageSelf}</td>
-                      {isCouple && <td className="p-2.5">{r.agePart}</td>}
-                      <td className="p-2.5 text-center">{r.workingSelf}</td>
-                      {isCouple && <td className="p-2.5 text-center">{r.workingPart}</td>}
-                      <td className="p-2.5 text-slate-700">{formatGBP(r.targetSpend)}</td>
-                      <td className="p-2.5 text-slate-500">{formatGBP(r.spSelf)}</td>
-                      {isCouple && <td className="p-2.5 text-slate-500">{formatGBP(r.spPart)}</td>}
-                      <td className="p-2.5 text-amber-700 font-bold">{formatGBP(r.netDrawdown)}</td>
-                      <td className="p-2.5 font-bold text-blue-700 bg-blue-50/30">{formatGBP(r.totalCombined)}</td>
-                      <td className="p-2.5 text-purple-700">{formatGBP(r.nominal)}</td>
-                      <td className="p-2.5 text-emerald-700">{formatGBP(r.lucky)}</td>
-                      <td className="p-2.5 text-rose-700">{formatGBP(r.unlucky)}</td>
-                      <td className="p-2.5 text-sky-700">{formatGBP(r.pensions)}</td>
-                      <td className="p-2.5 text-teal-700">{formatGBP(r.isas)}</td>
-                      <td className="p-2.5 text-amber-700">{formatGBP(r.other)}</td>
-                      <td className="p-2.5 text-slate-500">{formatGBP(r.cash)}</td>
-                      <td className="p-2.5 text-rose-700">{formatGBP(r.drawdownPensions)}</td>
-                      <td className="p-2.5 text-emerald-800 font-semibold">{formatGBP(r.pre58LiquidEquity)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {/* TAB 6: DOCUMENTATION */}
-        {activeTab === 'docs' && (
-          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 items-start">
-            
-            <div className="bg-white border border-slate-200/90 rounded-2xl p-5 shadow-xs lg:sticky lg:top-6 space-y-3">
-              <div className="flex items-center gap-2 pb-2 border-b border-slate-100">
-                <BookOpen className="w-4 h-4 text-blue-600" />
-                <span className="font-bold text-xs uppercase tracking-wider text-slate-900">Table of Contents</span>
-              </div>
-              <nav className="space-y-1 text-xs">
-                {[
-                  { id: 'doc-philosophy', label: '1. Architecture & Real Terms' },
-                  { id: 'doc-taper', label: '2. Two-Stage Spending Tapers' },
-                  { id: 'doc-timeline', label: '3. Timeline & Mid-Year Starts' },
-                  { id: 'doc-incomes', label: '4. Guaranteed Income & UK Tax' },
-                  { id: 'doc-gia-tax', label: '5. Note on GIA / Other Tax' },
-                  { id: 'doc-surplus', label: '6. Surplus Income & 6-Mo Cash Cap' },
-                  { id: 'doc-decumulation', label: '7. Decumulation Policies' },
-                  { id: 'doc-pension-rules', label: '8. Phased vs 25% Lump Sum' },
-                  { id: 'doc-spousal', label: '9. Spousal Absorption & Single Mode' },
-                  { id: 'doc-one-offs', label: '10. One-Off Costs & Pension Tax Math' },
-                  { id: 'doc-monte-carlo', label: '11. Monte Carlo & Multi-Sigma Volatility' },
-                  { id: 'doc-hist', label: '12. Historical Backtesting Methodology' },
-                  { id: 'doc-risk-profiles', label: '13. Asset Allocations & Fund Types' },
-                  { id: 'doc-scenarios', label: '14. Saving Scenarios & Browser Storage' }
-                ].map(item => (
-                  <button
-                    key={item.id}
-                    onClick={() => scrollToDocSection(item.id)}
-                    className="w-full text-left py-1.5 px-2 rounded-lg text-slate-600 hover:text-blue-700 hover:bg-blue-50/50 transition-colors block font-medium"
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </nav>
-            </div>
-
-            <div className="lg:col-span-3 space-y-8 bg-white border border-slate-200/90 rounded-2xl p-6 sm:p-8 shadow-xs text-slate-700 text-sm leading-relaxed">
-              
-              <div className="pb-6 border-b border-slate-100">
-                <h2 className="text-xl font-bold text-slate-900">Model Logic & Reference Guide</h2>
-                <p className="text-slate-500 text-xs mt-1">
-                  How the model handles UK tax bands, wrapper liquidation order, asset allocations, volatility, scenarios, and historical sequences.
-                </p>
-              </div>
-
-              {/* 1. Architecture */}
-              <section id="doc-philosophy" className="space-y-3 pt-2">
-                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">1</span>
-                  Architecture & Real Terms
-                </h3>
-                <p>
-                  The model runs entirely in <strong>real terms</strong> (today's purchasing power) rather than nominal pounds. If you enter £30,000/yr, that represents £30,000 of goods and services whether you are 40, 65, or 90. Asset return rates are net of inflation.
-                </p>
-              </section>
-
-              {/* 2. Two-Stage Spending Tapers */}
-              <section id="doc-taper" className="space-y-3 pt-4 border-t border-slate-100">
-                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">2</span>
-                  Two-Stage Lifestyle Spending Tapers
-                </h3>
-                <p>
-                  In empirical retirement research (the "spending smile"), spending naturally declines across distinct life phases:
-                </p>
-                <div className="space-y-2 text-xs">
-                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 font-bold block">Phase 1: The "Go-Go" Years (Retirement to Age 70–75)</strong>
-                    <p className="text-slate-600">Active lifestyle with peak travel, hobbies, home projects, and discretionary spending. Funded at 100% of target living spend.</p>
-                  </div>
-                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 font-bold block">Phase 2: The "Slow-Go" Years (Taper 1, e.g. Age 75)</strong>
-                    <p className="text-slate-600">Energy levels gradually ease, overseas travel becomes domestic or less frequent, and dining out slows. Optional Taper 1 applies a percentage reduction (e.g. 10%–15%).</p>
-                  </div>
-                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 font-bold block">Phase 3: The "No-Go" Years (Taper 2, e.g. Age 85)</strong>
-                    <p className="text-slate-600">Lifestyle centers largely around the home. Baseline living expenditures hit their lowest point. Optional Taper 2 applies a further reduction (e.g. an additional 10%–20% relative to post-Taper 1 income).</p>
-                  </div>
-                </div>
-              </section>
-
-              {/* 3. Timeline */}
-              <section id="doc-timeline" className="space-y-3 pt-4 border-t border-slate-100">
-                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">3</span>
-                  Timeline & Mid-Year Starts
-                </h3>
-                <p>
-                  In Year 0 ($t=0$), contributions and annual growth are scaled by the remaining fraction of the year so balances reflect where you will actually be at year-end.
-                </p>
-              </section>
-
-              {/* 4. Guaranteed Incomes */}
-              <section id="doc-incomes" className="space-y-3 pt-4 border-t border-slate-100">
-                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">4</span>
-                  Guaranteed Income & UK Income Tax
-                </h3>
-                <p>
-                  Before liquidating any invested assets, the model totals your non-portfolio income (State Pension, DB pensions, annuities, consulting). Taxable income is routed through standard UK tax bands (0% PA, 20% Basic, 40% Higher, 45% Additional, with the £100k taper).
-                </p>
-              </section>
-
-              {/* 5. GIA Note */}
-              <section id="doc-gia-tax" className="space-y-3 pt-4 border-t border-slate-100">
-                <h3 className="text-base font-bold text-amber-800 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center text-xs font-bold">5</span>
-                  Note on GIA / Other Investment Taxation
-                </h3>
-                <div className="p-4 bg-amber-50/80 border border-amber-200 rounded-xl text-xs text-amber-900 space-y-2">
-                  <p>
-                    Withdrawals from <strong>Other Investments (GIAs)</strong> are treated as gross = net. We don't model Capital Gains Tax (CGT) or dividend tax because they depend heavily on individual Section 104 cost pooling and Bed & ISA transfers.
-                  </p>
-                </div>
-              </section>
-
-              {/* 6. Surplus Income */}
-              <section id="doc-surplus" className="space-y-3 pt-4 border-t border-slate-100">
-                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">6</span>
-                  Surplus Income & 6-Month Emergency Buffer Cap
-                </h3>
-                <p>
-                  If guaranteed income exceeds your living spend in a given year, portfolio withdrawals drop to £0. The model maintains a maximum emergency buffer of <strong>6 months of living expenses</strong> in Cash Savings; any excess beyond this is swept directly into the owner's <strong>Stocks & Shares ISA</strong> to prevent cash drag.
-                </p>
-              </section>
-
-              {/* 7. Decumulation Waterfall */}
-              <section id="doc-decumulation" className="space-y-3 pt-4 border-t border-slate-100">
-                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">7</span>
-                  Decumulation Policies: UK FIRE vs Tax Smoothing vs Sequential
-                </h3>
-                <div className="space-y-3 pt-1">
-                  <div className="p-4 bg-emerald-50/50 border border-emerald-200 rounded-xl space-y-2 text-xs">
-                    <strong>Option A: UK FIRE Bracket Fill (PA Only)</strong>
-                    <p className="text-slate-700">Draws pension money up to the £12,570 Personal Allowance, then drains ISAs to keep current income tax at 0%.</p>
-                  </div>
-                  <div className="p-4 bg-blue-50/50 border border-blue-200 rounded-xl space-y-2 text-xs">
-                    <strong>Option B: Tax Smoothing (Fill 20% Basic Rate First, Preserve ISAs)</strong>
-                    <p className="text-slate-700">Fills both the 0% Personal Allowance and the 20% Basic Rate Band (up to £50,270) with pension withdrawals before touching ISAs, preserving ISAs as a tax-free emergency buffer for late retirement.</p>
-                  </div>
-                </div>
-              </section>
-
-              {/* 8. Pension Rules */}
-              <section id="doc-pension-rules" className="space-y-3 pt-4 border-t border-slate-100">
-                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">8</span>
-                  Phased Drawdown vs 25% Lump Sum & LSA Cap
-                </h3>
-                <p className="text-xs text-slate-600">
-                  Phased drawdown splits each withdrawal into 25% tax-free PCLS and 75% taxable income. Full 25% Lump Sum takes the entire 25% tax-free lump sum upfront at retirement into cash. Both track the statutory £268,275 Lump Sum Allowance cap.
-                </p>
-              </section>
-
-              {/* 9. Spousal Absorption */}
-              <section id="doc-spousal" className="space-y-3 pt-4 border-t border-slate-100">
-                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">9</span>
-                  Spousal Absorption & Single Planner Logic
-                </h3>
-                <p className="text-xs text-slate-600">
-                  In couple mode, net living spend is split 50/50 and cross-absorbed at each tier. In single mode, 100% of spending demand routes to your own accounts without partner fallbacks.
-                </p>
-              </section>
-
-              {/* 10. One-Off Costs */}
-              <section id="doc-one-offs" className="space-y-3 pt-4 border-t border-slate-100">
-                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">10</span>
-                  One-Off Costs & Liquidation Priority
-                </h3>
-                <p className="text-xs text-slate-600">
-                  One-off capital expenses liquidate non-pension wrappers in sequence: <code>Cash → Other (GIA) → ISAs</code>. This shields large one-off purchases from being pushed into the 40% or 45% income tax band. If non-pension accounts run out, emergency withdrawals from pensions (age 58+) are <strong>grossed up for income tax and PCLS</strong>, preventing phantom tax-free capital.
-                </p>
-              </section>
-
-              {/* 11. Monte Carlo */}
-              <section id="doc-monte-carlo" className="space-y-3 pt-4 border-t border-slate-100">
-                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">11</span>
-                  Monte Carlo & Multi-Sigma Volatility
-                </h3>
-                <p className="text-xs text-slate-600">
-                  The engine runs 1,000 randomized 60-year paths using Geometric Brownian Motion. Rather than applying a single global volatility, each asset wrapper uses its own specific annual volatility ($\sigma$).
-                </p>
-              </section>
-
-              {/* 12. Historical Backtest */}
-              <section id="doc-hist" className="space-y-3 pt-4 border-t border-slate-100">
-                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-xs font-bold">12</span>
-                  Historical Backtesting Methodology (1928–2025)
-                </h3>
-                <div className="space-y-2 text-xs text-slate-600">
-                  <p>
-                    <strong>1. Starts from Today:</strong> The historical sequence starts in Year $t=0$ at your current age. If you are 40 and choose 1965, you experience 1965–1984 while working and saving, and enter retirement at 60 right into the 1985–2000 bull market.
-                  </p>
-                  <p>
-                    <strong>2. Strictly Empirical Horizon:</strong> Selectable start years are capped so your entire lifetime horizon to age 100 runs strictly within recorded market history through 2025 without arbitrary wrap-arounds.
-                  </p>
-                  <p>
-                    <strong>3. Asset Class Weights:</strong> Each wrapper compounds by its weighted real equity and bond returns (e.g. High Risk is 90% S&P 500 / 10% Bonds; Low Risk is 10% S&P 500 / 90% Bonds).
-                  </p>
-                </div>
-              </section>
-
-              {/* 13. Asset Allocations */}
-              <section id="doc-risk-profiles" className="space-y-4 pt-4 border-t border-slate-100">
-                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">13</span>
-                  Asset Allocations & Fund Types
-                </h3>
-                <div className="space-y-3 text-xs">
-                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 font-bold block">80–100% Equities (Expected Real: ~4.44% pa / σ: 15.5%)</strong>
-                    <p className="text-slate-600">Global index trackers, all-cap funds, S&P 500, Vanguard LifeStrategy 100.</p>
-                  </div>
-                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 font-bold block">60–80% Equities (Expected Real: ~3.72% pa / σ: 11.5%)</strong>
-                    <p className="text-slate-600">Vanguard LifeStrategy 80, workplace default growth funds.</p>
-                  </div>
-                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 font-bold block">40–60% Equities (Expected Real: ~3.00% pa / σ: 8.0%)</strong>
-                    <p className="text-slate-600">Classic balanced 60/40 portfolios, Vanguard LifeStrategy 60.</p>
-                  </div>
-                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 font-bold block">20–40% Equities (Expected Real: ~2.28% pa / σ: 5.5%)</strong>
-                    <p className="text-slate-600">Cautious capital preservation funds, Vanguard LifeStrategy 20/40.</p>
-                  </div>
-                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 font-bold block">High interest Cash Savings, Fixed Income, Bonds (Expected Real: ~1.56% pa / σ: 3.0%)</strong>
-                    <p className="text-slate-600">UK Gilts, investment-grade corporate bonds, fixed-term bonds.</p>
-                  </div>
-                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 font-bold block">instant cash savings/money market (Expected Real: ~-0.50% pa / σ: 0.5%)</strong>
-                    <p className="text-slate-600">Easy-access bank savings, short-term treasury bills, SONIA funds (e.g. CSH2).</p>
-                  </div>
-                </div>
-              </section>
-
-              {/* 14. Scenario Saving & Browser Storage */}
-              <section id="doc-scenarios" className="space-y-4 pt-4 border-t border-slate-100">
-                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">14</span>
-                  Saving Scenarios & Browser Storage
-                </h3>
-                <p>
-                  The studio allows you to build, name, and compare multiple financial scenarios side-by-side (such as retiring at 55 vs 60, testing higher living expenditures, or evaluating single vs couple modes).
-                </p>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                  <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1.5">
-                    <div className="flex items-center gap-1.5 font-bold text-slate-900">
-                      <Bookmark className="w-4 h-4 text-blue-600" />
-                      Persistent In-Browser Memory
-                    </div>
-                    <p className="text-slate-600">
-                      All created scenarios and your active working plan are saved directly to your browser's local storage (<code>localStorage</code>). They persist across page reloads, browser restarts, and tab closures without needing any login or cloud database.
-                    </p>
-                  </div>
-
-                  <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1.5">
-                    <div className="flex items-center gap-1.5 font-bold text-slate-900">
-                      <Save className="w-4 h-4 text-indigo-600" />
-                      Save vs. Save as New Scenario
-                    </div>
-                    <p className="text-slate-600">
-                      Use the <strong>Save</strong> button to overwrite and update your currently selected scenario with any recent changes. Use <strong>Save as New Scenario</strong> to branch your current plan into a new separate scenario (using your custom name if typed in, or auto-numbering like "Scenario 2").
-                    </p>
-                  </div>
-                </div>
-
-                <div className="p-4 bg-amber-50/80 border border-amber-200 rounded-xl text-xs text-amber-950 space-y-1.5">
-                  <div className="font-bold flex items-center gap-1.5 text-amber-900">
-                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                    Important Note on Local Storage & Backups
-                  </div>
-                  <p>
-                    Because localStorage is tied to your specific browser and machine, clearing your browser cookies/site data will wipe them. Using the Export JSON button remains the recommended way to create permanent file backups.
-                  </p>
-                </div>
-              </section>
-
-            </div>
-          </div>
-        )}
-
-      </div>
-    </div>
-  );
-}
+                    {(NumberI encountered an error doing what you asked. Could you try again?
