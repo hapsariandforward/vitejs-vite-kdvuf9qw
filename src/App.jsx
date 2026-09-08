@@ -32,7 +32,7 @@ import {
   UserCheck
 } from 'lucide-react';
 
-const STORAGE_KEY = 'rp_plan_full_v19';
+const STORAGE_KEY = 'rp_plan_full_v21';
 
 export const DEFAULT_RISK_PROFILES = {
   'High Risk': { label: '80–100% Equities', real: 4.44, unlucky: 1.66, lucky: 7.31, nominal: 7.05 },
@@ -40,7 +40,7 @@ export const DEFAULT_RISK_PROFILES = {
   'Medium Risk': { label: '40–60% Equities', real: 3.00, unlucky: 1.10, lucky: 4.95, nominal: 5.58 },
   'Medium/Low Risk': { label: '20–40% Equities', real: 2.28, unlucky: 0.82, lucky: 3.77, nominal: 4.84 },
   'Low Risk': { label: 'High interest Cash Savings, Fixed Income, Bonds', real: 1.56, unlucky: 0.54, lucky: 2.59, nominal: 4.10 },
-  'Cash Equivalents': { label: 'Cash & Money Market', real: -0.50, unlucky: -1.00, lucky: 0.00, nominal: 1.99 }
+  'Cash Equivalents': { label: 'instant cash savings/money market', real: -0.50, unlucky: -1.00, lucky: 0.00, nominal: 1.99 }
 };
 
 const parseInputNumber = (val) => {
@@ -363,7 +363,6 @@ export default function App() {
     let drawdownPensions = 0;
     const isFullLump = planState.spending.drawdownStrategy === 'Full 25% Lump Sum';
 
-    // Pension drawdown helper incorporating PCLS and UK income tax bands
     const drawFromPension = (potOwner, netNeeded, maxTaxableCeiling = Infinity) => {
       if (netNeeded <= 0) return 0;
       const potKey = potOwner === 'Myself' ? 'pen_self' : 'pen_part';
@@ -398,7 +397,7 @@ export default function App() {
       return taxFreeTaken + (newNet - currentNet);
     };
 
-    // 5. One-off Capital Costs (Bug #6 Fix: Grossed up for tax if spilled into pensions)
+    // 5. One-off Capital Costs
     let pre58Insolvent = false;
     const costThisYear = planState.oneOffCosts.filter(c => {
       const itemYear = c.date ? parseInt(c.date.slice(0, 4)) : (Number(c.year) || year);
@@ -447,7 +446,7 @@ export default function App() {
       }
     }
 
-    // 7. Decumulation Waterfall & Surplus Reinvestment (Feature #2)
+    // 7. Decumulation Waterfall & Surplus Reinvestment
     let netDemand = Math.max(0, annualLivingTarget - totalNetGuaranteed);
     let demandSelf = 0;
     let demandPart = 0;
@@ -460,7 +459,6 @@ export default function App() {
         const surplusEach = surplus * 0.5;
         const bufferEach = sixMonthBuffer * 0.5;
 
-        // Cash buffer capped at 6 months; remainder swept into S&S ISA
         potsMap.cash_self += surplusEach;
         if (potsMap.cash_self > bufferEach) {
           const excess = potsMap.cash_self - bufferEach;
@@ -520,9 +518,7 @@ export default function App() {
         if (demandSelf > 0 || demandPart > 0) drawTier('isa_self', 'isa_part');
         if (demandSelf > 0 || demandPart > 0) pre58Insolvent = true;
       } 
-      // Policy Choice #1B: Tax Smoothing (Fill 20% Basic Rate before touching ISAs)
       else if (decumPolicy === 'Bracket Fill Basic') {
-        // Stage 1: Fill 0% Personal Allowance
         const paRoomSelf = Math.max(0, paAllowance - currentTaxableSelf);
         if (paRoomSelf > 0 && demandSelf > 0) {
           const coveredS = drawFromPension('Myself', demandSelf, paAllowance);
@@ -545,7 +541,6 @@ export default function App() {
           }
         }
 
-        // Stage 2: Fill 20% Basic Rate Band (£50,270) with pensions BEFORE touching ISAs
         if (demandSelf > 0 || demandPart > 0) {
           if (demandSelf > 0) {
             const coveredS = drawFromPension('Myself', demandSelf, basicLimit);
@@ -567,14 +562,10 @@ export default function App() {
           }
         }
 
-        // Stage 3: Cash & GIA Buffer
         if (demandSelf > 0 || demandPart > 0) drawTier('cash_self', 'cash_part');
         if (demandSelf > 0 || demandPart > 0) drawTier('other_self', 'other_part');
-
-        // Stage 4: S&S ISAs as Tax-Free Buffer to shield from 40% Higher Rate Tax
         if (demandSelf > 0 || demandPart > 0) drawTier('isa_self', 'isa_part');
 
-        // Stage 5: Higher Rate Pension Fallback
         if (demandSelf > 0 || demandPart > 0) {
           if (demandSelf > 0) demandSelf = Math.max(0, demandSelf - drawFromPension('Myself', demandSelf));
           if (planIsCouple) {
@@ -583,8 +574,7 @@ export default function App() {
             if (demandSelf > 0) demandSelf = Math.max(0, demandSelf - drawFromPension('Partner', demandSelf));
           }
         }
-      }
-      // Policy Choice #1A: UK FIRE (Fill 0% PA first, then ISAs, then Basic Rate)
+      } 
       else if (decumPolicy === 'Bracket Fill') {
         const paRoomSelf = Math.max(0, paAllowance - currentTaxableSelf);
         if (paRoomSelf > 0 && demandSelf > 0) {
@@ -642,7 +632,6 @@ export default function App() {
           }
         }
       } 
-      // Sequential: Cash -> GIA -> ISA -> Pension
       else {
         drawTier('cash_self', 'cash_part');
         if (demandSelf > 0 || demandPart > 0) drawTier('other_self', 'other_part');
@@ -1351,7 +1340,7 @@ export default function App() {
               <div className="flex justify-between items-center">
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2">
-                    <Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (e.g. Defined Benefit Pensions, Part-time work, Rental income)
+                    <Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (DB Pension, Consulting, Rental)
                   </h3>
                   <span className="text-[11px] text-slate-500">Taxable streams count toward personal allowance and tax bands; tax-free streams directly reduce net drawdown demand.</span>
                 </div>
@@ -2544,7 +2533,7 @@ export default function App() {
                   </div>
 
                   <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 font-bold block">Cash & Money Market (Expected Real Return: ~-0.50% pa / Nominal: 1.99%)</strong>
+                    <strong className="text-slate-900 font-bold block">instant cash savings/money market (Expected Real Return: ~-0.50% pa / Nominal: 1.99%)</strong>
                     <p className="text-slate-600">
                       <strong>Typical Holdings:</strong> Standard easy-access bank accounts, short-term treasury bills, and overnight money market funds (e.g., SONIA-tracking funds like CSH2).
                     </p>
