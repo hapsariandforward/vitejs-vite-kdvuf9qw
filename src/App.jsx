@@ -33,7 +33,7 @@ import {
   History
 } from 'lucide-react';
 
-const STORAGE_KEY = 'rp_plan_full_v23';
+const STORAGE_KEY = 'rp_plan_full_v24';
 
 // 98-Year Empirical Dataset (1928–2025): Real S&P 500 (s) and 50/50 Govt/Corp Real Bond (b) Returns
 export const HISTORICAL_DATA = [
@@ -73,13 +73,10 @@ export const RISK_EQUITY_WEIGHTS = {
   'Cash Equivalents': 0.00
 };
 
+// Strictly empirical: looks up target year directly without wrapping
 export const getHistoricalPoint = (startYear, t) => {
-  const minYear = 1928;
-  const maxYear = 2025;
-  const totalYears = maxYear - minYear + 1;
-  const offset = (Number(startYear) - minYear + t) % totalYears;
-  const targetYear = minYear + (offset < 0 ? offset + totalYears : offset);
-  return HISTORICAL_DATA.find(d => d.y === targetYear) || HISTORICAL_DATA[0];
+  const targetYear = Number(startYear) + t;
+  return HISTORICAL_DATA.find(d => d.y === targetYear) || null;
 };
 
 export const DEFAULT_RISK_PROFILES = {
@@ -268,6 +265,22 @@ export default function App() {
   const fileInputRef = useRef(null);
   const isCouple = plan.demographics.planningMode !== 'single';
 
+  // Dynamic calculation of maximum valid start year so entire lifespan to 100 is 100% empirical
+  const spanYears = useMemo(() => {
+    const ageStart = Number(plan.demographics.currentAgeSelf) || 40;
+    const ageEnd = Number(plan.demographics.terminalAge) || 100;
+    return Math.max(1, ageEnd - ageStart);
+  }, [plan.demographics.currentAgeSelf, plan.demographics.terminalAge]);
+
+  const maxHistoricalStartYear = useMemo(() => {
+    return Math.max(1928, 2025 - spanYears);
+  }, [spanYears]);
+
+  // Ensure selected year is clamped within valid empirical range
+  const activeHistoricalStartYear = useMemo(() => {
+    return Math.min(Math.max(1928, selectedHistoricalYear), maxHistoricalStartYear);
+  }, [selectedHistoricalYear, maxHistoricalStartYear]);
+
   const [activeSeries, setActiveSeries] = useState(() => {
     const init = {};
     SERIES_CONFIG.forEach(s => { init[s.id] = s.defaultActive; });
@@ -295,7 +308,7 @@ export default function App() {
   };
 
   // =========================================================================
-  // 3. UNIFIED SIMULATION ENGINE (Supports Historical Sequences from Today)
+  // 3. UNIFIED SIMULATION ENGINE
   // =========================================================================
   const runEngineYear = (t, potsMap, planState, regimeOrShock = 'expected', tracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false }) => {
     const planIsCouple = planState.demographics.planningMode !== 'single';
@@ -324,7 +337,7 @@ export default function App() {
     const workingSelf = ageSelf < retireAgeSelf;
     const workingPart = planIsCouple ? (agePart < retireAgePart) : false;
 
-    // Retrieve historical point if running in historical backtest mode
+    // Retrieve historical point if running in empirical backtest mode
     const isHistorical = typeof regimeOrShock === 'object' && regimeOrShock !== null && regimeOrShock.historical;
     const histPoint = isHistorical ? getHistoricalPoint(regimeOrShock.startYear, t) : null;
 
@@ -702,7 +715,7 @@ export default function App() {
       }
     }
 
-    // 8. Asset-Specific Compounding (Stochastic vs Historical from Today)
+    // 8. Asset Compounding (Stochastic vs 100% Empirical Historical)
     const compoundFactor = isYearZero ? yf : 1.0;
     planState.accounts.forEach(acc => {
       if (!planIsCouple && acc.owner === 'Partner') return;
@@ -830,7 +843,7 @@ export default function App() {
     const tracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false };
 
     for (let t = 0; t <= totalYears; t++) {
-      const step = runEngineYear(t, potsHist, plan, { historical: true, startYear: selectedHistoricalYear }, tracking);
+      const step = runEngineYear(t, potsHist, plan, { historical: true, startYear: activeHistoricalStartYear }, tracking);
       const combPensions = isCouple ? ((potsHist.pen_self || 0) + (potsHist.pen_part || 0)) : (potsHist.pen_self || 0);
       const combISAs = isCouple ? ((potsHist.isa_self || 0) + (potsHist.isa_part || 0)) : (potsHist.isa_self || 0);
       const combOther = isCouple ? ((potsHist.other_self || 0) + (potsHist.other_part || 0)) : (potsHist.other_self || 0);
@@ -845,7 +858,7 @@ export default function App() {
       });
     }
     return rows;
-  }, [plan, isCouple, selectedHistoricalYear]);
+  }, [plan, isCouple, activeHistoricalStartYear]);
 
   // Historical Backtest Analysis Metrics
   const historicalMetrics = useMemo(() => {
@@ -858,8 +871,6 @@ export default function App() {
     const failAge = failedStep ? failedStep.ageSelf : null;
     const failYear = failedStep ? failedStep.year : null;
 
-    // Experienced average compound real return
-    const years = historicalTimeline.length - 1;
     return {
       survived,
       failAge,
@@ -867,9 +878,9 @@ export default function App() {
       startVal,
       terminalVal,
       minVal,
-      startHistoricalYear: selectedHistoricalYear
+      startHistoricalYear: activeHistoricalStartYear
     };
-  }, [historicalTimeline, plan.config.solvencyFloor, selectedHistoricalYear]);
+  }, [historicalTimeline, plan.config.solvencyFloor, activeHistoricalStartYear]);
 
   const chartDisplayData = useMemo(() => {
     return timelineData.map(d => {
@@ -1231,7 +1242,9 @@ export default function App() {
               <h1 className="text-xl font-bold tracking-tight text-slate-900">Retirement Planning Studio</h1>
               <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 font-semibold border border-blue-100">v3.2</span>
             </div>
-            <p className="text-xs text-slate-500 mt-1">UK multi-wrapper drawdown model, Monte Carlo & historical backtesting</p>
+            <p className="text-xs text-slate-500 mt-1 max-w-3xl leading-relaxed">
+              UK multi-wrapper drawdown model, Monte Carlo & historical backtesting. <strong className="text-slate-700 font-semibold">For educational & illustrative purposes only — this is not financial advice.</strong> Please complete <span className="font-semibold text-blue-700">Plan Inputs</span> first; Config changes are optional (it is advised to start with current default settings).
+            </p>
           </div>
 
           <div className="flex items-center gap-1 bg-slate-100 p-1.5 rounded-xl border border-slate-200/80 flex-wrap">
@@ -1388,7 +1401,7 @@ export default function App() {
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
                   <div>
                     <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Lifestyle Spending Tapers (Optional)</h4>
-                    <span className="text-[11px] text-slate-500">Model gradual reductions in later life (e.g. Go-Go to Slow-Go phases).</span>
+                    <span className="text-[11px] text-slate-500">Model gradual lifestyle reductions in later life (e.g. Go-Go to Slow-Go phases).</span>
                   </div>
                   <button
                     type="button"
@@ -1425,6 +1438,7 @@ export default function App() {
                       <input type="number" step="1" placeholder="e.g. 15" onFocus={handleFocus} value={plan.spending.taper2Rate} onChange={(e) => updateSpending('taper2Rate', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold pr-8 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                       <span className="absolute right-3 top-2 text-slate-400 font-bold">%</span>
                     </div>
+                    <span className="text-[10px] text-slate-400 mt-1 block">Taper 2 reduction is relative to income after Taper 1 reduction (e.g. 100% → 90% → 81%).</span>
                   </div>
                 </div>
               </div>
@@ -1520,7 +1534,7 @@ export default function App() {
               <div className="flex justify-between items-center">
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2">
-                    <Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (DB Pension, Consulting, Rental)
+                    <Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (e.g. Defined Benefit Pension, Part time work, Rental Income, benefits)
                   </h3>
                   <span className="text-[11px] text-slate-500">Taxable streams count toward personal allowance and tax bands; tax-free streams directly reduce net drawdown demand.</span>
                 </div>
@@ -1678,13 +1692,24 @@ export default function App() {
               </div>
 
               <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
-                <div className="flex justify-between items-center">
+                <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2">
                   <div>
                     <h3 className="text-xs font-bold text-rose-700 uppercase tracking-wider flex items-center gap-2">
-                      <Trash2 className="w-4 h-4 text-rose-600" /> 5. One-Off Capital Costs (Waterfall)
+                      <Trash2 className="w-4 h-4 text-rose-600" /> 5. One-Off Capital Costs
                     </h3>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setActiveTab('docs');
+                        setTimeout(() => scrollToDocSection('doc-one-offs'), 80);
+                      }}
+                      className="text-[11px] text-rose-600 hover:text-rose-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer mt-0.5"
+                    >
+                      <HelpCircle className="w-3 h-3" />
+                      How costs are liquidated from your portfolio wrappers →
+                    </button>
                   </div>
-                  <button onClick={addOneOffCost} className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer border border-slate-200">
+                  <button onClick={addOneOffCost} className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer border border-slate-200 self-start sm:self-auto">
                     <Plus className="w-3.5 h-3.5" /> Add Cost
                   </button>
                 </div>
@@ -2337,16 +2362,19 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 4: HISTORICAL BACKTEST (New Feature) */}
+        {/* TAB 4: HISTORICAL BACKTEST */}
         {activeTab === 'historical' && (
           <div className="space-y-6">
             <div className="p-4 bg-indigo-50/70 border border-indigo-200/80 rounded-2xl text-xs text-slate-700 space-y-2">
               <div className="flex items-center gap-2 font-bold text-indigo-900 text-sm">
                 <History className="w-4 h-4 text-indigo-600" />
-                98-Year Empirical Backtest (1928–2025)
+                Empirical Historical Backtest (1928–2025)
               </div>
               <p>
-                This test feeds the exact historical real returns of the global stock and bond markets directly into your plan, <strong>starting from today ({plan.demographics.currentAgeSelf || 40})</strong>. It tests how your accumulation and savings would have fared through actual historical bull markets and depressions, flowing straight into your decumulation phase.
+                This test feeds the actual historical real returns of the global stock and bond markets directly into your plan, <strong>starting from today (Age {plan.demographics.currentAgeSelf || 40})</strong> through to Age 100.
+              </p>
+              <p className="text-slate-500">
+                To guarantee 100% empirical historical accuracy without arbitrary wrap-arounds, selectable start years are capped at <strong>{maxHistoricalStartYear}</strong> so your entire {spanYears}-year plan runs strictly within real recorded economic history through 2025.
               </p>
             </div>
 
@@ -2355,16 +2383,16 @@ export default function App() {
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                 <div>
                   <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Select Historical Scenario or Start Year</h3>
-                  <span className="text-[11px] text-slate-500">Select an iconic crisis preset or slide to any year between 1928 and 2025.</span>
+                  <span className="text-[11px] text-slate-500">Select an iconic crisis preset or slide to any year between 1928 and {maxHistoricalStartYear}.</span>
                 </div>
                 <div className="flex items-center gap-2 bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200 text-xs font-mono font-bold text-indigo-700">
                   <span>Start Year:</span>
                   <input
                     type="number"
                     min="1928"
-                    max="2025"
-                    value={selectedHistoricalYear}
-                    onChange={(e) => setSelectedHistoricalYear(Math.max(1928, Math.min(2025, Number(e.target.value) || 1928)))}
+                    max={maxHistoricalStartYear}
+                    value={activeHistoricalStartYear}
+                    onChange={(e) => setSelectedHistoricalYear(Math.max(1928, Math.min(maxHistoricalStartYear, Number(e.target.value) || 1928)))}
                     className="w-16 p-1 bg-white border border-slate-300 rounded text-center text-indigo-900 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                   />
                 </div>
@@ -2372,22 +2400,33 @@ export default function App() {
 
               {/* Presets */}
               <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
-                {HISTORICAL_PRESETS.map(p => (
-                  <button
-                    key={p.year}
-                    onClick={() => setSelectedHistoricalYear(p.year)}
-                    className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
-                      selectedHistoricalYear === p.year
-                        ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
-                        : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
-                    }`}
-                  >
-                    <div className="font-bold text-xs">{p.year}</div>
-                    <div className={`text-[10px] leading-tight truncate mt-0.5 ${selectedHistoricalYear === p.year ? 'text-indigo-100' : 'text-slate-500'}`}>
-                      {p.label.split('(')[0]}
-                    </div>
-                  </button>
-                ))}
+                {HISTORICAL_PRESETS.map(p => {
+                  const isValid = p.year <= maxHistoricalStartYear;
+                  return (
+                    <button
+                      key={p.year}
+                      onClick={() => isValid && setSelectedHistoricalYear(p.year)}
+                      disabled={!isValid}
+                      className={`p-2.5 rounded-xl border text-left transition-all ${
+                        !isValid
+                          ? 'bg-slate-50 text-slate-300 border-slate-200/50 cursor-not-allowed opacity-50'
+                          : activeHistoricalStartYear === p.year
+                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs cursor-pointer'
+                          : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200 cursor-pointer'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-xs">{p.year}</span>
+                        {!isValid && <span className="text-[9px] text-slate-400 font-sans">Over 2025</span>}
+                      </div>
+                      <div className={`text-[10px] leading-tight truncate mt-0.5 ${
+                        !isValid ? 'text-slate-300' : activeHistoricalStartYear === p.year ? 'text-indigo-100' : 'text-slate-500'
+                      }`}>
+                        {p.label.split('(')[0]}
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
 
               {/* Slider */}
@@ -2396,12 +2435,12 @@ export default function App() {
                 <input
                   type="range"
                   min="1928"
-                  max="2025"
-                  value={selectedHistoricalYear}
+                  max={maxHistoricalStartYear}
+                  value={activeHistoricalStartYear}
                   onChange={(e) => setSelectedHistoricalYear(Number(e.target.value))}
                   className="w-full accent-indigo-600 cursor-pointer"
                 />
-                <span className="text-xs font-mono text-slate-400">2025</span>
+                <span className="text-xs font-mono text-slate-600 font-bold">{maxHistoricalStartYear}</span>
               </div>
             </div>
 
@@ -2459,8 +2498,8 @@ export default function App() {
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex justify-between items-center">
                 <div>
-                  <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider">Historical Wealth Path (Starting in {selectedHistoricalYear})</h3>
-                  <span className="text-xs text-slate-500">Real £ purchasing power across working and retirement years</span>
+                  <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider">Historical Wealth Path (Simulating {activeHistoricalStartYear}–{activeHistoricalStartYear + spanYears})</h3>
+                  <span className="text-xs text-slate-500">Real purchasing power across accumulation and decumulation</span>
                 </div>
               </div>
 
@@ -2534,7 +2573,7 @@ export default function App() {
                   <div className="absolute top-4 left-24 bg-white/95 border border-slate-200 p-3 rounded-xl shadow-lg text-xs space-y-1 backdrop-blur-md pointer-events-none font-mono">
                     <div className="font-bold text-slate-800 border-b border-slate-100 pb-1 flex justify-between gap-4 font-sans">
                       <span>Age {hoveredHistPoint.ageSelf} ({hoveredHistPoint.year})</span>
-                      <span className="text-indigo-600 font-bold">Hist Year: {hoveredHistPoint.histYear}</span>
+                      <span className="text-indigo-600 font-bold">Historical Year: {hoveredHistPoint.histYear}</span>
                     </div>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-1">
                       <div className="text-indigo-700 font-bold">Total Pot: {formatGBP(hoveredHistPoint.totalCombined)}</div>
@@ -2559,7 +2598,7 @@ export default function App() {
                     <FileSpreadsheet className="w-4 h-4 text-indigo-600" />
                     Historical Backtest Cash Flow Ledger
                   </h3>
-                  <span className="text-xs text-slate-500">Year-by-year cash flows and historical returns applied from start year {selectedHistoricalYear}.</span>
+                  <span className="text-xs text-slate-500">Year-by-year cash flows and historical returns applied from start year {activeHistoricalStartYear}.</span>
                 </div>
               </div>
 
@@ -2766,7 +2805,7 @@ export default function App() {
                   </div>
                   <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
                     <strong className="text-slate-900 font-bold block">Phase 3: The "No-Go" Years (Taper 2, e.g. Age 85)</strong>
-                    <p className="text-slate-600">Lifestyle centers largely around the home. Baseline living expenditures hit their lowest point. Optional Taper 2 applies a further reduction (e.g. an additional 10%–20%).</p>
+                    <p className="text-slate-600">Lifestyle centers largely around the home. Baseline living expenditures hit their lowest point. Optional Taper 2 applies a further reduction (e.g. an additional 10%–20% relative to post-Taper 1 income).</p>
                   </div>
                 </div>
               </section>
@@ -2857,14 +2896,14 @@ export default function App() {
                 </p>
               </section>
 
-              {/* 10. One-Offs */}
+              {/* 10. One-Off Costs */}
               <section id="doc-one-offs" className="space-y-3 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
                   <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">10</span>
                   One-Off Costs & Pension Tax Math
                 </h3>
                 <p className="text-xs text-slate-600">
-                  If one-off capital expenses deplete Cash, GIA, and ISAs, emergency withdrawals from pensions are <strong>grossed up for income tax and PCLS</strong>, preventing phantom tax-free capital.
+                  One-off capital costs liquidate accounts in order: <code>Cash → Other (GIA) → ISAs → Pensions (58+)</code>. If non-pension accounts run out, emergency withdrawals from pensions are <strong>grossed up for income tax and PCLS</strong>, preventing phantom tax-free capital.
                 </p>
               </section>
 
@@ -2885,15 +2924,12 @@ export default function App() {
                   <span className="w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center text-xs font-bold">12</span>
                   Historical Backtesting Methodology (1928–2025)
                 </h3>
-                <p>
-                  Historical backtesting simulates your actual portfolio through recorded financial history:
-                </p>
                 <div className="space-y-2 text-xs text-slate-600">
                   <p>
                     <strong>1. Starts from Today:</strong> The historical sequence starts in Year $t=0$ at your current age. If you are 40 and choose 1965, you experience 1965–1984 while working and saving, and enter retirement at 60 right into the 1985–2000 bull market.
                   </p>
                   <p>
-                    <strong>2. Circular Data Boundary:</strong> If your lifetime horizon extends past 2025 (e.g. 1980 + 50 years = 2030), the simulation wraps around to 1928, ensuring continuous historical volatility without artificial flatlining.
+                    <strong>2. 100% Empirical Data Guarantee:</strong> The selectable starting year is capped so your entire lifetime horizon to age 100 fits within recorded market history (1928–2025). No wrap-arounds or synthetic assumptions are introduced.
                   </p>
                   <p>
                     <strong>3. Asset Class Weights:</strong> Each wrapper compounds by its weighted real equity and bond returns (e.g. High Risk is 90% S&P 500 / 10% Bonds; Low Risk is 10% S&P 500 / 90% Bonds).
