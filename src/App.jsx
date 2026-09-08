@@ -30,10 +30,13 @@ import {
   BookOpen,
   ArrowRight,
   UserCheck,
-  History
+  History,
+  Bookmark,
+  Save
 } from 'lucide-react';
 
-const STORAGE_KEY = 'rp_plan_full_v24';
+const STORAGE_KEY = 'rp_plan_full_v26';
+const SCENARIOS_STORAGE_KEY = 'rp_saved_scenarios_v1';
 
 // 98-Year Empirical Dataset (1928–2025): Real S&P 500 (s) and 50/50 Govt/Corp Real Bond (b) Returns
 export const HISTORICAL_DATA = [
@@ -73,7 +76,6 @@ export const RISK_EQUITY_WEIGHTS = {
   'Cash Equivalents': 0.00
 };
 
-// Strictly empirical: looks up target year directly without wrapping
 export const getHistoricalPoint = (startYear, t) => {
   const targetYear = Number(startYear) + t;
   return HISTORICAL_DATA.find(d => d.y === targetYear) || null;
@@ -240,6 +242,7 @@ export default function App() {
   const [isEditingRisk, setIsEditingRisk] = useState(false);
   const [selectedHistoricalYear, setSelectedHistoricalYear] = useState(1965);
 
+  // Active working plan state
   const [plan, setPlan] = useState(() => {
     try {
       const cached = localStorage.getItem(STORAGE_KEY);
@@ -256,16 +259,45 @@ export default function App() {
     }
   });
 
+  // Multiple Saved Scenarios persistent in localStorage
+  const [scenarios, setScenarios] = useState(() => {
+    try {
+      const cached = localStorage.getItem(SCENARIOS_STORAGE_KEY);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {}
+    return [
+      { id: 'scen_default', name: 'Scenario 1', data: BLANK_PLAN }
+    ];
+  });
+
+  const [activeScenarioId, setActiveScenarioId] = useState(() => {
+    return scenarios[0]?.id || 'scen_default';
+  });
+
+  const [scenarioNameInput, setScenarioNameInput] = useState('');
+  const [saveSuccessMsg, setSaveSuccessMsg] = useState('');
+
+  // Sync working plan to local storage
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(plan));
     } catch (e) {}
   }, [plan]);
 
+  // Sync scenarios collection to local storage
+  useEffect(() => {
+    try {
+      localStorage.setItem(SCENARIOS_STORAGE_KEY, JSON.stringify(scenarios));
+    } catch (e) {}
+  }, [scenarios]);
+
   const fileInputRef = useRef(null);
   const isCouple = plan.demographics.planningMode !== 'single';
 
-  // Dynamic calculation of maximum valid start year so entire lifespan to 100 is 100% empirical
+  // Dynamic empirical start year limit (Horizon fitting within 1928-2025)
   const spanYears = useMemo(() => {
     const ageStart = Number(plan.demographics.currentAgeSelf) || 40;
     const ageEnd = Number(plan.demographics.terminalAge) || 100;
@@ -276,7 +308,6 @@ export default function App() {
     return Math.max(1928, 2025 - spanYears);
   }, [spanYears]);
 
-  // Ensure selected year is clamped within valid empirical range
   const activeHistoricalStartYear = useMemo(() => {
     return Math.min(Math.max(1928, selectedHistoricalYear), maxHistoricalStartYear);
   }, [selectedHistoricalYear, maxHistoricalStartYear]);
@@ -305,6 +336,64 @@ export default function App() {
   const scrollToDocSection = (id) => {
     const el = document.getElementById(id);
     if (el) el.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  // =========================================================================
+  // SCENARIO SAVE & SWITCH HANDLERS
+  // =========================================================================
+  const handleSaveNewScenario = () => {
+    const trimmed = scenarioNameInput.trim();
+    const finalName = trimmed !== '' ? trimmed : `Scenario ${scenarios.length + 1}`;
+    const newId = 'scen_' + Date.now();
+    const newScenario = {
+      id: newId,
+      name: finalName,
+      data: JSON.parse(JSON.stringify(plan))
+    };
+
+    setScenarios(prev => [...prev, newScenario]);
+    setActiveScenarioId(newId);
+    setScenarioNameInput('');
+    setSaveSuccessMsg(`Saved as "${finalName}"`);
+    setTimeout(() => setSaveSuccessMsg(''), 3000);
+  };
+
+  const handleUpdateActiveScenario = () => {
+    setScenarios(prev => prev.map(s => {
+      if (s.id === activeScenarioId) {
+        return {
+          ...s,
+          name: scenarioNameInput.trim() !== '' ? scenarioNameInput.trim() : s.name,
+          data: JSON.parse(JSON.stringify(plan))
+        };
+      }
+      return s;
+    }));
+    setScenarioNameInput('');
+    setSaveSuccessMsg('Scenario updated');
+    setTimeout(() => setSaveSuccessMsg(''), 3000);
+  };
+
+  const handleSelectScenario = (id) => {
+    const selected = scenarios.find(s => s.id === id);
+    if (selected) {
+      setActiveScenarioId(id);
+      setPlan(JSON.parse(JSON.stringify(selected.data)));
+      setSimResult(null);
+    }
+  };
+
+  const handleDeleteScenario = (idToDelete) => {
+    if (scenarios.length <= 1) {
+      alert("At least one scenario must be retained.");
+      return;
+    }
+    const remaining = scenarios.filter(s => s.id !== idToDelete);
+    setScenarios(remaining);
+    if (activeScenarioId === idToDelete) {
+      setActiveScenarioId(remaining[0].id);
+      setPlan(JSON.parse(JSON.stringify(remaining[0].data)));
+    }
   };
 
   // =========================================================================
@@ -1299,6 +1388,70 @@ export default function App() {
           </div>
         </div>
 
+        {/* PERSISTENT SCENARIO TOOLBAR (Visible across all tabs) */}
+        <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
+              <Bookmark className="w-4 h-4 text-blue-600" />
+              <span>Active Scenario:</span>
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <select
+                value={activeScenarioId}
+                onChange={(e) => handleSelectScenario(e.target.value)}
+                className="p-1.5 px-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold text-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
+              >
+                {scenarios.map(s => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+
+              {scenarios.length > 1 && (
+                <button
+                  onClick={() => handleDeleteScenario(activeScenarioId)}
+                  title="Delete this scenario"
+                  className="p-1.5 text-slate-400 hover:text-rose-600 cursor-pointer rounded-lg hover:bg-rose-50 transition-colors"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap ml-auto">
+            <input
+              type="text"
+              placeholder="Scenario name (optional)"
+              value={scenarioNameInput}
+              onChange={(e) => setScenarioNameInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleSaveNewScenario(); }}
+              className="p-1.5 px-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 w-48 sm:w-56"
+            />
+
+            <button
+              onClick={handleSaveNewScenario}
+              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95"
+            >
+              <Plus className="w-3.5 h-3.5" /> Save Scenario
+            </button>
+
+            <button
+              onClick={handleUpdateActiveScenario}
+              title="Save current inputs to active scenario"
+              className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all border border-slate-200 cursor-pointer"
+            >
+              <Save className="w-3.5 h-3.5 text-slate-600" /> Overwrite Active
+            </button>
+
+            {saveSuccessMsg && (
+              <span className="text-xs font-bold text-emerald-700 flex items-center gap-1 bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-200">
+                <Check className="w-3 h-3 text-emerald-600" /> {saveSuccessMsg}
+              </span>
+            )}
+          </div>
+        </div>
+
         {/* TAB 1: PLAN INPUTS */}
         {activeTab === 'inputs' && (
           <div className="space-y-6">
@@ -1401,7 +1554,7 @@ export default function App() {
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
                   <div>
                     <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Lifestyle Spending Tapers (Optional)</h4>
-                    <span className="text-[11px] text-slate-500">Model gradual lifestyle reductions in later life </span>
+                    <span className="text-[11px] text-slate-500">Model gradual lifestyle reductions in later life (e.g. Go-Go to Slow-Go phases).</span>
                   </div>
                   <button
                     type="button"
@@ -2238,37 +2391,37 @@ export default function App() {
                       </g>
                     ))}
 
-                    {showMilestones && (
-                      <>
-                        {(Number(plan.demographics.retireAgeSelf) || 60) <= maxVisibleAge && (
-                          <g transform={`translate(${xScale(Number(plan.demographics.retireAgeSelf) || 60)}, 0)`}>
-                            <line y2={innerHeight} stroke="#f59e0b" strokeWidth="1.5" strokeDasharray="4,4" />
-                            <rect x={-42} y={10} width={84} height={20} rx={4} fill="#fef3c7" stroke="#fde68a" />
-                            <text y={24} textAnchor="middle" fill="#b45309" fontSize="10" fontWeight="bold">Retire M ({Number(plan.demographics.retireAgeSelf) || 60})</text>
-                          </g>
-                        )}
-                        {isCouple && (Number(plan.demographics.retireAgePart) || 60) <= maxVisibleAge && (
-                          <g transform={`translate(${xScale(Number(plan.demographics.retireAgePart) || 60)}, 0)`}>
-                            <line y2={innerHeight} stroke="#d97706" strokeWidth="1.5" strokeDasharray="3,3" />
-                            <rect x={-42} y={32} width={84} height={20} rx={4} fill="#fef3c7" stroke="#fde68a" />
-                            <text y={46} textAnchor="middle" fill="#b45309" fontSize="10" fontWeight="bold">Retire P ({Number(plan.demographics.retireAgePart) || 60})</text>
-                          </g>
-                        )}
-                        {(Number(plan.demographics.privatePensionAge) || 58) <= maxVisibleAge && (
-                          <g transform={`translate(${xScale(Number(plan.demographics.privatePensionAge) || 58)}, 0)`}>
-                            <line y2={innerHeight} stroke="#0284c7" strokeWidth="1.5" strokeDasharray="4,4" />
-                            <rect x={-36} y={54} width={72} height={20} rx={4} fill="#e0f2fe" stroke="#bae6fd" />
-                            <text y={68} textAnchor="middle" fill="#0369a1" fontSize="10" fontWeight="bold">NMPA ({Number(plan.demographics.privatePensionAge) || 58})</text>
-                          </g>
-                        )}
-                        {(Number(plan.demographics.statePensionAge) || 68) <= maxVisibleAge && (
-                          <g transform={`translate(${xScale(Number(plan.demographics.statePensionAge) || 68)}, 0)`}>
-                            <line y2={innerHeight} stroke="#059669" strokeWidth="1.5" strokeDasharray="4,4" />
-                            <rect x={-38} y={76} width={76} height={20} rx={4} fill="#d1fae5" stroke="#a7f3d0" />
-                            <text y={90} textAnchor="middle" fill="#065f46" fontSize="10" fontWeight="bold">State Pen ({Number(plan.demographics.statePensionAge) || 68})</text>
-                          </g>
-                        )}
-                      </>
+                    {/* Milestones */}
+                    {(Number(plan.demographics.retireAgeSelf) || 60) <= maxVisibleAge && (
+                      <g transform={`translate(${xScale(Number(plan.demographics.retireAgeSelf) || 60)}, 0)`}>
+                        <line y2={innerHeight} stroke="#f59e0b" strokeWidth="1.5" strokeDasharray="4,4" />
+                        <rect x={-42} y={10} width={84} height={20} rx={4} fill="#fef3c7" stroke="#fde68a" />
+                        <text y={24} textAnchor="middle" fill="#b45309" fontSize="10" fontWeight="bold">Retire M ({Number(plan.demographics.retireAgeSelf) || 60})</text>
+                      </g>
+                    )}
+
+                    {isCouple && (Number(plan.demographics.retireAgePart) || 60) <= maxVisibleAge && (
+                      <g transform={`translate(${xScale(Number(plan.demographics.retireAgePart) || 60)}, 0)`}>
+                        <line y2={innerHeight} stroke="#d97706" strokeWidth="1.5" strokeDasharray="3,3" />
+                        <rect x={-42} y={32} width={84} height={20} rx={4} fill="#fef3c7" stroke="#fde68a" />
+                        <text y={46} textAnchor="middle" fill="#b45309" fontSize="10" fontWeight="bold">Retire P ({Number(plan.demographics.retireAgePart) || 60})</text>
+                      </g>
+                    )}
+
+                    {(Number(plan.demographics.privatePensionAge) || 58) <= maxVisibleAge && (
+                      <g transform={`translate(${xScale(Number(plan.demographics.privatePensionAge) || 58)}, 0)`}>
+                        <line y2={innerHeight} stroke="#0284c7" strokeWidth="1.5" strokeDasharray="4,4" />
+                        <rect x={-36} y={54} width={72} height={20} rx={4} fill="#e0f2fe" stroke="#bae6fd" />
+                        <text y={68} textAnchor="middle" fill="#0369a1" fontSize="10" fontWeight="bold">NMPA ({Number(plan.demographics.privatePensionAge) || 58})</text>
+                      </g>
+                    )}
+
+                    {(Number(plan.demographics.statePensionAge) || 68) <= maxVisibleAge && (
+                      <g transform={`translate(${xScale(Number(plan.demographics.statePensionAge) || 68)}, 0)`}>
+                        <line y2={innerHeight} stroke="#059669" strokeWidth="1.5" strokeDasharray="4,4" />
+                        <rect x={-38} y={76} width={76} height={20} rx={4} fill="#d1fae5" stroke="#a7f3d0" />
+                        <text y={90} textAnchor="middle" fill="#065f46" fontSize="10" fontWeight="bold">State Pen ({Number(plan.demographics.statePensionAge) || 68})</text>
+                      </g>
                     )}
 
                     {SERIES_CONFIG.map(s => {
@@ -2752,7 +2905,8 @@ export default function App() {
                   { id: 'doc-one-offs', label: '10. One-Off Costs & Pension Tax Math' },
                   { id: 'doc-monte-carlo', label: '11. Monte Carlo & Multi-Sigma Volatility' },
                   { id: 'doc-hist', label: '12. Historical Backtesting Methodology' },
-                  { id: 'doc-risk-profiles', label: '13. Asset Allocations & Fund Types' }
+                  { id: 'doc-risk-profiles', label: '13. Asset Allocations & Fund Types' },
+                  { id: 'doc-scenarios', label: '14. Saving Scenarios & Browser Storage' }
                 ].map(item => (
                   <button
                     key={item.id}
@@ -2770,7 +2924,7 @@ export default function App() {
               <div className="pb-6 border-b border-slate-100">
                 <h2 className="text-xl font-bold text-slate-900">Model Logic & Reference Guide</h2>
                 <p className="text-slate-500 text-xs mt-1">
-                  How the model handles UK tax bands, wrapper liquidation order, asset allocations, volatility, and historical sequences.
+                  How the model handles UK tax bands, wrapper liquidation order, asset allocations, volatility, scenarios, and historical sequences.
                 </p>
               </div>
 
@@ -2900,10 +3054,10 @@ export default function App() {
               <section id="doc-one-offs" className="space-y-3 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
                   <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">10</span>
-                  One-Off Costs & Pension Tax Math
+                  One-Off Costs & Liquidation Priority
                 </h3>
                 <p className="text-xs text-slate-600">
-                  One-off capital costs liquidate accounts in order: <code>Cash → Other (GIA) → ISAs → Pensions (58+)</code>. If non-pension accounts run out, emergency withdrawals from pensions are <strong>grossed up for income tax and PCLS</strong>, preventing phantom tax-free capital.
+                  One-off capital expenses liquidate non-pension wrappers in sequence: <code>Cash → Other (GIA) → ISAs</code>. This shields large one-off purchases from being pushed into the 40% or 45% income tax band. If non-pension accounts run out, emergency withdrawals from pensions (age 58+) are <strong>grossed up for income tax and PCLS</strong>, preventing phantom tax-free capital.
                 </p>
               </section>
 
@@ -2929,7 +3083,7 @@ export default function App() {
                     <strong>1. Starts from Today:</strong> The historical sequence starts in Year $t=0$ at your current age. If you are 40 and choose 1965, you experience 1965–1984 while working and saving, and enter retirement at 60 right into the 1985–2000 bull market.
                   </p>
                   <p>
-                    <strong>2. 100% Empirical Data Guarantee:</strong> The selectable starting year is capped so your entire lifetime horizon to age 100 fits within recorded market history (1928–2025). No wrap-arounds or synthetic assumptions are introduced.
+                    <strong>2. Strictly Empirical Horizon:</strong> Selectable start years are capped so your entire lifetime horizon to age 100 runs strictly within recorded market history through 2025 without arbitrary wrap-arounds.
                   </p>
                   <p>
                     <strong>3. Asset Class Weights:</strong> Each wrapper compounds by its weighted real equity and bond returns (e.g. High Risk is 90% S&P 500 / 10% Bonds; Low Risk is 10% S&P 500 / 90% Bonds).
@@ -2968,6 +3122,49 @@ export default function App() {
                     <strong className="text-slate-900 font-bold block">instant cash savings/money market (Expected Real: ~-0.50% pa / σ: 0.5%)</strong>
                     <p className="text-slate-600">Easy-access bank savings, short-term treasury bills, SONIA funds (e.g. CSH2).</p>
                   </div>
+                </div>
+              </section>
+
+              {/* 14. Scenario Saving & Browser Storage */}
+              <section id="doc-scenarios" className="space-y-4 pt-4 border-t border-slate-100">
+                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">14</span>
+                  Saving Scenarios & Browser Storage
+                </h3>
+                <p>
+                  The studio allows you to build, name, and compare multiple financial scenarios side-by-side (such as retiring at 55 vs 60, testing higher living expenditures, or evaluating single vs couple modes).
+                </p>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1.5">
+                    <div className="flex items-center gap-1.5 font-bold text-slate-900">
+                      <Bookmark className="w-4 h-4 text-blue-600" />
+                      Persistent In-Browser Memory
+                    </div>
+                    <p className="text-slate-600">
+                      All created scenarios and your active working plan are saved directly to your browser's local storage (<code>localStorage</code>). They persist across page reloads, browser restarts, and tab closures without needing any login or cloud database.
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1.5">
+                    <div className="flex items-center gap-1.5 font-bold text-slate-900">
+                      <Save className="w-4 h-4 text-indigo-600" />
+                      Saving vs. Overwriting
+                    </div>
+                    <p className="text-slate-600">
+                      Use <strong>Save Scenario</strong> to branch your current plan into a new named scenario (or auto-named "Scenario 2", etc.). Use <strong>Overwrite Active</strong> if you simply want to update your current scenario with any new adjustments made on the Plan Inputs or Config screens.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="p-4 bg-amber-50/80 border border-amber-200 rounded-xl text-xs text-amber-950 space-y-1.5">
+                  <div className="font-bold flex items-center gap-1.5 text-amber-900">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    Important Note on Local Storage & Backups
+                  </div>
+                  <p>
+                    Because <code>localStorage</code> is tied to your specific browser and machine, clearing your browser cookies/site data will wipe them. Using the <strong>Export JSON</strong> button remains the recommended way to create permanent file backups.
+                  </p>
                 </div>
               </section>
 
