@@ -32,11 +32,14 @@ import {
   UserCheck,
   History,
   Bookmark,
-  Save
+  Save,
+  Sparkles,
+  ArrowUpRight,
+  ArrowDownRight
 } from 'lucide-react';
 
-const STORAGE_KEY = 'rp_plan_full_v27';
-const SCENARIOS_STORAGE_KEY = 'rp_saved_scenarios_v2';
+const STORAGE_KEY = 'rp_plan_full_v28';
+const SCENARIOS_STORAGE_KEY = 'rp_saved_scenarios_v3';
 
 // 98-Year Empirical Dataset (1928–2025): Real S&P 500 (s) and 50/50 Govt/Corp Real Bond (b) Returns
 export const HISTORICAL_DATA = [
@@ -280,6 +283,31 @@ export default function App() {
   const [scenarioNameInput, setScenarioNameInput] = useState('');
   const [saveSuccessMsg, setSaveSuccessMsg] = useState('');
 
+  // Sandbox state: holds temporary edits for contributions and annual growth
+  const [sandboxAccounts, setSandboxAccounts] = useState(() => {
+    const init = {};
+    plan.accounts.forEach(a => {
+      init[a.id] = {
+        contrib: Number(a.contrib) || 0,
+        growth: Number(a.growth) || 0
+      };
+    });
+    return init;
+  });
+
+  // Keep sandbox state synced whenever core plan accounts are loaded or changed
+  useEffect(() => {
+    setSandboxAccounts(prev => {
+      const updated = { ...prev };
+      plan.accounts.forEach(a => {
+        if (!updated[a.id]) {
+          updated[a.id] = { contrib: Number(a.contrib) || 0, growth: Number(a.growth) || 0 };
+        }
+      });
+      return updated;
+    });
+  }, [plan.accounts]);
+
   // Sync working plan to local storage
   useEffect(() => {
     try {
@@ -380,6 +408,12 @@ export default function App() {
       setActiveScenarioId(id);
       setPlan(JSON.parse(JSON.stringify(selected.data)));
       setSimResult(null);
+      // Reset sandbox adjustments to loaded plan
+      const fresh = {};
+      selected.data.accounts.forEach(a => {
+        fresh[a.id] = { contrib: Number(a.contrib) || 0, growth: Number(a.growth) || 0 };
+      });
+      setSandboxAccounts(fresh);
     }
   };
 
@@ -867,7 +901,7 @@ export default function App() {
     };
   };
 
-  // 4. Deterministic Multi-Regime Timeline
+  // 4. Deterministic Multi-Regime Timeline (Baseline)
   const timelineData = useMemo(() => {
     const rows = [];
     const ageSelfStart = Number(plan.demographics.currentAgeSelf) || 40;
@@ -916,6 +950,143 @@ export default function App() {
 
     return rows;
   }, [plan, isCouple]);
+
+  // =========================================================================
+  // SANDBOX SIMULATION ENGINE & COMPARISON
+  // =========================================================================
+  const sandboxPlan = useMemo(() => {
+    return {
+      ...plan,
+      accounts: plan.accounts.map(acc => {
+        const sb = sandboxAccounts[acc.id];
+        return {
+          ...acc,
+          contrib: sb !== undefined ? sb.contrib : (Number(acc.contrib) || 0),
+          growth: sb !== undefined ? sb.growth : (Number(acc.growth) || 0)
+        };
+      })
+    };
+  }, [plan, sandboxAccounts]);
+
+  const isSandboxModified = useMemo(() => {
+    return plan.accounts.some(acc => {
+      const sb = sandboxAccounts[acc.id];
+      if (!sb) return false;
+      return Number(acc.contrib || 0) !== Number(sb.contrib || 0) || Number(acc.growth || 0) !== Number(sb.growth || 0);
+    });
+  }, [plan.accounts, sandboxAccounts]);
+
+  const sandboxTimeline = useMemo(() => {
+    const rows = [];
+    const ageSelfStart = Number(sandboxPlan.demographics.currentAgeSelf) || 40;
+    const terminalAge = Number(sandboxPlan.demographics.terminalAge) || 100;
+    const totalYears = Math.max(1, terminalAge - ageSelfStart);
+
+    const pots = {};
+    sandboxPlan.accounts.forEach(acc => {
+      pots[acc.id] = Number(acc.balance) || 0;
+    });
+
+    const tracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false };
+
+    for (let t = 0; t <= totalYears; t++) {
+      const step = runEngineYear(t, pots, sandboxPlan, 'expected', tracking);
+      rows.push(step);
+    }
+    return rows;
+  }, [sandboxPlan, isCouple]);
+
+  const sandboxMetrics = useMemo(() => {
+    if (!timelineData.length || !sandboxTimeline.length) return null;
+
+    const baseTerminal = timelineData[timelineData.length - 1]?.totalCombined || 0;
+    const sbTerminal = sandboxTimeline[sandboxTimeline.length - 1]?.totalCombined || 0;
+    const terminalDelta = sbTerminal - baseTerminal;
+
+    const retAge = Number(plan.demographics.retireAgeSelf) || 60;
+    const baseRetRow = timelineData.find(r => r.ageSelf === retAge) || timelineData[0];
+    const sbRetRow = sandboxTimeline.find(r => r.ageSelf === retAge) || sandboxTimeline[0];
+    const retirementDelta = sbRetRow.totalCombined - baseRetRow.totalCombined;
+
+    // Calculate total extra capital contributed over accumulation period
+    const ageStart = Number(plan.demographics.currentAgeSelf) || 40;
+    const accumYears = Math.max(0, retAge - ageStart);
+
+    let cumulativeExtraCapital = 0;
+    plan.accounts.forEach(acc => {
+      if (!isCouple && acc.owner === 'Partner') return;
+      const baseContrib = Number(acc.contrib) || 0;
+      const baseGrowth = (Number(acc.growth) || 0) / 100;
+      const sbContrib = Number(sandboxAccounts[acc.id]?.contrib) || 0;
+      const sbGrowth = (Number(sandboxAccounts[acc.id]?.growth) || 0) / 100;
+
+      for (let t = 0; t < accumYears; t++) {
+        const baseThisYr = baseContrib * Math.pow(1 + baseGrowth, t);
+        const sbThisYr = sbContrib * Math.pow(1 + sbGrowth, t);
+        cumulativeExtraCapital += (sbThisYr - baseThisYr);
+      }
+    });
+
+    const multiplier = cumulativeExtraCapital !== 0 ? (terminalDelta / cumulativeExtraCapital) : 0;
+
+    return {
+      baseTerminal,
+      sbTerminal,
+      terminalDelta,
+      baseRetirement: baseRetRow.totalCombined,
+      sbRetirement: sbRetRow.totalCombined,
+      retirementDelta,
+      cumulativeExtraCapital,
+      multiplier
+    };
+  }, [timelineData, sandboxTimeline, plan.demographics.retireAgeSelf, plan.demographics.currentAgeSelf, plan.accounts, sandboxAccounts, isCouple]);
+
+  const handleApplySandboxToPlan = () => {
+    setPlan(prev => ({
+      ...prev,
+      accounts: prev.accounts.map(acc => {
+        const sb = sandboxAccounts[acc.id];
+        return {
+          ...acc,
+          contrib: sb !== undefined ? sb.contrib : acc.contrib,
+          growth: sb !== undefined ? sb.growth : acc.growth
+        };
+      })
+    }));
+    setSaveSuccessMsg('Sandbox applied to plan inputs');
+    setTimeout(() => setSaveSuccessMsg(''), 3000);
+  };
+
+  const handleResetSandbox = () => {
+    const fresh = {};
+    plan.accounts.forEach(a => {
+      fresh[a.id] = { contrib: Number(a.contrib) || 0, growth: Number(a.growth) || 0 };
+    });
+    setSandboxAccounts(fresh);
+  };
+
+  const updateSandboxField = (id, field, value) => {
+    setSandboxAccounts(prev => ({
+      ...prev,
+      [id]: {
+        ...prev[id],
+        [field]: parseInputNumber(value)
+      }
+    }));
+  };
+
+  const adjustSandboxContrib = (id, delta) => {
+    setSandboxAccounts(prev => {
+      const cur = Number(prev[id]?.contrib) || 0;
+      return {
+        ...prev,
+        [id]: {
+          ...prev[id],
+          contrib: Math.max(0, cur + delta)
+        }
+      };
+    });
+  };
 
   // 4B. Dedicated Historical Backtest Timeline (Starts from Today at selected start year)
   const historicalTimeline = useMemo(() => {
@@ -983,131 +1154,6 @@ export default function App() {
     });
   }, [timelineData, plan.activeProfileView, isCouple]);
 
-  const auditMetrics = useMemo(() => {
-    if (!timelineData.length) return null;
-    const startVal = timelineData[0]?.totalCombined || 0;
-    const retAge = Number(plan.demographics.retireAgeSelf) || 60;
-    const retRow = timelineData.find(r => r.ageSelf === retAge) || timelineData[0];
-    const postRetRows = timelineData.filter(r => r.ageSelf >= retAge);
-    const troughVal = postRetRows.length ? Math.min(...postRetRows.map(r => r.totalCombined)) : 0;
-    const terminalVal = timelineData[timelineData.length - 1]?.totalCombined || 0;
-    return { startVal, retAge, retVal: retRow.totalCombined, troughVal, terminalVal };
-  }, [timelineData, plan.demographics.retireAgeSelf]);
-
-  // =========================================================================
-  // 5. MONTE CARLO STOCHASTIC ENGINE
-  // =========================================================================
-  const executeSimulation = (spendAmount, trials = 1000) => {
-    let solventCount = 0;
-    const terminalPots = [];
-    const floor = Number(plan.config.solvencyFloor) || 0;
-    const ageSelfStart = Number(plan.demographics.currentAgeSelf) || 40;
-    const terminalAge = Number(plan.demographics.terminalAge) || 100;
-    const totalYears = Math.max(1, terminalAge - ageSelfStart);
-
-    const minRetireAge = isCouple
-      ? Math.min(Number(plan.demographics.retireAgeSelf) || 60, Number(plan.demographics.retireAgePart) || 60)
-      : (Number(plan.demographics.retireAgeSelf) || 60);
-
-    const trialPlan = {
-      ...plan,
-      spending: {
-        ...plan.spending,
-        targetSpend: spendAmount
-      }
-    };
-
-    for (let i = 0; i < trials; i++) {
-      const trialPots = {};
-      plan.accounts.forEach(acc => { trialPots[acc.id] = Number(acc.balance) || 0; });
-      const trialTracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false };
-      let failed = false;
-
-      for (let t = 0; t <= totalYears; t++) {
-        const u1 = Math.max(1e-9, Math.random());
-        const u2 = Math.random();
-        const z = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
-
-        const step = runEngineYear(t, trialPots, trialPlan, { z }, trialTracking);
-
-        if (step.ageSelf >= minRetireAge) {
-          if (step.totalCombined <= floor || step.unmetDemand > 5 || step.pre58Insolvent) {
-            failed = true;
-            break;
-          }
-        }
-      }
-
-      const finalVal = isCouple
-        ? Object.values(trialPots).reduce((a, b) => a + b, 0)
-        : ((trialPots.pen_self || 0) + (trialPots.isa_self || 0) + (trialPots.other_self || 0) + (trialPots.cash_self || 0));
-
-      if (!failed && finalVal >= floor) solventCount++;
-      terminalPots.push(Math.max(0, finalVal));
-    }
-
-    terminalPots.sort((a, b) => a - b);
-    return {
-      testedSpend: spendAmount,
-      successRate: (solventCount / trials) * 100,
-      medianTerminal: terminalPots[Math.floor(trials * 0.5)],
-      p10Terminal: terminalPots[Math.floor(trials * 0.1)],
-      p90Terminal: terminalPots[Math.floor(trials * 0.9)]
-    };
-  };
-
-  const handleRunMC = () => {
-    const spend = Number(plan.spending.targetSpend);
-    if (!spend || spend <= 0) {
-      alert('Please enter your Living Spend target in Plan Inputs first.');
-      return;
-    }
-    setIsSimulating(true);
-    setTimeout(() => {
-      const res = executeSimulation(spend, 1000);
-      setSimResult({
-        type: 'test',
-        title: 'Current Plan Stress Test',
-        spend,
-        ...res
-      });
-      setIsSimulating(false);
-    }, 150);
-  };
-
-  const handleOptimize = () => {
-    const relevantAccounts = isCouple ? plan.accounts : plan.accounts.filter(a => a.owner === 'Myself');
-    const totalAssets = relevantAccounts.reduce((sum, a) => sum + (Number(a.balance) || 0), 0);
-    if (totalAssets <= 0) {
-      alert('Please enter your portfolio account balances in Plan Inputs first.');
-      return;
-    }
-    setIsOptimizing(true);
-    setTimeout(() => {
-      const base = Number(plan.spending.targetSpend) || 30000;
-      let low = Math.max(5000, Math.floor((base * 0.4) / 1000) * 1000);
-      let high = Math.max(150000, Math.ceil((base * 3.0) / 1000) * 1000);
-      let opt = low;
-
-      while ((high - low) > 250) {
-        const mid = (low + high) / 2;
-        const res = executeSimulation(mid, 300);
-        if (res.successRate >= targetConfidence) { opt = mid; low = mid; }
-        else high = mid;
-      }
-      const rounded = Math.round(opt / 250) * 250;
-      const fullRes = executeSimulation(rounded, 1000);
-      setSimResult({
-        type: 'optimize',
-        title: `Safe Max Annual Spend (${targetConfidence}% Target Confidence)`,
-        spend: rounded,
-        confidenceTarget: targetConfidence,
-        ...fullRes
-      });
-      setIsOptimizing(false);
-    }, 200);
-  };
-
   // D3 Geometry for Baseline Chart
   const visibleData = useMemo(() => {
     return chartDisplayData.filter(d => d.ageSelf <= maxVisibleAge);
@@ -1133,8 +1179,13 @@ export default function App() {
       if (activeSeries.expected && d.expected > max) max = d.expected;
       if (activeSeries.nominal && d.nominal > max) max = d.nominal;
     });
+    if (isSandboxModified && sandboxTimeline.length) {
+      sandboxTimeline.forEach(d => {
+        if (d.totalCombined > max) max = d.totalCombined;
+      });
+    }
     return Math.max(max * 1.08, 100000);
-  }, [visibleData, activeSeries]);
+  }, [visibleData, activeSeries, isSandboxModified, sandboxTimeline]);
 
   const yScale = useMemo(() => {
     return d3.scaleLinear()
@@ -1156,6 +1207,17 @@ export default function App() {
     });
     return paths;
   }, [visibleData, activeSeries, xScale, yScale]);
+
+  // Sandbox overlaid line on main chart
+  const sandboxLinePath = useMemo(() => {
+    if (!isSandboxModified || !sandboxTimeline.length) return null;
+    const visibleSandbox = sandboxTimeline.filter(d => d.ageSelf <= maxVisibleAge);
+    const lineGen = d3.line()
+      .x(d => xScale(d.ageSelf))
+      .y(d => yScale(d.totalCombined))
+      .curve(d3.curveMonotoneX);
+    return lineGen(visibleSandbox);
+  }, [isSandboxModified, sandboxTimeline, maxVisibleAge, xScale, yScale]);
 
   // D3 Geometry for Historical Chart
   const histMaxY = useMemo(() => {
@@ -2358,7 +2420,10 @@ export default function App() {
                   <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
                     <Layers className="w-4 h-4 text-blue-600" /> Projected Portfolio Trajectory
                   </h2>
-                  <span className="text-xs text-slate-500">Real purchasing power by account wrapper</span>
+                  <span className="text-xs text-slate-500">
+                    Real purchasing power by account wrapper
+                    {isSandboxModified && <span className="ml-2 font-bold text-amber-600">• Showing Sandbox Impact (dashed)</span>}
+                  </span>
                 </div>
                 <div className="flex items-center gap-3 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl text-xs w-full sm:w-auto">
                   <span className="text-slate-600 whitespace-nowrap">Horizon: <strong>Age {maxVisibleAge}</strong></span>
@@ -2390,45 +2455,58 @@ export default function App() {
                       </g>
                     ))}
 
-                    {showMilestones && (
-                      <>
-                        {(Number(plan.demographics.retireAgeSelf) || 60) <= maxVisibleAge && (
-                          <g transform={`translate(${xScale(Number(plan.demographics.retireAgeSelf) || 60)}, 0)`}>
-                            <line y2={innerHeight} stroke="#f59e0b" strokeWidth="1.5" strokeDasharray="4,4" />
-                            <rect x={-42} y={10} width={84} height={20} rx={4} fill="#fef3c7" stroke="#fde68a" />
-                            <text y={24} textAnchor="middle" fill="#b45309" fontSize="10" fontWeight="bold">Retire M ({Number(plan.demographics.retireAgeSelf) || 60})</text>
-                          </g>
-                        )}
-                        {isCouple && (Number(plan.demographics.retireAgePart) || 60) <= maxVisibleAge && (
-                          <g transform={`translate(${xScale(Number(plan.demographics.retireAgePart) || 60)}, 0)`}>
-                            <line y2={innerHeight} stroke="#d97706" strokeWidth="1.5" strokeDasharray="3,3" />
-                            <rect x={-42} y={32} width={84} height={20} rx={4} fill="#fef3c7" stroke="#fde68a" />
-                            <text y={46} textAnchor="middle" fill="#b45309" fontSize="10" fontWeight="bold">Retire P ({Number(plan.demographics.retireAgePart) || 60})</text>
-                          </g>
-                        )}
-                        {(Number(plan.demographics.privatePensionAge) || 58) <= maxVisibleAge && (
-                          <g transform={`translate(${xScale(Number(plan.demographics.privatePensionAge) || 58)}, 0)`}>
-                            <line y2={innerHeight} stroke="#0284c7" strokeWidth="1.5" strokeDasharray="4,4" />
-                            <rect x={-36} y={54} width={72} height={20} rx={4} fill="#e0f2fe" stroke="#bae6fd" />
-                            <text y={68} textAnchor="middle" fill="#0369a1" fontSize="10" fontWeight="bold">NMPA ({Number(plan.demographics.privatePensionAge) || 58})</text>
-                          </g>
-                        )}
-                        {(Number(plan.demographics.statePensionAge) || 68) <= maxVisibleAge && (
-                          <g transform={`translate(${xScale(Number(plan.demographics.statePensionAge) || 68)}, 0)`}>
-                            <line y2={innerHeight} stroke="#059669" strokeWidth="1.5" strokeDasharray="4,4" />
-                            <rect x={-38} y={76} width={76} height={20} rx={4} fill="#d1fae5" stroke="#a7f3d0" />
-                            <text y={90} textAnchor="middle" fill="#065f46" fontSize="10" fontWeight="bold">State Pen ({Number(plan.demographics.statePensionAge) || 68})</text>
-                          </g>
-                        )}
-                      </>
+                    {/* Milestones */}
+                    {(Number(plan.demographics.retireAgeSelf) || 60) <= maxVisibleAge && (
+                      <g transform={`translate(${xScale(Number(plan.demographics.retireAgeSelf) || 60)}, 0)`}>
+                        <line y2={innerHeight} stroke="#f59e0b" strokeWidth="1.5" strokeDasharray="4,4" />
+                        <rect x={-42} y={10} width={84} height={20} rx={4} fill="#fef3c7" stroke="#fde68a" />
+                        <text y={24} textAnchor="middle" fill="#b45309" fontSize="10" fontWeight="bold">Retire M ({Number(plan.demographics.retireAgeSelf) || 60})</text>
+                      </g>
                     )}
 
+                    {isCouple && (Number(plan.demographics.retireAgePart) || 60) <= maxVisibleAge && (
+                      <g transform={`translate(${xScale(Number(plan.demographics.retireAgePart) || 60)}, 0)`}>
+                        <line y2={innerHeight} stroke="#d97706" strokeWidth="1.5" strokeDasharray="3,3" />
+                        <rect x={-42} y={32} width={84} height={20} rx={4} fill="#fef3c7" stroke="#fde68a" />
+                        <text y={46} textAnchor="middle" fill="#b45309" fontSize="10" fontWeight="bold">Retire P ({Number(plan.demographics.retireAgePart) || 60})</text>
+                      </g>
+                    )}
+
+                    {(Number(plan.demographics.privatePensionAge) || 58) <= maxVisibleAge && (
+                      <g transform={`translate(${xScale(Number(plan.demographics.privatePensionAge) || 58)}, 0)`}>
+                        <line y2={innerHeight} stroke="#0284c7" strokeWidth="1.5" strokeDasharray="4,4" />
+                        <rect x={-36} y={54} width={72} height={20} rx={4} fill="#e0f2fe" stroke="#bae6fd" />
+                        <text y={68} textAnchor="middle" fill="#0369a1" fontSize="10" fontWeight="bold">NMPA ({Number(plan.demographics.privatePensionAge) || 58})</text>
+                      </g>
+                    )}
+
+                    {(Number(plan.demographics.statePensionAge) || 68) <= maxVisibleAge && (
+                      <g transform={`translate(${xScale(Number(plan.demographics.statePensionAge) || 68)}, 0)`}>
+                        <line y2={innerHeight} stroke="#059669" strokeWidth="1.5" strokeDasharray="4,4" />
+                        <rect x={-38} y={76} width={76} height={20} rx={4} fill="#d1fae5" stroke="#a7f3d0" />
+                        <text y={90} textAnchor="middle" fill="#065f46" fontSize="10" fontWeight="bold">State Pen ({Number(plan.demographics.statePensionAge) || 68})</text>
+                      </g>
+                    )}
+
+                    {/* Standard Series */}
                     {SERIES_CONFIG.map(s => {
                       if (!activeSeries[s.id] || !pathGenerators[s.id]) return null;
                       return (
                         <path key={s.id} d={pathGenerators[s.id]} fill="none" stroke={s.color} strokeWidth={s.strokeWidth} strokeDasharray={s.dash} strokeLinecap="round" />
                       );
                     })}
+
+                    {/* Overlaid Sandbox Trajectory */}
+                    {sandboxLinePath && (
+                      <path
+                        d={sandboxLinePath}
+                        fill="none"
+                        stroke="#f59e0b"
+                        strokeWidth="3.5"
+                        strokeDasharray="6,4"
+                        strokeLinecap="round"
+                      />
+                    )}
 
                     <rect
                       width={innerWidth}
@@ -2460,6 +2538,11 @@ export default function App() {
                     </div>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-1 font-mono">
                       {activeSeries.expected && <div className="text-blue-600 font-bold">Projected Pot: {formatGBP(hoveredPoint.expected)}</div>}
+                      {isSandboxModified && (
+                        <div className="text-amber-600 font-bold">
+                          Sandbox Pot: {formatGBP(sandboxTimeline.find(d => d.ageSelf === hoveredPoint.ageSelf)?.totalCombined)}
+                        </div>
+                      )}
                       {activeSeries.lucky && <div className="text-emerald-600">Lucky: {formatGBP(hoveredPoint.lucky)}</div>}
                       {activeSeries.unlucky && <div className="text-rose-600">Unlucky: {formatGBP(hoveredPoint.unlucky)}</div>}
                       {activeSeries.pensions && <div className="text-sky-600">Pensions: {formatGBP(hoveredPoint.pensions)}</div>}
@@ -2469,48 +2552,234 @@ export default function App() {
                 )}
               </div>
 
-              <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100">
-                {SERIES_CONFIG.map(s => (
-                  <button
-                    key={s.id}
-                    onClick={() => setActiveSeries(prev => ({ ...prev, [s.id]: !prev[s.id] }))}
-                    className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center gap-2 transition-all cursor-pointer border ${
-                      activeSeries[s.id] ? 'bg-slate-100 border-slate-300 text-slate-900 font-semibold' : 'bg-white border-slate-200 text-slate-400 opacity-60'
-                    }`}
-                  >
-                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: s.color }} />
-                    {s.label}
-                    {activeSeries[s.id] && <Check className="w-3 h-3 text-slate-600" />}
-                  </button>
-                ))}
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
+                <div className="flex flex-wrap items-center gap-2">
+                  {SERIES_CONFIG.map(s => (
+                    <button
+                      key={s.id}
+                      onClick={() => setActiveSeries(prev => ({ ...prev, [s.id]: !prev[s.id] }))}
+                      className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center gap-2 transition-all cursor-pointer border ${
+                        activeSeries[s.id] ? 'bg-slate-100 border-slate-300 text-slate-900 font-semibold' : 'bg-white border-slate-200 text-slate-400 opacity-60'
+                      }`}
+                    >
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: s.color }} />
+                      {s.label}
+                      {activeSeries[s.id] && <Check className="w-3 h-3 text-slate-600" />}
+                    </button>
+                  ))}
+                </div>
+
+                {isSandboxModified && (
+                  <div className="flex items-center gap-2 text-xs font-mono font-bold text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1 rounded-xl">
+                    <span className="w-2.5 h-2.5 rounded-full bg-amber-500 border border-amber-600" />
+                    Sandbox Active (Dashed Line)
+                  </div>
+                )}
               </div>
             </div>
 
-            {auditMetrics && (
-              <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
-                <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                  <ShieldCheck className="w-4 h-4 text-emerald-600" /> Plan Benchmarks
-                </h3>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
-                  <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl">
-                    <span className="text-slate-500 font-sans font-semibold block mb-1">Starting Balance</span>
-                    <span className="text-base font-bold text-slate-900">{formatGBP(auditMetrics.startVal)}</span>
-                  </div>
-                  <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl">
-                    <span className="text-slate-500 font-sans font-semibold block mb-1">Pot at Retirement (Age {auditMetrics.retAge})</span>
-                    <span className="text-base font-bold text-amber-700">{formatGBP(auditMetrics.retVal)}</span>
-                  </div>
-                  <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl">
-                    <span className="text-slate-500 font-sans font-semibold block mb-1">Lowest Projected Balance</span>
-                    <span className="text-base font-bold text-emerald-700">{formatGBP(auditMetrics.troughVal)}</span>
-                  </div>
-                  <div className="bg-slate-50 border border-slate-200 p-3 rounded-xl">
-                    <span className="text-slate-500 font-sans font-semibold block mb-1">Pot at Age 100</span>
-                    <span className="text-base font-bold text-blue-700">{formatGBP(auditMetrics.terminalVal)}</span>
-                  </div>
+            {/* CONTRIBUTION & ESCALATION SANDBOX (Replaces Plan Benchmarks) */}
+            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-amber-500" /> Contribution & Escalation Sandbox
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Test increasing or decreasing annual contributions and escalation growth rates in real time without modifying your base plan inputs.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleResetSandbox}
+                    disabled={!isSandboxModified}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all border ${
+                      isSandboxModified
+                        ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300 cursor-pointer'
+                        : 'bg-slate-50 text-slate-300 border-slate-200 cursor-not-allowed'
+                    }`}
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" /> Reset Sandbox
+                  </button>
+
+                  <button
+                    onClick={handleApplySandboxToPlan}
+                    disabled={!isSandboxModified}
+                    className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs ${
+                      isSandboxModified
+                        ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white cursor-pointer active:scale-95'
+                        : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
+                    }`}
+                  >
+                    <Check className="w-3.5 h-3.5" /> Apply to Plan Inputs
+                  </button>
                 </div>
               </div>
-            )}
+
+              {/* Sandbox Live Impact KPIs */}
+              {sandboxMetrics && (
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className={`p-4 rounded-2xl border shadow-2xs ${
+                    sandboxMetrics.terminalDelta >= 0 ? 'bg-emerald-50/70 border-emerald-200' : 'bg-rose-50/70 border-rose-200'
+                  }`}>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Terminal Pot Impact (@ 100)</span>
+                      {sandboxMetrics.terminalDelta >= 0 ? (
+                        <ArrowUpRight className="w-4 h-4 text-emerald-600" />
+                      ) : (
+                        <ArrowDownRight className="w-4 h-4 text-rose-600" />
+                      )}
+                    </div>
+                    <div className={`text-xl font-black font-mono mt-1 ${
+                      sandboxMetrics.terminalDelta >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                    }`}>
+                      {sandboxMetrics.terminalDelta >= 0 ? '+' : ''}{formatGBP(sandboxMetrics.terminalDelta)}
+                    </div>
+                    <span className="text-[11px] text-slate-500 block mt-0.5 font-mono">
+                      {formatGBP(sandboxMetrics.baseTerminal)} → {formatGBP(sandboxMetrics.sbTerminal)}
+                    </span>
+                  </div>
+
+                  <div className={`p-4 rounded-2xl border shadow-2xs ${
+                    sandboxMetrics.retirementDelta >= 0 ? 'bg-emerald-50/70 border-emerald-200' : 'bg-rose-50/70 border-rose-200'
+                  }`}>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Retirement Pot Impact</span>
+                      {sandboxMetrics.retirementDelta >= 0 ? (
+                        <ArrowUpRight className="w-4 h-4 text-emerald-600" />
+                      ) : (
+                        <ArrowDownRight className="w-4 h-4 text-rose-600" />
+                      )}
+                    </div>
+                    <div className={`text-xl font-black font-mono mt-1 ${
+                      sandboxMetrics.retirementDelta >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                    }`}>
+                      {sandboxMetrics.retirementDelta >= 0 ? '+' : ''}{formatGBP(sandboxMetrics.retirementDelta)}
+                    </div>
+                    <span className="text-[11px] text-slate-500 block mt-0.5 font-mono">
+                      At Age {plan.demographics.retireAgeSelf || 60}
+                    </span>
+                  </div>
+
+                  <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50/70 shadow-2xs">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block mb-1">Cumulative Extra Invested</span>
+                    <div className="text-xl font-bold font-mono text-slate-800 mt-1">
+                      {sandboxMetrics.cumulativeExtraCapital >= 0 ? '+' : ''}{formatGBP(sandboxMetrics.cumulativeExtraCapital)}
+                    </div>
+                    <span className="text-[11px] text-slate-500 block mt-0.5">
+                      Total difference in deposits
+                    </span>
+                  </div>
+
+                  <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50/70 shadow-2xs">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block mb-1">Wealth Compounding Multiple</span>
+                    <div className="text-xl font-bold font-mono text-indigo-700 mt-1">
+                      {sandboxMetrics.cumulativeExtraCapital !== 0 ? `${sandboxMetrics.multiplier.toFixed(2)}x` : '1.00x'}
+                    </div>
+                    <span className="text-[11px] text-slate-500 block mt-0.5">
+                      Net return per £1 adjusted
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Interactive Wrapper Control Grid */}
+              <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans">
+                    <tr>
+                      <th className="p-3">Portfolio Wrapper</th>
+                      {isCouple && <th className="p-3">Owner</th>}
+                      <th className="p-3">Annual Contribution (£)</th>
+                      <th className="p-3">Quick Adjust</th>
+                      <th className="p-3">Escalation (% / yr)</th>
+                      <th className="p-3 text-right">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-mono">
+                    {displayedAccounts.map(acc => {
+                      const sb = sandboxAccounts[acc.id] || { contrib: acc.contrib, growth: acc.growth };
+                      const isContribChanged = Number(acc.contrib || 0) !== Number(sb.contrib || 0);
+                      const isGrowthChanged = Number(acc.growth || 0) !== Number(sb.growth || 0);
+                      const isModified = isContribChanged || isGrowthChanged;
+
+                      return (
+                        <tr key={acc.id} className={`transition-colors ${isModified ? 'bg-amber-50/40' : 'hover:bg-slate-50/60'}`}>
+                          <td className="p-3 font-sans font-bold text-slate-800">
+                            {acc.category}
+                            <span className="block text-[10px] text-slate-400 font-normal">Base: {formatGBP(acc.contrib)} / yr @ {acc.growth || 0}%</span>
+                          </td>
+                          {isCouple && <td className="p-3 font-sans text-slate-600">{acc.owner}</td>}
+                          <td className="p-3">
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="number"
+                                step="250"
+                                value={sb.contrib}
+                                onFocus={handleFocus}
+                                onChange={(e) => updateSandboxField(acc.id, 'contrib', e.target.value)}
+                                className="w-28 p-1.5 bg-white border border-slate-300 rounded font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                              />
+                            </div>
+                          </td>
+                          <td className="p-3">
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={() => adjustSandboxContrib(acc.id, -1000)}
+                                className="px-1.5 py-1 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded text-[10px] font-sans font-semibold text-slate-700 cursor-pointer"
+                              >
+                                -1k
+                              </button>
+                              <button
+                                onClick={() => adjustSandboxContrib(acc.id, -500)}
+                                className="px-1.5 py-1 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded text-[10px] font-sans font-semibold text-slate-700 cursor-pointer"
+                              >
+                                -500
+                              </button>
+                              <button
+                                onClick={() => adjustSandboxContrib(acc.id, 500)}
+                                className="px-1.5 py-1 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded text-[10px] font-sans font-semibold text-slate-700 cursor-pointer"
+                              >
+                                +500
+                              </button>
+                              <button
+                                onClick={() => adjustSandboxContrib(acc.id, 1000)}
+                                className="px-1.5 py-1 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded text-[10px] font-sans font-semibold text-slate-700 cursor-pointer"
+                              >
+                                +1k
+                              </button>
+                            </div>
+                          </td>
+                          <td className="p-3">
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="number"
+                                step="0.5"
+                                value={sb.growth}
+                                onFocus={handleFocus}
+                                onChange={(e) => updateSandboxField(acc.id, 'growth', e.target.value)}
+                                className="w-20 p-1.5 bg-white border border-slate-300 rounded text-slate-900 font-bold focus:outline-none focus:ring-2 focus:ring-amber-500"
+                              />
+                              <span className="text-slate-400 font-sans">%</span>
+                            </div>
+                          </td>
+                          <td className="p-3 text-right">
+                            {isModified ? (
+                              <span className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded font-sans text-[10px] font-bold">
+                                Adjusted
+                              </span>
+                            ) : (
+                              <span className="text-slate-400 font-sans text-[10px]">Unchanged</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         )}
 
@@ -3124,7 +3393,7 @@ export default function App() {
                 </div>
               </section>
 
-              {/* 14. Saving Scenarios & Browser Storage */}
+              {/* 14. Scenario Saving & Browser Storage */}
               <section id="doc-scenarios" className="space-y-4 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
                   <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">14</span>
