@@ -32,7 +32,7 @@ import {
   UserCheck
 } from 'lucide-react';
 
-const STORAGE_KEY = 'rp_plan_full_v16';
+const STORAGE_KEY = 'rp_plan_full_v18';
 
 export const DEFAULT_RISK_PROFILES = {
   'High Risk': { label: '80–100% Equities', real: 4.44, unlucky: 1.66, lucky: 7.31, nominal: 7.05 },
@@ -61,7 +61,7 @@ const calculateYearFraction = (dateStr) => {
 const BLANK_PLAN = {
   activeProfileView: 'Combined',
   demographics: {
-    planningMode: 'couple', // 'single' | 'couple'
+    planningMode: 'couple',
     currentAgeSelf: '',
     currentAgePart: '',
     retireAgeSelf: '',
@@ -249,15 +249,15 @@ export default function App() {
   // =========================================================================
   const runEngineYear = (t, potsMap, planState, regimeOrShock = 'expected', tracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false }) => {
     const planIsCouple = planState.demographics.planningMode !== 'single';
-    const ageSelfStart = Number(planState.demographics.currentAgeSelf) || 35;
-    const agePartStart = planIsCouple ? (Number(planState.demographics.currentAgePart) || (ageSelfStart + 1)) : 0;
+    const ageSelfStart = Number(planState.demographics.currentAgeSelf) || 40;
+    const agePartStart = planIsCouple ? (Number(planState.demographics.currentAgePart) || 40) : 0;
     const retireAgeSelf = Number(planState.demographics.retireAgeSelf) || 60;
     const retireAgePart = planIsCouple ? (Number(planState.demographics.retireAgePart) || 60) : 999;
     const privatePenAge = Number(planState.demographics.privatePensionAge) || 58;
     const statePenAge = Number(planState.demographics.statePensionAge) || 68;
 
     const taperFraction = (Number(planState.spending.taperRate) || 0) / 100;
-    const taperAge = Number(planState.spending.taperAge) || 80;
+    const taperAge = Number(planState.spending.taperAge) || 75;
     const targetSpend = Number(planState.spending.targetSpend) || 0;
     
     const staggeredSpend = (planState.spending.staggeredSpend !== '' && planState.spending.staggeredSpend !== undefined)
@@ -619,7 +619,7 @@ export default function App() {
   // 4. Deterministic Multi-Regime Timeline
   const timelineData = useMemo(() => {
     const rows = [];
-    const ageSelfStart = Number(plan.demographics.currentAgeSelf) || 35;
+    const ageSelfStart = Number(plan.demographics.currentAgeSelf) || 40;
     const terminalAge = Number(plan.demographics.terminalAge) || 100;
     const totalYears = Math.max(1, terminalAge - ageSelfStart);
     const inflation = (Number(plan.config.inflation) || 2.5) / 100;
@@ -697,7 +697,7 @@ export default function App() {
     const terminalPots = [];
     const sigma = (Number(plan.config.annualVolatility) || 13.5) / 100;
     const floor = Number(plan.config.solvencyFloor) || 0;
-    const ageSelfStart = Number(plan.demographics.currentAgeSelf) || 35;
+    const ageSelfStart = Number(plan.demographics.currentAgeSelf) || 40;
     const terminalAge = Number(plan.demographics.terminalAge) || 100;
     const totalYears = Math.max(1, terminalAge - ageSelfStart);
 
@@ -787,7 +787,7 @@ export default function App() {
     }
     setIsOptimizing(true);
     setTimeout(() => {
-      const base = Number(plan.spending.targetSpend) || 25000;
+      const base = Number(plan.spending.targetSpend) || 30000;
       let low = Math.max(5000, Math.floor((base * 0.4) / 1000) * 1000);
       let high = Math.max(150000, Math.ceil((base * 3.0) / 1000) * 1000);
       let opt = low;
@@ -823,7 +823,7 @@ export default function App() {
   const innerHeight = chartHeight - margin.top - margin.bottom;
 
   const xScale = useMemo(() => {
-    const curAge = Number(plan.demographics.currentAgeSelf) || 35;
+    const curAge = Number(plan.demographics.currentAgeSelf) || 40;
     return d3.scaleLinear()
       .domain([curAge, Math.max(curAge + 1, maxVisibleAge)])
       .range([0, innerWidth]);
@@ -1047,9 +1047,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* ==================================================== */}
-        {/* TAB 1: PLAN INPUTS                                   */}
-        {/* ==================================================== */}
+        {/* TAB 1: PLAN INPUTS */}
         {activeTab === 'inputs' && (
           <div className="space-y-6">
             <div className="flex flex-wrap items-center justify-between gap-3 bg-white border border-slate-200/90 p-4 rounded-2xl shadow-xs">
@@ -1081,7 +1079,6 @@ export default function App() {
                   <span className="text-xs text-slate-500">Choose whether this plan is for an individual or a couple.</span>
                 </div>
 
-                {/* Single / Couple Segmented Toggle */}
                 <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
                   <button
                     type="button"
@@ -1090,7 +1087,7 @@ export default function App() {
                       !isCouple ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
-                    Just Myself (Single)
+                    Single
                   </button>
                   <button
                     type="button"
@@ -1099,7 +1096,7 @@ export default function App() {
                       isCouple ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
-                    With Partner (Couple)
+                    With Partner
                   </button>
                 </div>
               </div>
@@ -1107,25 +1104,25 @@ export default function App() {
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
                 <div>
                   <label className="text-slate-600 font-semibold block mb-1">Current Age (Myself)</label>
-                  <input type="number" placeholder="e.g. 35" onFocus={handleFocus} value={plan.demographics.currentAgeSelf} onChange={(e) => updateDemographics('currentAgeSelf', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  <input type="number" placeholder="e.g. 40" onFocus={handleFocus} value={plan.demographics.currentAgeSelf} onChange={(e) => updateDemographics('currentAgeSelf', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                 </div>
 
                 {isCouple && (
                   <div>
                     <label className="text-slate-600 font-semibold block mb-1">Current Age (Partner)</label>
-                    <input type="number" placeholder="e.g. 36" onFocus={handleFocus} value={plan.demographics.currentAgePart} onChange={(e) => updateDemographics('currentAgePart', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                    <input type="number" placeholder="e.g. 40" onFocus={handleFocus} value={plan.demographics.currentAgePart} onChange={(e) => updateDemographics('currentAgePart', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                   </div>
                 )}
 
                 <div>
                   <label className="text-slate-600 font-semibold block mb-1">Retirement Age (Myself)</label>
-                  <input type="number" placeholder="e.g. 57" onFocus={handleFocus} value={plan.demographics.retireAgeSelf} onChange={(e) => updateDemographics('retireAgeSelf', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  <input type="number" placeholder="e.g. 60" onFocus={handleFocus} value={plan.demographics.retireAgeSelf} onChange={(e) => updateDemographics('retireAgeSelf', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                 </div>
 
                 {isCouple && (
                   <div>
                     <label className="text-slate-600 font-semibold block mb-1">Retirement Age (Partner)</label>
-                    <input type="number" placeholder="e.g. 57" onFocus={handleFocus} value={plan.demographics.retireAgePart} onChange={(e) => updateDemographics('retireAgePart', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                    <input type="number" placeholder="e.g. 60" onFocus={handleFocus} value={plan.demographics.retireAgePart} onChange={(e) => updateDemographics('retireAgePart', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                   </div>
                 )}
 
@@ -1137,54 +1134,32 @@ export default function App() {
                 {isCouple && (
                   <div>
                     <label className="text-slate-600 font-semibold block mb-1">Expected State Pension (Partner £/yr)</label>
-                    <input type="number" step="250" placeholder="e.g. 6000" onFocus={handleFocus} value={plan.demographics.statePensionPart} onChange={(e) => updateDemographics('statePensionPart', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                    <input type="number" step="250" placeholder="e.g. 11500" onFocus={handleFocus} value={plan.demographics.statePensionPart} onChange={(e) => updateDemographics('statePensionPart', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                   </div>
                 )}
 
                 <div>
                   <label className="text-slate-600 font-semibold block mb-1">{isCouple ? 'Joint Net Living Spend (£/yr)' : 'Net Living Spend (£/yr)'}</label>
-                  <input type="number" step="1000" placeholder="e.g. 25000" onFocus={handleFocus} value={plan.spending.targetSpend} onChange={(e) => updateSpending('targetSpend', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  <input type="number" step="1000" placeholder="e.g. 30000" onFocus={handleFocus} value={plan.spending.targetSpend} onChange={(e) => updateSpending('targetSpend', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                 </div>
 
                 {isCouple && (
                   <div>
                     <label className="text-slate-600 font-semibold block mb-1">Staggered Spend (1 Retired £/yr)</label>
-                    <input type="number" step="1000" placeholder="e.g. 15000" onFocus={handleFocus} value={plan.spending.staggeredSpend} onChange={(e) => updateSpending('staggeredSpend', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                    <input type="number" step="1000" placeholder="e.g. 20000" onFocus={handleFocus} value={plan.spending.staggeredSpend} onChange={(e) => updateSpending('staggeredSpend', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                   </div>
                 )}
 
                 <div>
                   <label className="text-slate-600 font-semibold block mb-1">Spend Taper Age</label>
-                  <input type="number" placeholder="e.g. 80" onFocus={handleFocus} value={plan.spending.taperAge} onChange={(e) => updateSpending('taperAge', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  <input type="number" placeholder="e.g. 75" onFocus={handleFocus} value={plan.spending.taperAge} onChange={(e) => updateSpending('taperAge', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                 </div>
                 <div>
                   <label className="text-slate-600 font-semibold block mb-1">Spend Taper Reduction (%)</label>
                   <div className="relative">
-                    <input type="number" step="1" placeholder="e.g. 15" onFocus={handleFocus} value={plan.spending.taperRate} onChange={(e) => updateSpending('taperRate', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold pr-8 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                    <input type="number" step="1" placeholder="e.g. 10" onFocus={handleFocus} value={plan.spending.taperRate} onChange={(e) => updateSpending('taperRate', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold pr-8 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                     <span className="absolute right-3 top-2 text-slate-400 font-bold">%</span>
                   </div>
-                </div>
-                <div>
-                  <label className="text-slate-600 font-semibold block mb-1">Decumulation Policy</label>
-                  <select
-                    value={plan.spending.decumulationPolicy}
-                    onChange={(e) => updateSpending('decumulationPolicy', e.target.value)}
-                    className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs text-blue-700 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer"
-                  >
-                    <option value="Bracket Fill">UK FIRE Bracket Fill (Tax-Optimized)</option>
-                    <option value="Sequential">Sequential (Cash → GIA → ISA → Pension)</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="text-slate-600 font-semibold block mb-1">Pension Drawdown Strategy</label>
-                  <select
-                    value={plan.spending.drawdownStrategy}
-                    onChange={(e) => updateSpending('drawdownStrategy', e.target.value)}
-                    className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs text-blue-700 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer"
-                  >
-                    <option value="Phased Drawdown">Phased Drawdown (Ongoing 25% tax-free proportion)</option>
-                    <option value="Full 25% Lump Sum">Full 25% Lump Sum (Upfront statutory PCLS into Cash)</option>
-                  </select>
                 </div>
               </div>
             </div>
@@ -1495,11 +1470,46 @@ export default function App() {
           </div>
         )}
 
-        {/* ==================================================== */}
-        {/* TAB 2: CONFIG & ASSUMPTIONS                          */}
-        {/* ==================================================== */}
+        {/* TAB 2: CONFIG & ASSUMPTIONS */}
         {activeTab === 'config' && (
           <div className="space-y-6">
+            {/* Decumulation Strategies Card */}
+            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                <Sliders className="w-4 h-4 text-blue-600" /> Decumulation & Pension Withdrawal Methodology
+              </h2>
+              <p className="text-xs text-slate-500">Select how portfolio withdrawals are ordered across tax wrappers and how pensions are crystallized.</p>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs pt-1">
+                <div>
+                  <label className="text-slate-600 font-semibold block mb-1">Decumulation Policy</label>
+                  <select
+                    value={plan.spending.decumulationPolicy}
+                    onChange={(e) => updateSpending('decumulationPolicy', e.target.value)}
+                    className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs text-blue-700 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer"
+                  >
+                    <option value="Bracket Fill">UK FIRE Bracket Fill (Tax-Optimized)</option>
+                    <option value="Sequential">Sequential (Cash → GIA → ISA → Pension)</option>
+                  </select>
+                  <span className="text-[10px] text-slate-400 mt-1 block">Bracket Fill takes pension first to use 0% Personal Allowance, then draws ISAs.</span>
+                </div>
+
+                <div>
+                  <label className="text-slate-600 font-semibold block mb-1">Pension Drawdown Strategy</label>
+                  <select
+                    value={plan.spending.drawdownStrategy}
+                    onChange={(e) => updateSpending('drawdownStrategy', e.target.value)}
+                    className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs text-blue-700 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer"
+                  >
+                    <option value="Phased Drawdown">Phased Drawdown (Ongoing 25% tax-free proportion)</option>
+                    <option value="Full 25% Lump Sum">Full 25% Lump Sum (Upfront statutory PCLS into Cash)</option>
+                  </select>
+                  <span className="text-[10px] text-slate-400 mt-1 block">Phased crystallizes 25% tax-free with each draw; Lump Sum dumps 25% into cash upfront.</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Global Economic & Calculation Configuration */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
                 <Settings className="w-4 h-4 text-blue-600" /> Global Economic & Calculation Configuration
@@ -1676,9 +1686,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ==================================================== */}
-        {/* TAB 3: DASHBOARD & SIMULATION                        */}
-        {/* ==================================================== */}
+        {/* TAB 3: DASHBOARD & SIMULATION */}
         {activeTab === 'dashboard' && (
           <div className="space-y-6">
             <div className="p-3.5 bg-blue-50/70 border border-blue-200/80 rounded-2xl text-xs text-slate-700 flex items-start gap-3">
@@ -1997,9 +2005,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ==================================================== */}
-        {/* TAB 4: AUDIT DATA TABLE                              */}
-        {/* ==================================================== */}
+        {/* TAB 4: AUDIT DATA TABLE */}
         {activeTab === 'audit' && (
           <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
             <div className="flex justify-between items-center flex-wrap gap-2">
@@ -2074,9 +2080,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ==================================================== */}
-        {/* TAB 5: DOCUMENTATION                                 */}
-        {/* ==================================================== */}
+        {/* TAB 5: DOCUMENTATION */}
         {activeTab === 'docs' && (
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 items-start">
             
@@ -2126,7 +2130,7 @@ export default function App() {
                   Architecture & Real Terms
                 </h3>
                 <p>
-                  The model runs entirely in <strong>real terms</strong> (today's purchasing power) rather than nominal pounds. If you enter £25,000/yr, that represents £25,000 of goods and services whether you are 35, 65, or 90. Asset return rates are net of inflation.
+                  The model runs entirely in <strong>real terms</strong> (today's purchasing power) rather than nominal pounds. If you enter £30,000/yr, that represents £30,000 of goods and services whether you are 40, 65, or 90. Asset return rates are net of inflation.
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
                   <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl text-xs space-y-1">
@@ -2317,7 +2321,7 @@ export default function App() {
                   </p>
                   <strong className="text-slate-900 block font-semibold pt-1">Single Mode:</strong>
                   <p className="text-slate-600">
-                    When toggled to <em>Just Myself</em>, all partner fields are omitted. 100% of spending demand is assigned directly to you, full target spend activates immediately upon your retirement without staggered work delays, and the Monte Carlo solver only checks your own retirement timeline.
+                    When toggled to <em>Single</em>, all partner fields are omitted. 100% of spending demand is assigned directly to you, full target spend activates immediately upon your retirement without staggered work delays, and the Monte Carlo solver only checks your own retirement timeline.
                   </p>
                 </div>
               </section>
