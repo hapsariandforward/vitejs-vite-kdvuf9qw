@@ -35,8 +35,8 @@ import {
   Save
 } from 'lucide-react';
 
-const STORAGE_KEY = 'rp_plan_full_v26';
-const SCENARIOS_STORAGE_KEY = 'rp_saved_scenarios_v1';
+const STORAGE_KEY = 'rp_plan_full_v27';
+const SCENARIOS_STORAGE_KEY = 'rp_saved_scenarios_v2';
 
 // 98-Year Empirical Dataset (1928–2025): Real S&P 500 (s) and 50/50 Govt/Corp Real Bond (b) Returns
 export const HISTORICAL_DATA = [
@@ -341,7 +341,23 @@ export default function App() {
   // =========================================================================
   // SCENARIO SAVE & SWITCH HANDLERS
   // =========================================================================
-  const handleSaveNewScenario = () => {
+  const handleSaveScenario = () => {
+    setScenarios(prev => prev.map(s => {
+      if (s.id === activeScenarioId) {
+        return {
+          ...s,
+          name: scenarioNameInput.trim() !== '' ? scenarioNameInput.trim() : s.name,
+          data: JSON.parse(JSON.stringify(plan))
+        };
+      }
+      return s;
+    }));
+    setScenarioNameInput('');
+    setSaveSuccessMsg('Scenario saved');
+    setTimeout(() => setSaveSuccessMsg(''), 3000);
+  };
+
+  const handleSaveAsNewScenario = () => {
     const trimmed = scenarioNameInput.trim();
     const finalName = trimmed !== '' ? trimmed : `Scenario ${scenarios.length + 1}`;
     const newId = 'scen_' + Date.now();
@@ -355,22 +371,6 @@ export default function App() {
     setActiveScenarioId(newId);
     setScenarioNameInput('');
     setSaveSuccessMsg(`Saved as "${finalName}"`);
-    setTimeout(() => setSaveSuccessMsg(''), 3000);
-  };
-
-  const handleUpdateActiveScenario = () => {
-    setScenarios(prev => prev.map(s => {
-      if (s.id === activeScenarioId) {
-        return {
-          ...s,
-          name: scenarioNameInput.trim() !== '' ? scenarioNameInput.trim() : s.name,
-          data: JSON.parse(JSON.stringify(plan))
-        };
-      }
-      return s;
-    }));
-    setScenarioNameInput('');
-    setSaveSuccessMsg('Scenario updated');
     setTimeout(() => setSaveSuccessMsg(''), 3000);
   };
 
@@ -1425,23 +1425,22 @@ export default function App() {
               placeholder="Scenario name (optional)"
               value={scenarioNameInput}
               onChange={(e) => setScenarioNameInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') handleSaveNewScenario(); }}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleSaveScenario(); }}
               className="p-1.5 px-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 w-48 sm:w-56"
             />
 
             <button
-              onClick={handleSaveNewScenario}
+              onClick={handleSaveScenario}
               className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95"
             >
-              <Plus className="w-3.5 h-3.5" /> Save Scenario
+              <Save className="w-3.5 h-3.5" /> Save
             </button>
 
             <button
-              onClick={handleUpdateActiveScenario}
-              title="Save current inputs to active scenario"
+              onClick={handleSaveAsNewScenario}
               className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all border border-slate-200 cursor-pointer"
             >
-              <Save className="w-3.5 h-3.5 text-slate-600" /> Overwrite Active
+              <Plus className="w-3.5 h-3.5 text-slate-600" /> Save as New Scenario
             </button>
 
             {saveSuccessMsg && (
@@ -2391,37 +2390,37 @@ export default function App() {
                       </g>
                     ))}
 
-                    {/* Milestones */}
-                    {(Number(plan.demographics.retireAgeSelf) || 60) <= maxVisibleAge && (
-                      <g transform={`translate(${xScale(Number(plan.demographics.retireAgeSelf) || 60)}, 0)`}>
-                        <line y2={innerHeight} stroke="#f59e0b" strokeWidth="1.5" strokeDasharray="4,4" />
-                        <rect x={-42} y={10} width={84} height={20} rx={4} fill="#fef3c7" stroke="#fde68a" />
-                        <text y={24} textAnchor="middle" fill="#b45309" fontSize="10" fontWeight="bold">Retire M ({Number(plan.demographics.retireAgeSelf) || 60})</text>
-                      </g>
-                    )}
-
-                    {isCouple && (Number(plan.demographics.retireAgePart) || 60) <= maxVisibleAge && (
-                      <g transform={`translate(${xScale(Number(plan.demographics.retireAgePart) || 60)}, 0)`}>
-                        <line y2={innerHeight} stroke="#d97706" strokeWidth="1.5" strokeDasharray="3,3" />
-                        <rect x={-42} y={32} width={84} height={20} rx={4} fill="#fef3c7" stroke="#fde68a" />
-                        <text y={46} textAnchor="middle" fill="#b45309" fontSize="10" fontWeight="bold">Retire P ({Number(plan.demographics.retireAgePart) || 60})</text>
-                      </g>
-                    )}
-
-                    {(Number(plan.demographics.privatePensionAge) || 58) <= maxVisibleAge && (
-                      <g transform={`translate(${xScale(Number(plan.demographics.privatePensionAge) || 58)}, 0)`}>
-                        <line y2={innerHeight} stroke="#0284c7" strokeWidth="1.5" strokeDasharray="4,4" />
-                        <rect x={-36} y={54} width={72} height={20} rx={4} fill="#e0f2fe" stroke="#bae6fd" />
-                        <text y={68} textAnchor="middle" fill="#0369a1" fontSize="10" fontWeight="bold">NMPA ({Number(plan.demographics.privatePensionAge) || 58})</text>
-                      </g>
-                    )}
-
-                    {(Number(plan.demographics.statePensionAge) || 68) <= maxVisibleAge && (
-                      <g transform={`translate(${xScale(Number(plan.demographics.statePensionAge) || 68)}, 0)`}>
-                        <line y2={innerHeight} stroke="#059669" strokeWidth="1.5" strokeDasharray="4,4" />
-                        <rect x={-38} y={76} width={76} height={20} rx={4} fill="#d1fae5" stroke="#a7f3d0" />
-                        <text y={90} textAnchor="middle" fill="#065f46" fontSize="10" fontWeight="bold">State Pen ({Number(plan.demographics.statePensionAge) || 68})</text>
-                      </g>
+                    {showMilestones && (
+                      <>
+                        {(Number(plan.demographics.retireAgeSelf) || 60) <= maxVisibleAge && (
+                          <g transform={`translate(${xScale(Number(plan.demographics.retireAgeSelf) || 60)}, 0)`}>
+                            <line y2={innerHeight} stroke="#f59e0b" strokeWidth="1.5" strokeDasharray="4,4" />
+                            <rect x={-42} y={10} width={84} height={20} rx={4} fill="#fef3c7" stroke="#fde68a" />
+                            <text y={24} textAnchor="middle" fill="#b45309" fontSize="10" fontWeight="bold">Retire M ({Number(plan.demographics.retireAgeSelf) || 60})</text>
+                          </g>
+                        )}
+                        {isCouple && (Number(plan.demographics.retireAgePart) || 60) <= maxVisibleAge && (
+                          <g transform={`translate(${xScale(Number(plan.demographics.retireAgePart) || 60)}, 0)`}>
+                            <line y2={innerHeight} stroke="#d97706" strokeWidth="1.5" strokeDasharray="3,3" />
+                            <rect x={-42} y={32} width={84} height={20} rx={4} fill="#fef3c7" stroke="#fde68a" />
+                            <text y={46} textAnchor="middle" fill="#b45309" fontSize="10" fontWeight="bold">Retire P ({Number(plan.demographics.retireAgePart) || 60})</text>
+                          </g>
+                        )}
+                        {(Number(plan.demographics.privatePensionAge) || 58) <= maxVisibleAge && (
+                          <g transform={`translate(${xScale(Number(plan.demographics.privatePensionAge) || 58)}, 0)`}>
+                            <line y2={innerHeight} stroke="#0284c7" strokeWidth="1.5" strokeDasharray="4,4" />
+                            <rect x={-36} y={54} width={72} height={20} rx={4} fill="#e0f2fe" stroke="#bae6fd" />
+                            <text y={68} textAnchor="middle" fill="#0369a1" fontSize="10" fontWeight="bold">NMPA ({Number(plan.demographics.privatePensionAge) || 58})</text>
+                          </g>
+                        )}
+                        {(Number(plan.demographics.statePensionAge) || 68) <= maxVisibleAge && (
+                          <g transform={`translate(${xScale(Number(plan.demographics.statePensionAge) || 68)}, 0)`}>
+                            <line y2={innerHeight} stroke="#059669" strokeWidth="1.5" strokeDasharray="4,4" />
+                            <rect x={-38} y={76} width={76} height={20} rx={4} fill="#d1fae5" stroke="#a7f3d0" />
+                            <text y={90} textAnchor="middle" fill="#065f46" fontSize="10" fontWeight="bold">State Pen ({Number(plan.demographics.statePensionAge) || 68})</text>
+                          </g>
+                        )}
+                      </>
                     )}
 
                     {SERIES_CONFIG.map(s => {
@@ -3125,7 +3124,7 @@ export default function App() {
                 </div>
               </section>
 
-              {/* 14. Scenario Saving & Browser Storage */}
+              {/* 14. Saving Scenarios & Browser Storage */}
               <section id="doc-scenarios" className="space-y-4 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
                   <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">14</span>
@@ -3149,10 +3148,10 @@ export default function App() {
                   <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1.5">
                     <div className="flex items-center gap-1.5 font-bold text-slate-900">
                       <Save className="w-4 h-4 text-indigo-600" />
-                      Saving vs. Overwriting
+                      Save vs. Save as New Scenario
                     </div>
                     <p className="text-slate-600">
-                      Use <strong>Save Scenario</strong> to branch your current plan into a new named scenario (or auto-named "Scenario 2", etc.). Use <strong>Overwrite Active</strong> if you simply want to update your current scenario with any new adjustments made on the Plan Inputs or Config screens.
+                      Use the <strong>Save</strong> button to overwrite and update your currently selected scenario with any recent changes. Use <strong>Save as New Scenario</strong> to branch your current plan into a new separate scenario (using your custom name if typed in, or auto-numbering like "Scenario 2").
                     </p>
                   </div>
                 </div>
@@ -3163,7 +3162,7 @@ export default function App() {
                     Important Note on Local Storage & Backups
                   </div>
                   <p>
-                    Because <code>localStorage</code> is tied to your specific browser and machine, clearing your browser cookies/site data will wipe them. Using the <strong>Export JSON</strong> button remains the recommended way to create permanent file backups.
+                    Because localStorage is tied to your specific browser and machine, clearing your browser cookies/site data will wipe them. Using the Export JSON button remains the recommended way to create permanent file backups.
                   </p>
                 </div>
               </section>
