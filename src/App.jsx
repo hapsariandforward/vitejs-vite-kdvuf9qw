@@ -1607,7 +1607,7 @@ export default function App() {
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
                 <Settings className="w-4 h-4 text-blue-600" /> Global Economic & Calculation Configuration
               </h2>
-              <p className="text-xs text-slate-500">Economic and regulatory tax settings used throughout the projection engine.</p>
+              <p className="text-xs text-slate-500">Economic and regulatory tax settings used throughout the projection engine. Note this not 'todays' value but a predicted average throughout the timespan of the simulation. </p>
 
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-xs pt-3">
                 <div>
