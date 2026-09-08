@@ -1254,7 +1254,7 @@ export default function App() {
               <div className="flex justify-between items-center">
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2">
-                    <Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (DB Pension, Consulting, Rental)
+                    <Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (e.g. Defined Benefit Pension, Part-time income, Rental)
                   </h3>
                   <span className="text-[11px] text-slate-500">Taxable streams count toward personal allowance and tax bands; tax-free streams directly reduce net drawdown demand.</span>
                 </div>
