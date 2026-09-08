@@ -32,7 +32,7 @@ import {
   UserCheck
 } from 'lucide-react';
 
-const STORAGE_KEY = 'rp_plan_full_v18';
+const STORAGE_KEY = 'rp_plan_full_v19';
 
 export const DEFAULT_RISK_PROFILES = {
   'High Risk': { label: '80–100% Equities', real: 4.44, unlucky: 1.66, lucky: 7.31, nominal: 7.05 },
@@ -245,7 +245,7 @@ export default function App() {
   };
 
   // =========================================================================
-  // 3. UNIFIED SIMULATION ENGINE (Single / Couple Aware)
+  // 3. UNIFIED SIMULATION ENGINE
   // =========================================================================
   const runEngineYear = (t, potsMap, planState, regimeOrShock = 'expected', tracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false }) => {
     const planIsCouple = planState.demographics.planningMode !== 'single';
@@ -328,35 +328,7 @@ export default function App() {
       }
     }
 
-    // 4. One-off Capital Costs
-    const costThisYear = planState.oneOffCosts.filter(c => {
-      const itemYear = c.date ? parseInt(c.date.slice(0, 4)) : (Number(c.year) || year);
-      return itemYear === year;
-    }).reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
-
-    if (costThisYear > 0) {
-      let rem = costThisYear;
-      const priority = planIsCouple
-        ? ['cash_self', 'cash_part', 'other_self', 'other_part', 'isa_self', 'isa_part']
-        : ['cash_self', 'other_self', 'isa_self'];
-      for (const pid of priority) {
-        if (rem <= 0) break;
-        const p = Math.min(potsMap[pid] || 0, rem);
-        potsMap[pid] -= p;
-        rem -= p;
-      }
-      if (rem > 0 && ageSelf >= privatePenAge) {
-        const penPriority = planIsCouple ? ['pen_self', 'pen_part'] : ['pen_self'];
-        for (const pid of penPriority) {
-          if (rem <= 0) break;
-          const p = Math.min(potsMap[pid] || 0, rem);
-          potsMap[pid] -= p;
-          rem -= p;
-        }
-      }
-    }
-
-    // 5. Guaranteed Incomes & State Pension
+    // 4. Guaranteed Incomes & State Pension
     let otherNetSelf = 0, otherTaxableSelf = 0;
     let otherNetPart = 0, otherTaxablePart = 0;
 
@@ -388,6 +360,79 @@ export default function App() {
     const baseNetIncomePart = planIsCouple ? (otherNetPart + calculateUKNetIncome(currentTaxablePart, planState.config)) : 0;
     const totalNetGuaranteed = baseNetIncomeSelf + baseNetIncomePart;
 
+    let drawdownPensions = 0;
+    const isFullLump = planState.spending.drawdownStrategy === 'Full 25% Lump Sum';
+
+    // Pension drawdown helper incorporating PCLS and UK income tax bands
+    const drawFromPension = (potOwner, netNeeded, maxTaxableCeiling = Infinity) => {
+      if (netNeeded <= 0) return 0;
+      const potKey = potOwner === 'Myself' ? 'pen_self' : 'pen_part';
+      if (!potsMap[potKey] || potsMap[potKey] <= 0) return 0;
+
+      const pclsHeadroom = Math.max(0, lsaCap - (potOwner === 'Myself' ? tracking.cumPclsSelf : tracking.cumPclsPart));
+      const taxBase = potOwner === 'Myself' ? currentTaxableSelf : currentTaxablePart;
+      
+      if (taxBase >= maxTaxableCeiling) return 0;
+
+      const grossNeeded = grossPensionNeededForNet(netNeeded, taxBase, planState.config, isFullLump, pclsHeadroom, maxTaxableCeiling);
+      const actualGross = Math.min(potsMap[potKey], grossNeeded);
+      if (actualGross <= 0) return 0;
+
+      potsMap[potKey] -= actualGross;
+      drawdownPensions += actualGross;
+
+      let taxFreeTaken = 0;
+      if (!isFullLump && pclsHeadroom > 0) {
+        taxFreeTaken = Math.min(actualGross * pclsProp, pclsHeadroom);
+        if (potOwner === 'Myself') tracking.cumPclsSelf += taxFreeTaken;
+        else tracking.cumPclsPart += taxFreeTaken;
+      }
+      const taxableTaken = actualGross - taxFreeTaken;
+      
+      const currentNet = calculateUKNetIncome(taxBase, planState.config);
+      const newNet = calculateUKNetIncome(taxBase + taxableTaken, planState.config);
+      
+      if (potOwner === 'Myself') currentTaxableSelf += taxableTaken;
+      else currentTaxablePart += taxableTaken;
+
+      return taxFreeTaken + (newNet - currentNet);
+    };
+
+    // 5. One-off Capital Costs (Bug #6 Fix: Grossed up for tax if spilled into pensions)
+    let pre58Insolvent = false;
+    const costThisYear = planState.oneOffCosts.filter(c => {
+      const itemYear = c.date ? parseInt(c.date.slice(0, 4)) : (Number(c.year) || year);
+      return itemYear === year;
+    }).reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
+
+    if (costThisYear > 0) {
+      let rem = costThisYear;
+      const priority = planIsCouple
+        ? ['cash_self', 'cash_part', 'other_self', 'other_part', 'isa_self', 'isa_part']
+        : ['cash_self', 'other_self', 'isa_self'];
+      
+      for (const pid of priority) {
+        if (rem <= 0) break;
+        const p = Math.min(potsMap[pid] || 0, rem);
+        potsMap[pid] -= p;
+        rem -= p;
+      }
+
+      if (rem > 0) {
+        if (ageSelf >= privatePenAge) {
+          const coveredSelf = drawFromPension('Myself', rem);
+          rem = Math.max(0, rem - coveredSelf);
+
+          if (planIsCouple && rem > 0) {
+            const coveredPart = drawFromPension('Partner', rem);
+            rem = Math.max(0, rem - coveredPart);
+          }
+        } else {
+          pre58Insolvent = true;
+        }
+      }
+    }
+
     // 6. Target Spend Demand
     let annualLivingTarget = 0;
     if (!planIsCouple) {
@@ -402,20 +447,40 @@ export default function App() {
       }
     }
 
-    // 7. Decumulation Waterfall
+    // 7. Decumulation Waterfall & Surplus Reinvestment (Feature #2)
     let netDemand = Math.max(0, annualLivingTarget - totalNetGuaranteed);
-    let pre58Insolvent = false;
-    let drawdownPensions = 0;
     let demandSelf = 0;
     let demandPart = 0;
 
     if (annualLivingTarget > 0 && totalNetGuaranteed >= annualLivingTarget) {
       const surplus = totalNetGuaranteed - annualLivingTarget;
+      const sixMonthBuffer = annualLivingTarget * 0.5;
+
       if (planIsCouple) {
-        potsMap.cash_self += surplus * 0.5;
-        potsMap.cash_part += surplus * 0.5;
+        const surplusEach = surplus * 0.5;
+        const bufferEach = sixMonthBuffer * 0.5;
+
+        // Cash buffer capped at 6 months; remainder swept into S&S ISA
+        potsMap.cash_self += surplusEach;
+        if (potsMap.cash_self > bufferEach) {
+          const excess = potsMap.cash_self - bufferEach;
+          potsMap.cash_self = bufferEach;
+          potsMap.isa_self = (potsMap.isa_self || 0) + excess;
+        }
+
+        potsMap.cash_part += surplusEach;
+        if (potsMap.cash_part > bufferEach) {
+          const excess = potsMap.cash_part - bufferEach;
+          potsMap.cash_part = bufferEach;
+          potsMap.isa_part = (potsMap.isa_part || 0) + excess;
+        }
       } else {
         potsMap.cash_self += surplus;
+        if (potsMap.cash_self > sixMonthBuffer) {
+          const excess = potsMap.cash_self - sixMonthBuffer;
+          potsMap.cash_self = sixMonthBuffer;
+          potsMap.isa_self = (potsMap.isa_self || 0) + excess;
+        }
       }
     } else if (netDemand > 0) {
       if (planIsCouple) {
@@ -449,48 +514,78 @@ export default function App() {
         }
       };
 
-      const isFullLump = planState.spending.drawdownStrategy === 'Full 25% Lump Sum';
-
-      const drawFromPension = (potOwner, netNeeded, maxTaxableCeiling = Infinity) => {
-        if (netNeeded <= 0) return 0;
-        const potKey = potOwner === 'Myself' ? 'pen_self' : 'pen_part';
-        if (potsMap[potKey] <= 0) return 0;
-
-        const pclsHeadroom = Math.max(0, lsaCap - (potOwner === 'Myself' ? tracking.cumPclsSelf : tracking.cumPclsPart));
-        const taxBase = potOwner === 'Myself' ? currentTaxableSelf : currentTaxablePart;
-        
-        if (taxBase >= maxTaxableCeiling) return 0;
-
-        const grossNeeded = grossPensionNeededForNet(netNeeded, taxBase, planState.config, isFullLump, pclsHeadroom, maxTaxableCeiling);
-        const actualGross = Math.min(potsMap[potKey], grossNeeded);
-        if (actualGross <= 0) return 0;
-
-        potsMap[potKey] -= actualGross;
-        drawdownPensions += actualGross;
-
-        let taxFreeTaken = 0;
-        if (!isFullLump && pclsHeadroom > 0) {
-          taxFreeTaken = Math.min(actualGross * pclsProp, pclsHeadroom);
-          if (potOwner === 'Myself') tracking.cumPclsSelf += taxFreeTaken;
-          else tracking.cumPclsPart += taxFreeTaken;
-        }
-        const taxableTaken = actualGross - taxFreeTaken;
-        
-        const currentNet = calculateUKNetIncome(taxBase, planState.config);
-        const newNet = calculateUKNetIncome(taxBase + taxableTaken, planState.config);
-        
-        if (potOwner === 'Myself') currentTaxableSelf += taxableTaken;
-        else currentTaxablePart += taxableTaken;
-
-        return taxFreeTaken + (newNet - currentNet);
-      };
-
       if (ageSelf < privatePenAge) {
         drawTier('cash_self', 'cash_part');
         if (demandSelf > 0 || demandPart > 0) drawTier('other_self', 'other_part');
         if (demandSelf > 0 || demandPart > 0) drawTier('isa_self', 'isa_part');
         if (demandSelf > 0 || demandPart > 0) pre58Insolvent = true;
-      } else if (decumPolicy === 'Bracket Fill') {
+      } 
+      // Policy Choice #1B: Tax Smoothing (Fill 20% Basic Rate before touching ISAs)
+      else if (decumPolicy === 'Bracket Fill Basic') {
+        // Stage 1: Fill 0% Personal Allowance
+        const paRoomSelf = Math.max(0, paAllowance - currentTaxableSelf);
+        if (paRoomSelf > 0 && demandSelf > 0) {
+          const coveredS = drawFromPension('Myself', demandSelf, paAllowance);
+          demandSelf = Math.max(0, demandSelf - coveredS);
+        }
+
+        if (planIsCouple) {
+          const paRoomPart = Math.max(0, paAllowance - currentTaxablePart);
+          if (paRoomPart > 0 && demandPart > 0) {
+            const coveredP = drawFromPension('Partner', demandPart, paAllowance);
+            demandPart = Math.max(0, demandPart - coveredP);
+          }
+          if (demandPart > 0 && currentTaxableSelf < paAllowance) {
+            const crossCoverS = drawFromPension('Myself', demandPart, paAllowance);
+            demandPart = Math.max(0, demandPart - crossCoverS);
+          }
+          if (demandSelf > 0 && currentTaxablePart < paAllowance) {
+            const crossCoverP = drawFromPension('Partner', demandSelf, paAllowance);
+            demandSelf = Math.max(0, demandSelf - crossCoverP);
+          }
+        }
+
+        // Stage 2: Fill 20% Basic Rate Band (£50,270) with pensions BEFORE touching ISAs
+        if (demandSelf > 0 || demandPart > 0) {
+          if (demandSelf > 0) {
+            const coveredS = drawFromPension('Myself', demandSelf, basicLimit);
+            demandSelf = Math.max(0, demandSelf - coveredS);
+          }
+          if (planIsCouple) {
+            if (demandPart > 0) {
+              const coveredP = drawFromPension('Partner', demandPart, basicLimit);
+              demandPart = Math.max(0, demandPart - coveredP);
+            }
+            if (demandPart > 0) {
+              const crossCoverS = drawFromPension('Myself', demandPart, basicLimit);
+              demandPart = Math.max(0, demandPart - crossCoverS);
+            }
+            if (demandSelf > 0) {
+              const crossCoverP = drawFromPension('Partner', demandSelf, basicLimit);
+              demandSelf = Math.max(0, demandSelf - crossCoverP);
+            }
+          }
+        }
+
+        // Stage 3: Cash & GIA Buffer
+        if (demandSelf > 0 || demandPart > 0) drawTier('cash_self', 'cash_part');
+        if (demandSelf > 0 || demandPart > 0) drawTier('other_self', 'other_part');
+
+        // Stage 4: S&S ISAs as Tax-Free Buffer to shield from 40% Higher Rate Tax
+        if (demandSelf > 0 || demandPart > 0) drawTier('isa_self', 'isa_part');
+
+        // Stage 5: Higher Rate Pension Fallback
+        if (demandSelf > 0 || demandPart > 0) {
+          if (demandSelf > 0) demandSelf = Math.max(0, demandSelf - drawFromPension('Myself', demandSelf));
+          if (planIsCouple) {
+            if (demandPart > 0) demandPart = Math.max(0, demandPart - drawFromPension('Partner', demandPart));
+            if (demandPart > 0) demandPart = Math.max(0, demandPart - drawFromPension('Myself', demandPart));
+            if (demandSelf > 0) demandSelf = Math.max(0, demandSelf - drawFromPension('Partner', demandSelf));
+          }
+        }
+      }
+      // Policy Choice #1A: UK FIRE (Fill 0% PA first, then ISAs, then Basic Rate)
+      else if (decumPolicy === 'Bracket Fill') {
         const paRoomSelf = Math.max(0, paAllowance - currentTaxableSelf);
         if (paRoomSelf > 0 && demandSelf > 0) {
           const coveredS = drawFromPension('Myself', demandSelf, paAllowance);
@@ -546,7 +641,9 @@ export default function App() {
             if (demandSelf > 0) demandSelf = Math.max(0, demandSelf - drawFromPension('Partner', demandSelf));
           }
         }
-      } else {
+      } 
+      // Sequential: Cash -> GIA -> ISA -> Pension
+      else {
         drawTier('cash_self', 'cash_part');
         if (demandSelf > 0 || demandPart > 0) drawTier('other_self', 'other_part');
         if (demandSelf > 0 || demandPart > 0) drawTier('isa_self', 'isa_part');
@@ -1254,7 +1351,7 @@ export default function App() {
               <div className="flex justify-between items-center">
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2">
-                    <Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (e.g. Defined Benefit Pension, Part-time income, Rental)
+                    <Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (e.g. Defined Benefit Pensions, Part-time work, Rental income)
                   </h3>
                   <span className="text-[11px] text-slate-500">Taxable streams count toward personal allowance and tax bands; tax-free streams directly reduce net drawdown demand.</span>
                 </div>
@@ -1488,10 +1585,17 @@ export default function App() {
                     onChange={(e) => updateSpending('decumulationPolicy', e.target.value)}
                     className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs text-blue-700 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer"
                   >
-                    <option value="Bracket Fill">UK FIRE Bracket Fill (Tax-Optimized)</option>
+                    <option value="Bracket Fill">UK FIRE Bracket Fill (Fill 0% PA first, then ISAs)</option>
+                    <option value="Bracket Fill Basic">Tax Smoothing (Fill 20% Basic Rate first, preserve ISAs)</option>
                     <option value="Sequential">Sequential (Cash → GIA → ISA → Pension)</option>
                   </select>
-                  <span className="text-[10px] text-slate-400 mt-1 block">Bracket Fill takes pension first to use 0% Personal Allowance, then draws ISAs.</span>
+                  <span className="text-[10px] text-slate-400 mt-1 block">
+                    {plan.spending.decumulationPolicy === 'Bracket Fill Basic'
+                      ? 'Draws pensions up to £50,270 to preserve ISAs for late-life tax shielding.'
+                      : plan.spending.decumulationPolicy === 'Bracket Fill'
+                      ? 'Draws pension only up to £12,570, then drains ISAs to keep current tax at 0%.'
+                      : 'Liquidates each wrapper to zero in rigid sequential order.'}
+                  </span>
                 </div>
 
                 <div>
@@ -2095,12 +2199,12 @@ export default function App() {
                   { id: 'doc-timeline', label: '2. Timeline & Mid-Year Starts' },
                   { id: 'doc-incomes', label: '3. Guaranteed Income & UK Tax' },
                   { id: 'doc-gia-tax', label: '4. Note on GIA / Other Tax' },
-                  { id: 'doc-surplus', label: '5. What Happens to Surplus Income' },
-                  { id: 'doc-decumulation', label: '6. Bracket Fill vs Sequential' },
+                  { id: 'doc-surplus', label: '5. Surplus Income & 6-Mo Cash Cap' },
+                  { id: 'doc-decumulation', label: '6. Decumulation Policies (UK FIRE vs Tax Smoothing)' },
                   { id: 'doc-pension-rules', label: '7. Phased vs 25% Lump Sum' },
                   { id: 'doc-spousal', label: '8. Spousal Absorption & Single Mode' },
-                  { id: 'doc-one-offs', label: '9. How One-Offs Are Treated' },
-                  { id: 'doc-monte-carlo', label: '10. Monte Carlo & Safe Max Spend' },
+                  { id: 'doc-one-offs', label: '9. One-Off Costs & Pension Tax Math' },
+                  { id: 'doc-monte-carlo', label: '10. Monte Carlo & Static Drawdown Limitation' },
                   { id: 'doc-risk-profiles', label: '11. Asset Allocations & Fund Types' }
                 ].map(item => (
                   <button
@@ -2140,9 +2244,9 @@ export default function App() {
                     </p>
                   </div>
                   <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl text-xs space-y-1">
-                    <strong className="text-slate-900 block font-semibold">Dedicated Account Wrappers</strong>
+                    <strong className="text-slate-900 block font-semibold">Single Step-Down Taper Note</strong>
                     <p className="text-slate-600">
-                      Wealth is divided across four accounts per person: Pensions, S&S ISAs, Other Investments (GIA), and Cash. Each wrapper has its own access age and tax rules.
+                      This version models retirement spending with a <strong>single step-down taper</strong> at your chosen age (e.g. 10–15% at age 75 or 80) rather than a continuous multi-phase "spending smile" (Go-Go, Slow-Go, and No-Go years).
                     </p>
                   </div>
                 </div>
@@ -2230,51 +2334,73 @@ export default function App() {
               <section id="doc-surplus" className="space-y-3 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
                   <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">5</span>
-                  What Happens to Surplus Income
+                  Surplus Income & 6-Month Emergency Buffer Cap
                 </h3>
                 <p>
                   If guaranteed income (like State Pensions or DB payouts) exceeds your living spend in a given year, portfolio withdrawals drop to £0.
                 </p>
                 <p>
-                  The surplus cash does not vanish. It is deposited into Tier 1 Cash Savings, where it earns the cash return rate and stands ready to fund future spending.
+                  To eliminate cash drag (-0.5% real return), the model does not let excess cash accumulate indefinitely:
                 </p>
+                <div className="p-3.5 bg-emerald-50/70 border border-emerald-200 rounded-xl text-xs space-y-1.5 text-slate-700">
+                  <strong className="text-emerald-950 font-bold block">Automatic Reinvestment into Stocks & Shares ISA:</strong>
+                  <p>
+                    1. The model maintains a maximum emergency buffer of <strong>6 months of living expenses</strong> in Cash Savings.<br />
+                    2. Any excess income beyond this 6-month buffer is swept directly into the owner's <strong>Stocks & Shares ISA</strong>.<br />
+                    3. Reinvested funds compound at whatever asset allocation and risk profile you have assigned to your S&S ISA, preserving long-term purchasing power.
+                  </p>
+                </div>
               </section>
 
               {/* 6. Decumulation Waterfall */}
               <section id="doc-decumulation" className="space-y-3 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
                   <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">6</span>
-                  Decumulation: Bracket Fill vs Sequential Drawdown
+                  Decumulation Policies: UK FIRE vs Tax Smoothing vs Sequential
                 </h3>
                 <p>
-                  Section 1 includes a toggle between two drawdown strategies:
+                  Inside the <strong>Config & Assumptions</strong> tab, you can select between three decumulation methodologies:
                 </p>
 
                 <div className="space-y-3 pt-1">
                   <div className="p-4 bg-emerald-50/50 border border-emerald-200 rounded-xl space-y-2 text-xs">
                     <div className="flex items-center gap-1.5 text-emerald-800 font-bold text-sm">
                       <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                      Option A: UK FIRE Bracket Fill (Recommended)
+                      Option A: UK FIRE Bracket Fill (PA Only)
                     </div>
                     <p className="text-slate-700">
-                      Standard sequential drawdown burns ISAs down to £0 before touching pensions. That wastes your £12,570 tax-free personal allowance during early retirement. Bracket Fill fixes this:
+                      Prioritizes paying 0% tax today:
                     </p>
                     <ol className="list-decimal pl-5 space-y-1 text-slate-700">
-                      <li><strong>Before 58:</strong> Spends Cash $\rightarrow$ GIA $\rightarrow$ ISAs to bridge the gap. Pensions are locked.</li>
-                      <li><strong>Age 58+ (Personal Allowance):</strong> Draws pension money first to fill your remaining 0% Personal Allowance (£12,570 taxable, or ~£16.7k gross under phased drawdown). This money comes out tax-free.</li>
-                      <li><strong>Age 58+ (Taxable Accounts):</strong> Drains GIA to cut down on tax drag.</li>
-                      <li><strong>Age 58+ (ISAs as a Tax Shield):</strong> Taps ISAs next. This keeps your taxable income at £0 and prevents you from creeping into the 20% or 40% income tax bands.</li>
-                      <li><strong>Age 58+ (Basic Rate Band):</strong> If ISAs run dry, draws pension money up to the £50,270 Basic Rate limit.</li>
-                      <li><strong>Age 58+ (Higher Rate):</strong> Any remaining spending need draws across higher brackets.</li>
+                      <li><strong>Before 58:</strong> Spends Cash $\rightarrow$ GIA $\rightarrow$ ISAs to bridge to age 58.</li>
+                      <li><strong>Age 58+:</strong> Draws pension money first to fill your remaining 0% Personal Allowance (£12,570 taxable).</li>
+                      <li><strong>Next:</strong> Drains taxable GIA, then draws from <strong>S&S ISAs</strong> to keep current tax at 0%.</li>
+                      <li><strong>Last:</strong> Returns to pensions for the 20% basic rate band only after ISAs are completely depleted.</li>
+                    </ol>
+                  </div>
+
+                  <div className="p-4 bg-blue-50/50 border border-blue-200 rounded-xl space-y-2 text-xs">
+                    <div className="flex items-center gap-1.5 text-blue-800 font-bold text-sm">
+                      <CheckCircle2 className="w-4 h-4 text-blue-600" />
+                      Option B: Tax Smoothing (Fill 20% Basic Rate First, Preserve ISAs)
+                    </div>
+                    <p className="text-slate-700">
+                      Advocated by UK financial planners to avoid the "State Pension cliff":
+                    </p>
+                    <ol className="list-decimal pl-5 space-y-1 text-slate-700">
+                      <li><strong>Before 58:</strong> Spends Cash $\rightarrow$ GIA $\rightarrow$ ISAs to bridge to age 58.</li>
+                      <li><strong>Age 58+:</strong> Fills both the 0% Personal Allowance and the <strong>20% Basic Rate Band (up to £50,270)</strong> with pension withdrawals before touching ISAs.</li>
+                      <li><strong>Preserves ISAs:</strong> Leaves S&S ISAs intact to compound tax-free as an untaxed emergency buffer for your 70s and 80s, when dual State Pensions will consume your entire Personal Allowance.</li>
+                      <li><strong>Surge Shield:</strong> ISAs are tapped only if spending exceeds the basic rate band, shielding you from 40% Higher Rate income tax.</li>
                     </ol>
                   </div>
 
                   <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2 text-xs">
                     <div className="flex items-center gap-1.5 text-slate-800 font-bold text-sm">
-                      Option B: Sequential Drawdown (Spreadsheet Classic)
+                      Option C: Sequential Drawdown (Spreadsheet Classic)
                     </div>
                     <p className="text-slate-600">
-                      Drains accounts in rigid order: <code>Cash → Other (GIA) → ISAs → Pensions (58+)</code>. This burns through every penny of ISAs before taking a single pound from pensions.
+                      Drains accounts in rigid order: <code>Cash → Other (GIA) → ISAs → Pensions (58+)</code>. Liquidates every penny of ISAs before taking a single pound from pensions.
                     </p>
                   </div>
                 </div>
@@ -2330,7 +2456,7 @@ export default function App() {
               <section id="doc-one-offs" className="space-y-3 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
                   <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">9</span>
-                  How One-Off Injections and Costs Are Handled
+                  One-Off Costs & Pension Tax Math
                 </h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
                   <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
@@ -2340,9 +2466,9 @@ export default function App() {
                     </p>
                   </div>
                   <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
-                    <strong className="text-slate-900 block font-semibold">One-Off Costs (Section 5)</strong>
+                    <strong className="text-slate-900 block font-semibold">One-Off Costs & Tax Spillover (Section 5)</strong>
                     <p className="text-slate-600">
-                      Pulls sequentially: <code>Cash → Other (GIA) → ISAs → Pensions (58+)</code>. Using cash and ISAs first for large lump sums prevents a temporary spike into the 40% income tax band.
+                      Pulls sequentially: <code>Cash → Other (GIA) → ISAs → Pensions (58+)</code>. If non-pension accounts run out, emergency withdrawals from pensions are <strong>properly grossed up for income tax and PCLS</strong>, eliminating phantom tax-free money.
                     </p>
                   </div>
                 </div>
@@ -2352,21 +2478,21 @@ export default function App() {
               <section id="doc-monte-carlo" className="space-y-3 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
                   <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">10</span>
-                  Monte Carlo & Safe Max Annual Spend
+                  Monte Carlo & Static Drawdown Limitation
                 </h3>
                 <p>
-                  Deterministic projections assume investments grow at a constant rate every year. In reality, market timing matters: poor returns in early retirement can deplete a portfolio even if long-term averages look fine.
+                  The engine runs 1,000 randomized 65-year retirement paths using Geometric Brownian Motion based on the volatility of each risk tier.
                 </p>
-                <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl text-xs space-y-2">
-                  <strong className="text-slate-900 block font-semibold">The 1,000-Trial Model:</strong>
-                  <p className="text-slate-600">
-                    The engine runs 1,000 randomized 65-year retirement paths using Geometric Brownian Motion. Returns for each pot vary based on the volatility of its risk tier.
+                <div className="p-3.5 bg-amber-50/70 border border-amber-200 rounded-xl text-xs space-y-2 text-amber-950">
+                  <strong className="font-bold block flex items-center gap-1.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    Important Modeling Limitation: The Static Withdrawal Assumption
+                  </strong>
+                  <p>
+                    The stochastic engine assumes <strong>fixed, non-negotiable withdrawals</strong>. If a market crash occurs in year two of retirement, the simulation forces the portfolio to liquidate depreciated assets to fund the exact same expenditure target.
                   </p>
-                  <p className="text-slate-600">
-                    <strong>Failure Condition:</strong> A trial fails if your portfolio drops to or below your configured solvency floor (£0 by default) or cannot fund living expenses after retirement.
-                  </p>
-                  <p className="text-slate-600">
-                    <strong>Safe Max Annual Spend:</strong> The solver runs a binary search between £5k and £150k, finding the highest annual net spending budget that survives to age 100 at your chosen confidence level (e.g. 90% of trials).
+                  <p>
+                    In reality, real retirees practice dynamic spending (such as Guyton-Klinger guardrails), trimming discretionary spending or pausing travel during bear markets. Because this model does not simulate adaptive spending cuts, the Safe Max Annual Spend figure represents a <strong>rigid, conservative lower bound</strong>.
                   </p>
                 </div>
               </section>
