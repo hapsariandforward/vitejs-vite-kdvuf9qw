@@ -27,18 +27,20 @@ import {
   Pencil,
   Info,
   HelpCircle,
-  BookOpen
+  BookOpen,
+  ArrowRight,
+  UserCheck
 } from 'lucide-react';
 
-const STORAGE_KEY = 'rp_plan_full_v15';
+const STORAGE_KEY = 'rp_plan_full_v16';
 
 export const DEFAULT_RISK_PROFILES = {
-  'High Risk': { label: 'High Risk', real: 4.44, unlucky: 1.66, lucky: 7.31, nominal: 7.05 },
-  'Medium/High Risk': { label: 'Medium/High Risk', real: 3.72, unlucky: 1.38, lucky: 6.13, nominal: 6.31 },
-  'Medium Risk': { label: 'Medium Risk', real: 3.00, unlucky: 1.10, lucky: 4.95, nominal: 5.58 },
-  'Medium/Low Risk': { label: 'Medium/Low Risk', real: 2.28, unlucky: 0.82, lucky: 3.77, nominal: 4.84 },
-  'Low Risk': { label: 'Low Risk', real: 1.56, unlucky: 0.54, lucky: 2.59, nominal: 4.10 },
-  'Cash Equivalents': { label: 'Cash Equivalents', real: -0.50, unlucky: -1.00, lucky: 0.00, nominal: 1.99 }
+  'High Risk': { label: '80–100% Equities', real: 4.44, unlucky: 1.66, lucky: 7.31, nominal: 7.05 },
+  'Medium/High Risk': { label: '60–80% Equities', real: 3.72, unlucky: 1.38, lucky: 6.13, nominal: 6.31 },
+  'Medium Risk': { label: '40–60% Equities', real: 3.00, unlucky: 1.10, lucky: 4.95, nominal: 5.58 },
+  'Medium/Low Risk': { label: '20–40% Equities', real: 2.28, unlucky: 0.82, lucky: 3.77, nominal: 4.84 },
+  'Low Risk': { label: 'High interest Cash Savings, Fixed Income, Bonds', real: 1.56, unlucky: 0.54, lucky: 2.59, nominal: 4.10 },
+  'Cash Equivalents': { label: 'Cash & Money Market', real: -0.50, unlucky: -1.00, lucky: 0.00, nominal: 1.99 }
 };
 
 const parseInputNumber = (val) => {
@@ -56,10 +58,10 @@ const calculateYearFraction = (dateStr) => {
   return Math.max(0.01, Math.min(1.0, (end - d.getTime()) / (end - start)));
 };
 
-// All user-specific inputs initialized to blank
 const BLANK_PLAN = {
   activeProfileView: 'Combined',
   demographics: {
+    planningMode: 'couple', // 'single' | 'couple'
     currentAgeSelf: '',
     currentAgePart: '',
     retireAgeSelf: '',
@@ -198,6 +200,7 @@ export default function App() {
       if (cached) {
         const parsed = JSON.parse(cached);
         if (!parsed.riskProfiles) parsed.riskProfiles = DEFAULT_RISK_PROFILES;
+        if (!parsed.demographics.planningMode) parsed.demographics.planningMode = 'couple';
         if (!parsed.spending.decumulationPolicy) parsed.spending.decumulationPolicy = 'Bracket Fill';
         return parsed;
       }
@@ -214,6 +217,7 @@ export default function App() {
   }, [plan]);
 
   const fileInputRef = useRef(null);
+  const isCouple = plan.demographics.planningMode !== 'single';
 
   const [activeSeries, setActiveSeries] = useState(() => {
     const init = {};
@@ -235,14 +239,20 @@ export default function App() {
     return plan.riskProfiles || DEFAULT_RISK_PROFILES;
   }, [plan.riskProfiles]);
 
+  const scrollToDocSection = (id) => {
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: 'smooth' });
+  };
+
   // =========================================================================
-  // 3. UNIFIED SIMULATION ENGINE
+  // 3. UNIFIED SIMULATION ENGINE (Single / Couple Aware)
   // =========================================================================
   const runEngineYear = (t, potsMap, planState, regimeOrShock = 'expected', tracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false }) => {
+    const planIsCouple = planState.demographics.planningMode !== 'single';
     const ageSelfStart = Number(planState.demographics.currentAgeSelf) || 35;
-    const agePartStart = Number(planState.demographics.currentAgePart) || (ageSelfStart + 1);
+    const agePartStart = planIsCouple ? (Number(planState.demographics.currentAgePart) || (ageSelfStart + 1)) : 0;
     const retireAgeSelf = Number(planState.demographics.retireAgeSelf) || 60;
-    const retireAgePart = Number(planState.demographics.retireAgePart) || 60;
+    const retireAgePart = planIsCouple ? (Number(planState.demographics.retireAgePart) || 60) : 999;
     const privatePenAge = Number(planState.demographics.privatePensionAge) || 58;
     const statePenAge = Number(planState.demographics.statePensionAge) || 68;
 
@@ -264,17 +274,18 @@ export default function App() {
     const baseYear = planState.config.valuationDate ? parseInt(planState.config.valuationDate.slice(0, 4)) : 2026;
 
     const ageSelf = ageSelfStart + t;
-    const agePart = agePartStart + t;
+    const agePart = planIsCouple ? (agePartStart + t) : 0;
     const year = baseYear + t;
     const isYearZero = (t === 0);
 
     const workingSelf = ageSelf < retireAgeSelf;
-    const workingPart = agePart < retireAgePart;
+    const workingPart = planIsCouple ? (agePart < retireAgePart) : false;
 
     // 1. One-off Scheduled Contributions
     planState.oneOffContributions.filter(c => {
       const itemYear = c.date ? parseInt(c.date.slice(0, 4)) : (Number(c.year) || year);
-      return itemYear === year;
+      const isOwnerValid = planIsCouple || c.owner === 'Myself';
+      return itemYear === year && isOwnerValid;
     }).forEach(c => {
       const targetAcc = planState.accounts.find(a => a.owner === c.owner && a.category === c.category);
       if (targetAcc && potsMap[targetAcc.id] !== undefined) {
@@ -285,6 +296,7 @@ export default function App() {
     // 2. Annual Accumulation Contributions
     const fractionThisYear = isYearZero ? yf : 1.0;
     planState.accounts.forEach(acc => {
+      if (!planIsCouple && acc.owner === 'Partner') return;
       const isWorking = acc.owner === 'Myself' ? workingSelf : workingPart;
       const contrib = Number(acc.contrib) || 0;
       const growth = Number(acc.growth) || 0;
@@ -304,13 +316,15 @@ export default function App() {
         tracking.lumpSumTakenSelf = true;
       }
 
-      const canAccessPart = agePart >= Math.max(retireAgePart, privatePenAge);
-      if (canAccessPart && !tracking.lumpSumTakenPart && potsMap.pen_part > 0) {
-        const pcls = Math.min(potsMap.pen_part * pclsProp, Math.max(0, lsaCap - tracking.cumPclsPart));
-        potsMap.pen_part -= pcls;
-        potsMap.cash_part += pcls;
-        tracking.cumPclsPart += pcls;
-        tracking.lumpSumTakenPart = true;
+      if (planIsCouple) {
+        const canAccessPart = agePart >= Math.max(retireAgePart, privatePenAge);
+        if (canAccessPart && !tracking.lumpSumTakenPart && potsMap.pen_part > 0) {
+          const pcls = Math.min(potsMap.pen_part * pclsProp, Math.max(0, lsaCap - tracking.cumPclsPart));
+          potsMap.pen_part -= pcls;
+          potsMap.cash_part += pcls;
+          tracking.cumPclsPart += pcls;
+          tracking.lumpSumTakenPart = true;
+        }
       }
     }
 
@@ -322,17 +336,20 @@ export default function App() {
 
     if (costThisYear > 0) {
       let rem = costThisYear;
-      const priority = ['cash_self', 'cash_part', 'other_self', 'other_part', 'isa_self', 'isa_part'];
+      const priority = planIsCouple
+        ? ['cash_self', 'cash_part', 'other_self', 'other_part', 'isa_self', 'isa_part']
+        : ['cash_self', 'other_self', 'isa_self'];
       for (const pid of priority) {
         if (rem <= 0) break;
-        const p = Math.min(potsMap[pid], rem);
+        const p = Math.min(potsMap[pid] || 0, rem);
         potsMap[pid] -= p;
         rem -= p;
       }
       if (rem > 0 && ageSelf >= privatePenAge) {
-        for (const pid of ['pen_self', 'pen_part']) {
+        const penPriority = planIsCouple ? ['pen_self', 'pen_part'] : ['pen_self'];
+        for (const pid of penPriority) {
           if (rem <= 0) break;
-          const p = Math.min(potsMap[pid], rem);
+          const p = Math.min(potsMap[pid] || 0, rem);
           potsMap[pid] -= p;
           rem -= p;
         }
@@ -344,6 +361,7 @@ export default function App() {
     let otherNetPart = 0, otherTaxablePart = 0;
 
     planState.otherIncomes.forEach(inc => {
+      if (!planIsCouple && inc.owner === 'Partner') return;
       const sAge = Number(inc.startAge) || 0;
       const eAge = Number(inc.endAge) || 100;
       const amt = Number(inc.amount) || 0;
@@ -361,21 +379,27 @@ export default function App() {
     });
 
     const spSelf = ageSelf >= statePenAge ? (Number(planState.demographics.statePensionSelf) || 0) : 0;
-    const spPart = agePart >= statePenAge ? (Number(planState.demographics.statePensionPart) || 0) : 0;
+    const spPart = (planIsCouple && agePart >= statePenAge) ? (Number(planState.demographics.statePensionPart) || 0) : 0;
 
     let currentTaxableSelf = otherTaxableSelf + spSelf;
     let currentTaxablePart = otherTaxablePart + spPart;
 
     const baseNetIncomeSelf = otherNetSelf + calculateUKNetIncome(currentTaxableSelf, planState.config);
-    const baseNetIncomePart = otherNetPart + calculateUKNetIncome(currentTaxablePart, planState.config);
+    const baseNetIncomePart = planIsCouple ? (otherNetPart + calculateUKNetIncome(currentTaxablePart, planState.config)) : 0;
     const totalNetGuaranteed = baseNetIncomeSelf + baseNetIncomePart;
 
     // 6. Target Spend Demand
     let annualLivingTarget = 0;
-    if (!workingSelf && !workingPart) {
-      annualLivingTarget = ageSelf >= taperAge ? targetSpend * (1 - taperFraction) : targetSpend;
-    } else if (!workingSelf || !workingPart) {
-      annualLivingTarget = staggeredSpend;
+    if (!planIsCouple) {
+      if (!workingSelf) {
+        annualLivingTarget = ageSelf >= taperAge ? targetSpend * (1 - taperFraction) : targetSpend;
+      }
+    } else {
+      if (!workingSelf && !workingPart) {
+        annualLivingTarget = ageSelf >= taperAge ? targetSpend * (1 - taperFraction) : targetSpend;
+      } else if (!workingSelf || !workingPart) {
+        annualLivingTarget = staggeredSpend;
+      }
     }
 
     // 7. Decumulation Waterfall
@@ -387,30 +411,41 @@ export default function App() {
 
     if (annualLivingTarget > 0 && totalNetGuaranteed >= annualLivingTarget) {
       const surplus = totalNetGuaranteed - annualLivingTarget;
-      potsMap.cash_self += surplus * 0.5;
-      potsMap.cash_part += surplus * 0.5;
+      if (planIsCouple) {
+        potsMap.cash_self += surplus * 0.5;
+        potsMap.cash_part += surplus * 0.5;
+      } else {
+        potsMap.cash_self += surplus;
+      }
     } else if (netDemand > 0) {
-      demandSelf = netDemand * 0.5;
-      demandPart = netDemand * 0.5;
+      if (planIsCouple) {
+        demandSelf = netDemand * 0.5;
+        demandPart = netDemand * 0.5;
+      } else {
+        demandSelf = netDemand;
+        demandPart = 0;
+      }
 
       const drawTier = (pSelfId, pPartId) => {
         const pullS = Math.min(potsMap[pSelfId], demandSelf);
         potsMap[pSelfId] -= pullS;
         demandSelf -= pullS;
 
-        const pullP = Math.min(potsMap[pPartId], demandPart);
-        potsMap[pPartId] -= pullP;
-        demandPart -= pullP;
+        if (planIsCouple) {
+          const pullP = Math.min(potsMap[pPartId], demandPart);
+          potsMap[pPartId] -= pullP;
+          demandPart -= pullP;
 
-        if (demandSelf > 0 && potsMap[pPartId] > 0) {
-          const absorb = Math.min(potsMap[pPartId], demandSelf);
-          potsMap[pPartId] -= absorb;
-          demandSelf -= absorb;
-        }
-        if (demandPart > 0 && potsMap[pSelfId] > 0) {
-          const absorb = Math.min(potsMap[pSelfId], demandPart);
-          potsMap[pSelfId] -= absorb;
-          demandPart -= absorb;
+          if (demandSelf > 0 && potsMap[pPartId] > 0) {
+            const absorb = Math.min(potsMap[pPartId], demandSelf);
+            potsMap[pPartId] -= absorb;
+            demandSelf -= absorb;
+          }
+          if (demandPart > 0 && potsMap[pSelfId] > 0) {
+            const absorb = Math.min(potsMap[pSelfId], demandPart);
+            potsMap[pSelfId] -= absorb;
+            demandPart -= absorb;
+          }
         }
       };
 
@@ -462,19 +497,20 @@ export default function App() {
           demandSelf = Math.max(0, demandSelf - coveredS);
         }
 
-        const paRoomPart = Math.max(0, paAllowance - currentTaxablePart);
-        if (paRoomPart > 0 && demandPart > 0) {
-          const coveredP = drawFromPension('Partner', demandPart, paAllowance);
-          demandPart = Math.max(0, demandPart - coveredP);
-        }
-
-        if (demandPart > 0 && currentTaxableSelf < paAllowance) {
-          const crossCoverS = drawFromPension('Myself', demandPart, paAllowance);
-          demandPart = Math.max(0, demandPart - crossCoverS);
-        }
-        if (demandSelf > 0 && currentTaxablePart < paAllowance) {
-          const crossCoverP = drawFromPension('Partner', demandSelf, paAllowance);
-          demandSelf = Math.max(0, demandSelf - crossCoverP);
+        if (planIsCouple) {
+          const paRoomPart = Math.max(0, paAllowance - currentTaxablePart);
+          if (paRoomPart > 0 && demandPart > 0) {
+            const coveredP = drawFromPension('Partner', demandPart, paAllowance);
+            demandPart = Math.max(0, demandPart - coveredP);
+          }
+          if (demandPart > 0 && currentTaxableSelf < paAllowance) {
+            const crossCoverS = drawFromPension('Myself', demandPart, paAllowance);
+            demandPart = Math.max(0, demandPart - crossCoverS);
+          }
+          if (demandSelf > 0 && currentTaxablePart < paAllowance) {
+            const crossCoverP = drawFromPension('Partner', demandSelf, paAllowance);
+            demandSelf = Math.max(0, demandSelf - crossCoverP);
+          }
         }
 
         if (demandSelf > 0 || demandPart > 0) drawTier('cash_self', 'cash_part');
@@ -486,25 +522,29 @@ export default function App() {
             const coveredS = drawFromPension('Myself', demandSelf, basicLimit);
             demandSelf = Math.max(0, demandSelf - coveredS);
           }
-          if (demandPart > 0) {
-            const coveredP = drawFromPension('Partner', demandPart, basicLimit);
-            demandPart = Math.max(0, demandPart - coveredP);
-          }
-          if (demandPart > 0) {
-            const crossCoverS = drawFromPension('Myself', demandPart, basicLimit);
-            demandPart = Math.max(0, demandPart - crossCoverS);
-          }
-          if (demandSelf > 0) {
-            const crossCoverP = drawFromPension('Partner', demandSelf, basicLimit);
-            demandSelf = Math.max(0, demandSelf - crossCoverP);
+          if (planIsCouple) {
+            if (demandPart > 0) {
+              const coveredP = drawFromPension('Partner', demandPart, basicLimit);
+              demandPart = Math.max(0, demandPart - coveredP);
+            }
+            if (demandPart > 0) {
+              const crossCoverS = drawFromPension('Myself', demandPart, basicLimit);
+              demandPart = Math.max(0, demandPart - crossCoverS);
+            }
+            if (demandSelf > 0) {
+              const crossCoverP = drawFromPension('Partner', demandSelf, basicLimit);
+              demandSelf = Math.max(0, demandSelf - crossCoverP);
+            }
           }
         }
 
         if (demandSelf > 0 || demandPart > 0) {
           if (demandSelf > 0) demandSelf = Math.max(0, demandSelf - drawFromPension('Myself', demandSelf));
-          if (demandPart > 0) demandPart = Math.max(0, demandPart - drawFromPension('Partner', demandPart));
-          if (demandPart > 0) demandPart = Math.max(0, demandPart - drawFromPension('Myself', demandPart));
-          if (demandSelf > 0) demandSelf = Math.max(0, demandSelf - drawFromPension('Partner', demandSelf));
+          if (planIsCouple) {
+            if (demandPart > 0) demandPart = Math.max(0, demandPart - drawFromPension('Partner', demandPart));
+            if (demandPart > 0) demandPart = Math.max(0, demandPart - drawFromPension('Myself', demandPart));
+            if (demandSelf > 0) demandSelf = Math.max(0, demandSelf - drawFromPension('Partner', demandSelf));
+          }
         }
       } else {
         drawTier('cash_self', 'cash_part');
@@ -512,9 +552,11 @@ export default function App() {
         if (demandSelf > 0 || demandPart > 0) drawTier('isa_self', 'isa_part');
         if (demandSelf > 0 || demandPart > 0) {
           if (demandSelf > 0) demandSelf = Math.max(0, demandSelf - drawFromPension('Myself', demandSelf));
-          if (demandPart > 0) demandPart = Math.max(0, demandPart - drawFromPension('Partner', demandPart));
-          if (demandPart > 0) demandPart = Math.max(0, demandPart - drawFromPension('Myself', demandPart));
-          if (demandSelf > 0) demandSelf = Math.max(0, demandSelf - drawFromPension('Partner', demandSelf));
+          if (planIsCouple) {
+            if (demandPart > 0) demandPart = Math.max(0, demandPart - drawFromPension('Partner', demandPart));
+            if (demandPart > 0) demandPart = Math.max(0, demandPart - drawFromPension('Myself', demandPart));
+            if (demandSelf > 0) demandSelf = Math.max(0, demandSelf - drawFromPension('Partner', demandSelf));
+          }
         }
       }
     }
@@ -522,6 +564,7 @@ export default function App() {
     // 8. Asset-Specific Return Compounding
     const compoundFactor = isYearZero ? yf : 1.0;
     planState.accounts.forEach(acc => {
+      if (!planIsCouple && acc.owner === 'Partner') return;
       const profile = (planState.riskProfiles && planState.riskProfiles[acc.risk]) 
         ? planState.riskProfiles[acc.risk] 
         : (DEFAULT_RISK_PROFILES[acc.risk] || DEFAULT_RISK_PROFILES['High Risk']);
@@ -548,9 +591,9 @@ export default function App() {
       potsMap[acc.id] = Math.max(0, potsMap[acc.id] * (1 + growthRate * compoundFactor));
     });
 
-    const totalSelf = potsMap.pen_self + potsMap.isa_self + potsMap.other_self + potsMap.cash_self;
-    const totalPart = potsMap.pen_part + potsMap.isa_part + potsMap.other_part + potsMap.cash_part;
-    const totalCombined = totalSelf + totalPart;
+    const totalSelf = (potsMap.pen_self || 0) + (potsMap.isa_self || 0) + (potsMap.other_self || 0) + (potsMap.cash_self || 0);
+    const totalPart = planIsCouple ? ((potsMap.pen_part || 0) + (potsMap.isa_part || 0) + (potsMap.other_part || 0) + (potsMap.cash_part || 0)) : 0;
+    const totalCombined = planIsCouple ? (totalSelf + totalPart) : totalSelf;
 
     return {
       year,
@@ -601,10 +644,10 @@ export default function App() {
       const stepLucky = runEngineYear(t, potsLucky, plan, 'lucky', trackLucky);
       const stepUnlucky = runEngineYear(t, potsUnlucky, plan, 'unlucky', trackUnlucky);
 
-      const combPensions = potsExp.pen_self + potsExp.pen_part;
-      const combISAs = potsExp.isa_self + potsExp.isa_part;
-      const combOther = potsExp.other_self + potsExp.other_part;
-      const combCash = potsExp.cash_self + potsExp.cash_part;
+      const combPensions = isCouple ? (potsExp.pen_self + potsExp.pen_part) : potsExp.pen_self;
+      const combISAs = isCouple ? (potsExp.isa_self + potsExp.isa_part) : potsExp.isa_self;
+      const combOther = isCouple ? (potsExp.other_self + potsExp.other_part) : potsExp.other_self;
+      const combCash = isCouple ? (potsExp.cash_self + potsExp.cash_part) : potsExp.cash_self;
       const pre58LiquidEquity = combISAs + combOther + combCash;
 
       rows.push({
@@ -621,28 +664,29 @@ export default function App() {
     }
 
     return rows;
-  }, [plan]);
+  }, [plan, isCouple]);
 
   const chartDisplayData = useMemo(() => {
     return timelineData.map(d => {
       let activeVal = d.totalCombined;
-      if (plan.activeProfileView === 'Myself') activeVal = d.totalSelf;
-      if (plan.activeProfileView === 'Partner') activeVal = d.totalPart;
+      if (!isCouple || plan.activeProfileView === 'Myself') activeVal = d.totalSelf;
+      if (isCouple && plan.activeProfileView === 'Partner') activeVal = d.totalPart;
       return {
         ...d,
         expected: activeVal
       };
     });
-  }, [timelineData, plan.activeProfileView]);
+  }, [timelineData, plan.activeProfileView, isCouple]);
 
   const auditMetrics = useMemo(() => {
     if (!timelineData.length) return null;
     const startVal = timelineData[0]?.totalCombined || 0;
-    const retRow = timelineData.find(r => r.ageSelf === (Number(plan.demographics.retireAgeSelf) || 60)) || timelineData[0];
-    const postRetRows = timelineData.filter(r => r.ageSelf >= (Number(plan.demographics.retireAgeSelf) || 60));
+    const retAge = Number(plan.demographics.retireAgeSelf) || 60;
+    const retRow = timelineData.find(r => r.ageSelf === retAge) || timelineData[0];
+    const postRetRows = timelineData.filter(r => r.ageSelf >= retAge);
     const troughVal = postRetRows.length ? Math.min(...postRetRows.map(r => r.totalCombined)) : 0;
     const terminalVal = timelineData[timelineData.length - 1]?.totalCombined || 0;
-    return { startVal, retAge: Number(plan.demographics.retireAgeSelf) || 60, retVal: retRow.totalCombined, troughVal, terminalVal };
+    return { startVal, retAge, retVal: retRow.totalCombined, troughVal, terminalVal };
   }, [timelineData, plan.demographics.retireAgeSelf]);
 
   // =========================================================================
@@ -663,10 +707,9 @@ export default function App() {
       : (targetSpend * 0.6);
     const stagRatio = targetSpend > 0 ? (staggeredSpend / targetSpend) : 0.6;
 
-    const minRetireAge = Math.min(
-      Number(plan.demographics.retireAgeSelf) || 60,
-      Number(plan.demographics.retireAgePart) || 60
-    );
+    const minRetireAge = isCouple
+      ? Math.min(Number(plan.demographics.retireAgeSelf) || 60, Number(plan.demographics.retireAgePart) || 60)
+      : (Number(plan.demographics.retireAgeSelf) || 60);
 
     const trialPlan = {
       ...plan,
@@ -698,7 +741,10 @@ export default function App() {
         }
       }
 
-      const finalVal = Object.values(trialPots).reduce((a, b) => a + b, 0);
+      const finalVal = isCouple
+        ? Object.values(trialPots).reduce((a, b) => a + b, 0)
+        : ((trialPots.pen_self || 0) + (trialPots.isa_self || 0) + (trialPots.other_self || 0) + (trialPots.cash_self || 0));
+
       if (!failed && finalVal >= floor) solventCount++;
       terminalPots.push(Math.max(0, finalVal));
     }
@@ -716,7 +762,7 @@ export default function App() {
   const handleRunMC = () => {
     const spend = Number(plan.spending.targetSpend);
     if (!spend || spend <= 0) {
-      alert('Please enter a Joint Net Living Spend in Plan Inputs first.');
+      alert('Please enter your Living Spend target in Plan Inputs first.');
       return;
     }
     setIsSimulating(true);
@@ -733,7 +779,8 @@ export default function App() {
   };
 
   const handleOptimize = () => {
-    const totalAssets = plan.accounts.reduce((sum, a) => sum + (Number(a.balance) || 0), 0);
+    const relevantAccounts = isCouple ? plan.accounts : plan.accounts.filter(a => a.owner === 'Myself');
+    const totalAssets = relevantAccounts.reduce((sum, a) => sum + (Number(a.balance) || 0), 0);
     if (totalAssets <= 0) {
       alert('Please enter your portfolio account balances in Plan Inputs first.');
       return;
@@ -837,7 +884,7 @@ export default function App() {
   };
 
   const updateDemographics = (field, value) => {
-    setPlan(prev => ({ ...prev, demographics: { ...prev.demographics, [field]: parseInputNumber(value) } }));
+    setPlan(prev => ({ ...prev, demographics: { ...prev.demographics, [field]: field === 'planningMode' ? value : parseInputNumber(value) } }));
   };
 
   const updateSpending = (field, value) => {
@@ -917,6 +964,7 @@ export default function App() {
         try {
           const parsed = JSON.parse(event.target.result);
           if (!parsed.riskProfiles) parsed.riskProfiles = DEFAULT_RISK_PROFILES;
+          if (!parsed.demographics.planningMode) parsed.demographics.planningMode = 'couple';
           if (!parsed.spending.decumulationPolicy) parsed.spending.decumulationPolicy = 'Bracket Fill';
           setPlan(parsed);
         } catch (err) {
@@ -934,10 +982,9 @@ export default function App() {
     }
   };
 
-  const scrollToDocSection = (id) => {
-    const el = document.getElementById(id);
-    if (el) el.scrollIntoView({ behavior: 'smooth' });
-  };
+  const displayedAccounts = isCouple
+    ? plan.accounts
+    : plan.accounts.filter(a => a.owner === 'Myself');
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 p-4 sm:p-6 lg:p-8 font-sans">
@@ -1000,7 +1047,9 @@ export default function App() {
           </div>
         </div>
 
-        {/* TAB 1: PLAN INPUTS */}
+        {/* ==================================================== */}
+        {/* TAB 1: PLAN INPUTS                                   */}
+        {/* ==================================================== */}
         {activeTab === 'inputs' && (
           <div className="space-y-6">
             <div className="flex flex-wrap items-center justify-between gap-3 bg-white border border-slate-200/90 p-4 rounded-2xl shadow-xs">
@@ -1024,10 +1073,35 @@ export default function App() {
 
             {/* Demographics & Targets */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
-              <div>
-                <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2">
-                  <Users className="w-4 h-4 text-blue-600" /> 1. Demographics & Retirement Targets
-                </h3>
+              <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                <div>
+                  <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2">
+                    <Users className="w-4 h-4 text-blue-600" /> 1. Demographics & Retirement Targets
+                  </h3>
+                  <span className="text-xs text-slate-500">Choose whether this plan is for an individual or a couple.</span>
+                </div>
+
+                {/* Single / Couple Segmented Toggle */}
+                <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => updateDemographics('planningMode', 'single')}
+                    className={`px-3 py-1 rounded-lg font-bold transition-all cursor-pointer ${
+                      !isCouple ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Just Myself (Single)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => updateDemographics('planningMode', 'couple')}
+                    className={`px-3 py-1 rounded-lg font-bold transition-all cursor-pointer ${
+                      isCouple ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    With Partner (Couple)
+                  </button>
+                </div>
               </div>
 
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
@@ -1035,34 +1109,50 @@ export default function App() {
                   <label className="text-slate-600 font-semibold block mb-1">Current Age (Myself)</label>
                   <input type="number" placeholder="e.g. 35" onFocus={handleFocus} value={plan.demographics.currentAgeSelf} onChange={(e) => updateDemographics('currentAgeSelf', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                 </div>
-                <div>
-                  <label className="text-slate-600 font-semibold block mb-1">Current Age (Partner)</label>
-                  <input type="number" placeholder="e.g. 36" onFocus={handleFocus} value={plan.demographics.currentAgePart} onChange={(e) => updateDemographics('currentAgePart', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                </div>
+
+                {isCouple && (
+                  <div>
+                    <label className="text-slate-600 font-semibold block mb-1">Current Age (Partner)</label>
+                    <input type="number" placeholder="e.g. 36" onFocus={handleFocus} value={plan.demographics.currentAgePart} onChange={(e) => updateDemographics('currentAgePart', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  </div>
+                )}
+
                 <div>
                   <label className="text-slate-600 font-semibold block mb-1">Retirement Age (Myself)</label>
                   <input type="number" placeholder="e.g. 57" onFocus={handleFocus} value={plan.demographics.retireAgeSelf} onChange={(e) => updateDemographics('retireAgeSelf', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                 </div>
+
+                {isCouple && (
+                  <div>
+                    <label className="text-slate-600 font-semibold block mb-1">Retirement Age (Partner)</label>
+                    <input type="number" placeholder="e.g. 57" onFocus={handleFocus} value={plan.demographics.retireAgePart} onChange={(e) => updateDemographics('retireAgePart', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  </div>
+                )}
+
                 <div>
-                  <label className="text-slate-600 font-semibold block mb-1">Retirement Age (Partner)</label>
-                  <input type="number" placeholder="e.g. 57" onFocus={handleFocus} value={plan.demographics.retireAgePart} onChange={(e) => updateDemographics('retireAgePart', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                </div>
-                <div>
-                  <label className="text-slate-600 font-semibold block mb-1">Expected State Pension Myself (£/yr)</label>
+                  <label className="text-slate-600 font-semibold block mb-1">Expected State Pension (Myself £/yr)</label>
                   <input type="number" step="250" placeholder="e.g. 11500" onFocus={handleFocus} value={plan.demographics.statePensionSelf} onChange={(e) => updateDemographics('statePensionSelf', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                 </div>
+
+                {isCouple && (
+                  <div>
+                    <label className="text-slate-600 font-semibold block mb-1">Expected State Pension (Partner £/yr)</label>
+                    <input type="number" step="250" placeholder="e.g. 6000" onFocus={handleFocus} value={plan.demographics.statePensionPart} onChange={(e) => updateDemographics('statePensionPart', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  </div>
+                )}
+
                 <div>
-                  <label className="text-slate-600 font-semibold block mb-1">Expected State Pension Partner (£/yr)</label>
-                  <input type="number" step="250" placeholder="e.g. 6000" onFocus={handleFocus} value={plan.demographics.statePensionPart} onChange={(e) => updateDemographics('statePensionPart', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                </div>
-                <div>
-                  <label className="text-slate-600 font-semibold block mb-1">Joint Net Living Spend (£/yr)</label>
+                  <label className="text-slate-600 font-semibold block mb-1">{isCouple ? 'Joint Net Living Spend (£/yr)' : 'Net Living Spend (£/yr)'}</label>
                   <input type="number" step="1000" placeholder="e.g. 25000" onFocus={handleFocus} value={plan.spending.targetSpend} onChange={(e) => updateSpending('targetSpend', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                 </div>
-                <div>
-                  <label className="text-slate-600 font-semibold block mb-1">Staggered Spend (1 Retired £/yr)</label>
-                  <input type="number" step="1000" placeholder="e.g. 15000" onFocus={handleFocus} value={plan.spending.staggeredSpend} onChange={(e) => updateSpending('staggeredSpend', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                </div>
+
+                {isCouple && (
+                  <div>
+                    <label className="text-slate-600 font-semibold block mb-1">Staggered Spend (1 Retired £/yr)</label>
+                    <input type="number" step="1000" placeholder="e.g. 15000" onFocus={handleFocus} value={plan.spending.staggeredSpend} onChange={(e) => updateSpending('staggeredSpend', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  </div>
+                )}
+
                 <div>
                   <label className="text-slate-600 font-semibold block mb-1">Spend Taper Age</label>
                   <input type="number" placeholder="e.g. 80" onFocus={handleFocus} value={plan.spending.taperAge} onChange={(e) => updateSpending('taperAge', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
@@ -1101,28 +1191,39 @@ export default function App() {
 
             {/* Balances & Contributions */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
-              <div>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2">
                   <Wallet className="w-4 h-4 text-blue-600" /> 2. Current Balances, Annual Savings & Risk Profiles
                 </h3>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('docs');
+                    setTimeout(() => scrollToDocSection('doc-risk-profiles'), 80);
+                  }}
+                  className="text-xs text-blue-600 hover:text-blue-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer self-start sm:self-auto"
+                >
+                  <HelpCircle className="w-3.5 h-3.5" />
+                  Guide to investment allocations & fund types →
+                </button>
               </div>
 
               <table className="w-full text-left text-xs border-collapse">
                 <thead>
                   <tr className="border-b border-slate-200 text-slate-500 font-semibold">
                     <th className="pb-2">Account Wrapper</th>
-                    <th className="pb-2">Owner</th>
+                    {isCouple && <th className="pb-2">Owner</th>}
                     <th className="pb-2">Balance Today (£)</th>
                     <th className="pb-2">Annual Savings (£)</th>
                     <th className="pb-2">Contrib Growth (%/yr)</th>
-                    <th className="pb-2">Risk Profile (Allocation)</th>
+                    <th className="pb-2">Asset Allocation (Risk Tier)</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 font-mono">
-                  {plan.accounts.map(acc => (
+                  {displayedAccounts.map(acc => (
                     <tr key={acc.id} className="hover:bg-slate-50/80 transition-colors">
                       <td className="py-2.5 font-sans font-bold text-slate-800">{acc.category}</td>
-                      <td className="py-2.5 font-sans text-slate-500">{acc.owner}</td>
+                      {isCouple && <td className="py-2.5 font-sans text-slate-500">{acc.owner}</td>}
                       <td className="py-2.5">
                         <input
                           type="number"
@@ -1201,14 +1302,18 @@ export default function App() {
                         className="p-1.5 bg-white border border-slate-300 rounded font-bold text-slate-800 sm:col-span-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
                         placeholder="Description"
                       />
-                      <select
-                        value={inc.owner}
-                        onChange={(e) => setPlan(p => ({ ...p, otherIncomes: p.otherIncomes.map(i => i.id === inc.id ? { ...i, owner: e.target.value } : i) }))}
-                        className="p-1.5 bg-white border border-slate-300 rounded text-slate-700"
-                      >
-                        <option value="Myself">Myself</option>
-                        <option value="Partner">Partner</option>
-                      </select>
+                      {isCouple ? (
+                        <select
+                          value={inc.owner}
+                          onChange={(e) => setPlan(p => ({ ...p, otherIncomes: p.otherIncomes.map(i => i.id === inc.id ? { ...i, owner: e.target.value } : i) }))}
+                          className="p-1.5 bg-white border border-slate-300 rounded text-slate-700"
+                        >
+                          <option value="Myself">Myself</option>
+                          <option value="Partner">Partner</option>
+                        </select>
+                      ) : (
+                        <div className="p-1.5 text-slate-500 font-semibold">Myself</div>
+                      )}
                       <div className="flex items-center gap-1">
                         <span className="text-slate-500">Age</span>
                         <input
@@ -1291,14 +1396,18 @@ export default function App() {
                           }}
                           className="p-1 bg-white border border-slate-300 rounded font-mono text-slate-800 text-xs"
                         />
-                        <select
-                          value={c.owner}
-                          onChange={(e) => setPlan(p => ({ ...p, oneOffContributions: p.oneOffContributions.map(x => x.id === c.id ? { ...x, owner: e.target.value } : x) }))}
-                          className="p-1 bg-white border border-slate-300 rounded text-slate-700"
-                        >
-                          <option value="Myself">Myself</option>
-                          <option value="Partner">Partner</option>
-                        </select>
+                        {isCouple ? (
+                          <select
+                            value={c.owner}
+                            onChange={(e) => setPlan(p => ({ ...p, oneOffContributions: p.oneOffContributions.map(x => x.id === c.id ? { ...x, owner: e.target.value } : x) }))}
+                            className="p-1 bg-white border border-slate-300 rounded text-slate-700"
+                          >
+                            <option value="Myself">Myself</option>
+                            <option value="Partner">Partner</option>
+                          </select>
+                        ) : (
+                          <span className="text-slate-500 font-semibold px-1">Myself</span>
+                        )}
                         <select
                           value={c.category}
                           onChange={(e) => setPlan(p => ({ ...p, oneOffContributions: p.oneOffContributions.map(x => x.id === c.id ? { ...x, category: e.target.value } : x) }))}
@@ -1386,7 +1495,9 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 2: CONFIG & ASSUMPTIONS */}
+        {/* ==================================================== */}
+        {/* TAB 2: CONFIG & ASSUMPTIONS                          */}
+        {/* ==================================================== */}
         {activeTab === 'config' && (
           <div className="space-y-6">
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
@@ -1442,8 +1553,8 @@ export default function App() {
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
               <div className="flex justify-between items-center">
                 <div>
-                  <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">Investment Risk Profiles & Real Return Matrix</h3>
-                  <span className="text-[11px] text-slate-500">Real annual returns net of fees. Click the pencil icon to edit assumptions.</span>
+                  <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">Asset Allocations & Return Matrix Assumptions</h3>
+                  <span className="text-[11px] text-slate-500">Real annual returns net of fees. Modify these only if you have a specific portfolio thesis.</span>
                 </div>
                 <button
                   onClick={() => setIsEditingRisk(!isEditingRisk)}
@@ -1459,7 +1570,7 @@ export default function App() {
               <table className="w-full text-left text-xs border-collapse">
                 <thead>
                   <tr className="border-b border-slate-200 text-slate-500 font-semibold">
-                    <th className="pb-2">Risk Level</th>
+                    <th className="pb-2">Allocation Category</th>
                     <th className="pb-2">Expected Real Return (% pa)</th>
                     <th className="pb-2">Unlucky Real Return (% pa)</th>
                     <th className="pb-2">Lucky Real Return (% pa)</th>
@@ -1469,7 +1580,7 @@ export default function App() {
                 <tbody className="divide-y divide-slate-100 font-mono">
                   {Object.entries(activeRiskMatrix).map(([key, val]) => (
                     <tr key={key} className="hover:bg-slate-50/80">
-                      <td className="py-2.5 font-sans font-bold text-slate-800">{key}</td>
+                      <td className="py-2.5 font-sans font-bold text-slate-800">{val.label || key}</td>
                       <td className="py-2.5">
                         {isEditingRisk ? (
                           <input
@@ -1565,7 +1676,9 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 3: DASHBOARD & SIMULATION */}
+        {/* ==================================================== */}
+        {/* TAB 3: DASHBOARD & SIMULATION                        */}
+        {/* ==================================================== */}
         {activeTab === 'dashboard' && (
           <div className="space-y-6">
             <div className="p-3.5 bg-blue-50/70 border border-blue-200/80 rounded-2xl text-xs text-slate-700 flex items-start gap-3">
@@ -1581,7 +1694,7 @@ export default function App() {
             <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <span className="text-xs text-slate-500 font-semibold">Active View:</span>
-                {['Combined', 'Myself', 'Partner'].map(p => (
+                {(isCouple ? ['Combined', 'Myself', 'Partner'] : ['Combined']).map(p => (
                   <button
                     key={p}
                     onClick={() => setPlan(prev => ({ ...prev, activeProfileView: p }))}
@@ -1700,7 +1813,7 @@ export default function App() {
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs">
-                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Expected Terminal Pot ({plan.activeProfileView})</div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Expected Terminal Pot</div>
                 <div className="text-2xl font-black font-mono text-blue-600 mt-2">
                   {formatGBP(chartDisplayData[chartDisplayData.length - 1]?.expected)}
                 </div>
@@ -1726,7 +1839,7 @@ export default function App() {
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                 <div>
                   <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                    <Layers className="w-4 h-4 text-blue-600" /> Projected Portfolio Trajectory ({plan.activeProfileView})
+                    <Layers className="w-4 h-4 text-blue-600" /> Projected Portfolio Trajectory
                   </h2>
                   <span className="text-xs text-slate-500">Real purchasing power by account wrapper</span>
                 </div>
@@ -1769,7 +1882,7 @@ export default function App() {
                             <text y={24} textAnchor="middle" fill="#b45309" fontSize="10" fontWeight="bold">Retire M ({Number(plan.demographics.retireAgeSelf) || 60})</text>
                           </g>
                         )}
-                        {(Number(plan.demographics.retireAgePart) || 60) <= maxVisibleAge && (
+                        {isCouple && (Number(plan.demographics.retireAgePart) || 60) <= maxVisibleAge && (
                           <g transform={`translate(${xScale(Number(plan.demographics.retireAgePart) || 60)}, 0)`}>
                             <line y2={innerHeight} stroke="#d97706" strokeWidth="1.5" strokeDasharray="3,3" />
                             <rect x={-42} y={32} width={84} height={20} rx={4} fill="#fef3c7" stroke="#fde68a" />
@@ -1829,7 +1942,7 @@ export default function App() {
                       <span className="text-slate-500">Spend Demand: {formatGBP(hoveredPoint.targetSpend)}/yr</span>
                     </div>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-1 font-mono">
-                      {activeSeries.expected && <div className="text-blue-600 font-bold">{plan.activeProfileView}: {formatGBP(hoveredPoint.expected)}</div>}
+                      {activeSeries.expected && <div className="text-blue-600 font-bold">Projected Pot: {formatGBP(hoveredPoint.expected)}</div>}
                       {activeSeries.lucky && <div className="text-emerald-600">Lucky: {formatGBP(hoveredPoint.lucky)}</div>}
                       {activeSeries.unlucky && <div className="text-rose-600">Unlucky: {formatGBP(hoveredPoint.unlucky)}</div>}
                       {activeSeries.pensions && <div className="text-sky-600">Pensions: {formatGBP(hoveredPoint.pensions)}</div>}
@@ -1884,7 +1997,9 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 4: AUDIT DATA TABLE */}
+        {/* ==================================================== */}
+        {/* TAB 4: AUDIT DATA TABLE                              */}
+        {/* ==================================================== */}
         {activeTab === 'audit' && (
           <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
             <div className="flex justify-between items-center flex-wrap gap-2">
@@ -1909,12 +2024,12 @@ export default function App() {
                     <th className="p-2.5 sticky left-0 bg-slate-100">Year</th>
                     <th className="p-2.5">t</th>
                     <th className="p-2.5">Age (M)</th>
-                    <th className="p-2.5">Age (P)</th>
+                    {isCouple && <th className="p-2.5">Age (P)</th>}
                     <th className="p-2.5">Work (M)</th>
-                    <th className="p-2.5">Work (P)</th>
+                    {isCouple && <th className="p-2.5">Work (P)</th>}
                     <th className="p-2.5">Spend Demand</th>
                     <th className="p-2.5">SP (M)</th>
-                    <th className="p-2.5">SP (P)</th>
+                    {isCouple && <th className="p-2.5">SP (P)</th>}
                     <th className="p-2.5">Net Drawdown</th>
                     <th className="p-2.5 text-blue-700 font-bold">Combined (Real)</th>
                     <th className="p-2.5 text-purple-700">Combined (Nominal)</th>
@@ -1934,12 +2049,12 @@ export default function App() {
                       <td className="p-2.5 font-bold text-slate-900 sticky left-0 bg-inherit border-r border-slate-100">{r.year}</td>
                       <td className="p-2.5 text-slate-400">{r.t}</td>
                       <td className="p-2.5">{r.ageSelf}</td>
-                      <td className="p-2.5">{r.agePart}</td>
+                      {isCouple && <td className="p-2.5">{r.agePart}</td>}
                       <td className="p-2.5 text-center">{r.workingSelf}</td>
-                      <td className="p-2.5 text-center">{r.workingPart}</td>
+                      {isCouple && <td className="p-2.5 text-center">{r.workingPart}</td>}
                       <td className="p-2.5 text-slate-700">{formatGBP(r.targetSpend)}</td>
                       <td className="p-2.5 text-slate-500">{formatGBP(r.spSelf)}</td>
-                      <td className="p-2.5 text-slate-500">{formatGBP(r.spPart)}</td>
+                      {isCouple && <td className="p-2.5 text-slate-500">{formatGBP(r.spPart)}</td>}
                       <td className="p-2.5 text-amber-700 font-bold">{formatGBP(r.netDrawdown)}</td>
                       <td className="p-2.5 font-bold text-blue-700 bg-blue-50/30">{formatGBP(r.totalCombined)}</td>
                       <td className="p-2.5 text-purple-700">{formatGBP(r.nominal)}</td>
@@ -1959,7 +2074,9 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 5: DOCUMENTATION */}
+        {/* ==================================================== */}
+        {/* TAB 5: DOCUMENTATION                                 */}
+        {/* ==================================================== */}
         {activeTab === 'docs' && (
           <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 items-start">
             
@@ -1975,11 +2092,12 @@ export default function App() {
                   { id: 'doc-incomes', label: '3. Guaranteed Income & UK Tax' },
                   { id: 'doc-gia-tax', label: '4. Note on GIA / Other Tax' },
                   { id: 'doc-surplus', label: '5. What Happens to Surplus Income' },
-                  { id: 'doc-decumulation', label: '6. Bracket Fill vs Sequential Drawdown' },
-                  { id: 'doc-pension-rules', label: '7. Phased Drawdown vs 25% Lump Sum' },
-                  { id: 'doc-spousal', label: '8. Spousal Absorption & Tax Tracking' },
+                  { id: 'doc-decumulation', label: '6. Bracket Fill vs Sequential' },
+                  { id: 'doc-pension-rules', label: '7. Phased vs 25% Lump Sum' },
+                  { id: 'doc-spousal', label: '8. Spousal Absorption & Single Mode' },
                   { id: 'doc-one-offs', label: '9. How One-Offs Are Treated' },
-                  { id: 'doc-monte-carlo', label: '10. Monte Carlo & Safe Max Spend' }
+                  { id: 'doc-monte-carlo', label: '10. Monte Carlo & Safe Max Spend' },
+                  { id: 'doc-risk-profiles', label: '11. Asset Allocations & Fund Types' }
                 ].map(item => (
                   <button
                     key={item.id}
@@ -1997,7 +2115,7 @@ export default function App() {
               <div className="pb-6 border-b border-slate-100">
                 <h2 className="text-xl font-bold text-slate-900">Model Logic & Reference Guide</h2>
                 <p className="text-slate-500 text-xs mt-1">
-                  How the model handles UK tax bands, wrapper liquidation order, and market volatility.
+                  How the model handles UK tax bands, wrapper liquidation order, asset allocations, and volatility.
                 </p>
               </div>
 
@@ -2018,9 +2136,9 @@ export default function App() {
                     </p>
                   </div>
                   <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl text-xs space-y-1">
-                    <strong className="text-slate-900 block font-semibold">Four Separate Account Wrappers</strong>
+                    <strong className="text-slate-900 block font-semibold">Dedicated Account Wrappers</strong>
                     <p className="text-slate-600">
-                      Wealth is divided across four accounts per person (eight total): Pensions, S&S ISAs, Other Investments (GIA), and Cash. Each wrapper has its own access age and tax rules.
+                      Wealth is divided across four accounts per person: Pensions, S&S ISAs, Other Investments (GIA), and Cash. Each wrapper has its own access age and tax rules.
                     </p>
                   </div>
                 </div>
@@ -2114,7 +2232,7 @@ export default function App() {
                   If guaranteed income (like State Pensions or DB payouts) exceeds your living spend in a given year, portfolio withdrawals drop to £0.
                 </p>
                 <p>
-                  The surplus cash does not vanish. It is split 50/50 and deposited into each partner's <strong>Tier 1 Cash Savings</strong>, where it earns the cash return rate and stands ready to fund future spending.
+                  The surplus cash does not vanish. It is deposited into Tier 1 Cash Savings, where it earns the cash return rate and stands ready to fund future spending.
                 </p>
               </section>
 
@@ -2152,7 +2270,7 @@ export default function App() {
                       Option B: Sequential Drawdown (Spreadsheet Classic)
                     </div>
                     <p className="text-slate-600">
-                      Drains accounts in rigid order: <code>Cash → Other (GIA) → ISAs → Pensions (58+)</code>. This burns through every penny of ISAs before taking a single pound from pensions. It mirrors older spreadsheet models.
+                      Drains accounts in rigid order: <code>Cash → Other (GIA) → ISAs → Pensions (58+)</code>. This burns through every penny of ISAs before taking a single pound from pensions.
                     </p>
                   </div>
                 </div>
@@ -2183,22 +2301,23 @@ export default function App() {
                 </div>
               </section>
 
-              {/* 8. Spousal Absorption */}
+              {/* 8. Spousal Absorption & Single Mode */}
               <section id="doc-spousal" className="space-y-3 pt-4 border-t border-slate-100">
                 <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
                   <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">8</span>
-                  Spousal Absorption & Marginal Tax Tracking
+                  Spousal Absorption & Single Planner Logic
                 </h3>
                 <p>
-                  Partners rarely have identical pension balances. If one partner has £17k and the other has £66k, drawing equally without cross-funding would cause the smaller pot to run out in a couple of years.
+                  The engine supports both individual and couple planning:
                 </p>
                 <div className="p-3.5 bg-slate-50 border border-slate-200/80 rounded-xl text-xs space-y-1.5">
-                  <strong className="text-slate-900 block font-semibold">How Cross-Absorption Works:</strong>
+                  <strong className="text-slate-900 block font-semibold">Couple Mode (50/50 Split & Cross-Absorption):</strong>
                   <p className="text-slate-600">
-                    1. Net living spend is split 50/50 between both partners.<br />
-                    2. Each partner funds their share from their own accounts at the current tier.<br />
-                    3. If one partner's pot empties, the other partner's account at that same tier covers the difference before moving to the next wrapper.<br />
-                    4. <strong>Tax Bracket Tracking:</strong> When one partner takes extra pension money to cover the other, the engine tracks their taxable income so the additional withdrawal is taxed at their true marginal rate rather than reusing lower tax bands.
+                    Net living spend is split 50/50. If one partner's pot empties at any tier, the other partner's account covers the difference. When one partner takes extra pension money to cover the other, the engine tracks their personal taxable income so additional withdrawals are taxed at their true marginal bracket.
+                  </p>
+                  <strong className="text-slate-900 block font-semibold pt-1">Single Mode:</strong>
+                  <p className="text-slate-600">
+                    When toggled to <em>Just Myself</em>, all partner fields are omitted. 100% of spending demand is assigned directly to you, full target spend activates immediately upon your retirement without staggered work delays, and the Monte Carlo solver only checks your own retirement timeline.
                   </p>
                 </div>
               </section>
@@ -2244,6 +2363,74 @@ export default function App() {
                   </p>
                   <p className="text-slate-600">
                     <strong>Safe Max Annual Spend:</strong> The solver runs a binary search between £5k and £150k, finding the highest annual net spending budget that survives to age 100 at your chosen confidence level (e.g. 90% of trials).
+                  </p>
+                </div>
+              </section>
+
+              {/* 11. Asset Allocations & Fund Types */}
+              <section id="doc-risk-profiles" className="space-y-4 pt-4 border-t border-slate-100">
+                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                  <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-xs font-bold">11</span>
+                  Asset Allocations & Fund Types
+                </h3>
+                <p>
+                  The model categorizes portfolio holdings by their underlying equity and fixed income composition rather than subjective risk labels. Each category carries an expected real return (net of inflation) that drives both the baseline forecast and Monte Carlo trials:
+                </p>
+
+                <div className="space-y-3 text-xs">
+                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
+                    <strong className="text-slate-900 font-bold block">80–100% Equities (Expected Real Return: ~4.44% pa / Nominal: 7.05%)</strong>
+                    <p className="text-slate-600">
+                      <strong>Typical Holdings:</strong> Global index trackers, broad market equity ETFs, all-cap funds (e.g., Vanguard FTSE Global All Cap, MSCI World, S&P 500, Vanguard LifeStrategy 100).
+                    </p>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
+                    <strong className="text-slate-900 font-bold block">60–80% Equities (Expected Real Return: ~3.72% pa / Nominal: 6.31%)</strong>
+                    <p className="text-slate-600">
+                      <strong>Typical Holdings:</strong> Growth-oriented multi-asset funds and standard workplace pension default funds (e.g., Vanguard LifeStrategy 80, HSBC Global Strategy Dynamic).
+                    </p>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
+                    <strong className="text-slate-900 font-bold block">40–60% Equities (Expected Real Return: ~3.00% pa / Nominal: 5.58%)</strong>
+                    <p className="text-slate-600">
+                      <strong>Typical Holdings:</strong> Classic balanced portfolios with moderate bond diversification (e.g., traditional 60/40 or 50/50 portfolios, Vanguard LifeStrategy 60).
+                    </p>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
+                    <strong className="text-slate-900 font-bold block">20–40% Equities (Expected Real Return: ~2.28% pa / Nominal: 4.84%)</strong>
+                    <p className="text-slate-600">
+                      <strong>Typical Holdings:</strong> Cautious allocation funds emphasizing capital preservation (e.g., Vanguard LifeStrategy 20 or 40, defensive multi-asset funds).
+                    </p>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
+                    <strong className="text-slate-900 font-bold block">High interest Cash Savings, Fixed Income, Bonds (Expected Real Return: ~1.56% pa / Nominal: 4.10%)</strong>
+                    <p className="text-slate-600">
+                      <strong>Typical Holdings:</strong> UK Gilts, global aggregate bond index funds, investment-grade corporate bond funds, and competitive fixed-term cash deposits.
+                    </p>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 border border-slate-200/80 rounded-xl space-y-1">
+                    <strong className="text-slate-900 font-bold block">Cash & Money Market (Expected Real Return: ~-0.50% pa / Nominal: 1.99%)</strong>
+                    <p className="text-slate-600">
+                      <strong>Typical Holdings:</strong> Standard easy-access bank accounts, short-term treasury bills, and overnight money market funds (e.g., SONIA-tracking funds like CSH2).
+                    </p>
+                  </div>
+                </div>
+
+                <div className="p-3.5 bg-blue-50/60 border border-blue-200/80 rounded-xl text-xs space-y-2 text-slate-700">
+                  <strong className="text-blue-950 font-bold block">Key Principles Regarding Returns & Volatility:</strong>
+                  <p>
+                    <strong>1. Today's Returns vs. Long-Term Generalized Averages:</strong> Current cash savings yields and gilt yields change with the central bank base rate. The return figures above are generalized, multi-decade historical real averages (net of CPI inflation) used to drive the baseline forecast and Monte Carlo simulations.
+                  </p>
+                  <p>
+                    <strong>2. Risk and Return Relationship:</strong> Higher-equity allocations carry higher year-to-year volatility and sharper drawdowns during market corrections, but have historically delivered higher net compounding growth over 20+ year retirement horizons.
+                  </p>
+                  <p>
+                    <strong>3. Customizing Return Rates:</strong> You can edit the real and nominal percentage returns for each allocation tier inside the <strong>Config & Assumptions</strong> tab. Small changes compound significantly over a 40–60 year simulation, so modify them only if you have a specific, deliberate investment basis.
                   </p>
                 </div>
               </section>
