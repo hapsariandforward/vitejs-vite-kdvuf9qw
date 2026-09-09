@@ -5,10 +5,8 @@ import {
   Layers,
   Check,
   RotateCcw,
-  Calculator,
   Dices,
   Zap,
-  Award,
   ShieldCheck,
   Target,
   Sliders,
@@ -25,11 +23,8 @@ import {
   CheckCircle2,
   AlertTriangle,
   Pencil,
-  Info,
   HelpCircle,
   BookOpen,
-  ArrowRight,
-  UserCheck,
   History,
   Bookmark,
   Save,
@@ -41,34 +36,28 @@ import {
 const STORAGE_KEY = 'rp_plan_full_v28';
 const SCENARIOS_STORAGE_KEY = 'rp_saved_scenarios_v3';
 
-// 98-Year Empirical Dataset (1928–2025): Real S&P 500 (s) and 50/50 Govt/Corp Real Bond (b) Returns
-export const HISTORICAL_DATA = [
-  { y: 1928, s: 45.49, b: 3.22 }, { y: 1929, s: -8.83, b: 3.01 }, { y: 1930, s: -20.01, b: 9.55 }, { y: 1931, s: -38.07, b: 0.22 },
-  { y: 1932, s: 1.82, b: 29.49 }, { y: 1933, s: 48.85, b: 6.6 }, { y: 1934, s: -2.66, b: 11.7 }, { y: 1935, s: 42.49, b: 5.73 },
-  { y: 1936, s: 30.06, b: 6.66 }, { y: 1937, s: -37.13, b: -4.25 }, { y: 1938, s: 32.98, b: 9.77 }, { y: 1939, s: -1.1, b: 6.2 },
-  { y: 1940, s: -11.31, b: 6.27 }, { y: 1941, s: -20.65, b: -7.67 }, { y: 1942, s: 9.3, b: -4.86 }, { y: 1943, s: 21.47, b: 2.24 },
-  { y: 1944, s: 16.36, b: 2.22 }, { y: 1945, s: 32.84, b: 2.99 }, { y: 1946, s: -22.48, b: -12.96 }, { y: 1947, s: -3.34, b: -7.58 },
-  { y: 1948, s: 2.63, b: -0.29 }, { y: 1949, s: 20.81, b: 7.25 }, { y: 1950, s: 23.48, b: -3.4 }, { y: 1951, s: 16.68, b: -5.89 },
-  { y: 1952, s: 17.27, b: 2.58 }, { y: 1953, s: -1.94, b: 2.12 }, { y: 1954, s: 53.71, b: 5.51 }, { y: 1955, s: 32.1, b: -0.02 },
-  { y: 1956, s: 4.33, b: -5.14 }, { y: 1957, s: -12.98, b: 0.14 }, { y: 1958, s: 41.23, b: 0.4 }, { y: 1959, s: 10.15, b: -2.23 },
-  { y: 1960, s: -1.01, b: 7.69 }, { y: 1961, s: 25.79, b: 2.89 }, { y: 1962, s: -10.01, b: 4.7 }, { y: 1963, s: 20.63, b: 1.9 },
-  { y: 1964, s: 15.3, b: 3.44 }, { y: 1965, s: 10.28, b: 0.03 }, { y: 1966, s: -12.98, b: -3.6 }, { y: 1967, s: 20.15, b: -3.28 },
-  { y: 1968, s: 5.82, b: -0.63 }, { y: 1969, s: -13.6, b: -9.15 }, { y: 1970, s: -1.9, b: 5.33 }, { y: 1971, s: 10.61, b: 8.35 },
-  { y: 1972, s: 14.84, b: 3.59 }, { y: 1973, s: -21.17, b: -4.34 }, { y: 1974, s: -34.04, b: -12.05 }, { y: 1975, s: 28.11, b: 0.37 },
-  { y: 1976, s: 18.09, b: 12.4 }, { y: 1977, s: -12.82, b: -1.01 }, { y: 1978, s: -2.3, b: -7.19 }, { y: 1979, s: 4.61, b: -12.32 },
-  { y: 1980, s: 17.08, b: -13.93 }, { y: 1981, s: -12.51, b: -0.54 }, { y: 1982, s: 15.98, b: 26.1 }, { y: 1983, s: 17.87, b: 5.69 },
-  { y: 1984, s: 2.11, b: 10.32 }, { y: 1985, s: 26.43, b: 20.22 }, { y: 1986, s: 17.21, b: 21.55 }, { y: 1987, s: 1.32, b: -5.52 },
-  { y: 1988, s: 11.6, b: 6.94 }, { y: 1989, s: 25.64, b: 11.56 }, { y: 1990, s: -8.64, b: 0.08 }, { y: 1991, s: 26.36, b: 12.97 },
-  { y: 1992, s: 4.46, b: 7.64 }, { y: 1993, s: 7.03, b: 12.24 }, { y: 1994, s: -1.31, b: -7.16 }, { y: 1995, s: 33.8, b: 18.8 },
-  { y: 1996, s: 18.74, b: -0.21 }, { y: 1997, s: 30.88, b: 9.03 }, { y: 1998, s: 26.3, b: 9.67 }, { y: 1999, s: 17.72, b: -6.22 },
-  { y: 2000, s: -12.01, b: 9.29 }, { y: 2001, s: -13.2, b: 5.07 }, { y: 2002, s: -23.78, b: 11.01 }, { y: 2003, s: 25.99, b: 4.98 },
-  { y: 2004, s: 7.25, b: 3.81 }, { y: 2005, s: 1.37, b: 0.46 }, { y: 2006, s: 12.75, b: 1.92 }, { y: 2007, s: 1.35, b: 2.5 },
-  { y: 2008, s: -36.61, b: 7.42 }, { y: 2009, s: 22.6, b: 3.3 }, { y: 2010, s: 13.13, b: 6.81 }, { y: 2011, s: -0.84, b: 11.02 },
-  { y: 2012, s: 13.91, b: 4.72 }, { y: 2013, s: 30.19, b: -6.48 }, { y: 2014, s: 12.67, b: 9.74 }, { y: 2015, s: 0.64, b: -0.43 },
-  { y: 2016, s: 9.5, b: 3.38 }, { y: 2017, s: 19.09, b: 4.07 }, { y: 2018, s: -6.02, b: -3.24 }, { y: 2019, s: 28.28, b: 9.97 },
-  { y: 2020, s: 16.44, b: 9.38 }, { y: 2021, s: 19.95, b: -8.26 }, { y: 2022, s: -22.96, b: -21.22 }, { y: 2023, s: 22.2, b: 3.73 },
-  { y: 2024, s: 21.51, b: 0.98 }, { y: 2025, s: 14.78, b: 2.86 }
+// 98-Year Empirical Dataset (1928–2025): Real S&P 500 (s) and Real 50/50 Govt/Corp Bond (b) Returns
+const HISTORICAL_TUPLES = [
+  [1928,45.49,3.22],[1929,-8.83,3.01],[1930,-20.01,9.55],[1931,-38.07,0.22],[1932,1.82,29.49],[1933,48.85,6.6],
+  [1934,-2.66,11.7],[1935,42.49,5.73],[1936,30.06,6.66],[1937,-37.13,-4.25],[1938,32.98,9.77],[1939,-1.1,6.2],
+  [1940,-11.31,6.27],[1941,-20.65,-7.67],[1942,9.3,-4.86],[1943,21.47,2.24],[1944,16.36,2.22],[1945,32.84,2.99],
+  [1946,-22.48,-12.96],[1947,-3.34,-7.58],[1948,2.63,-0.29],[1949,20.81,7.25],[1950,23.48,-3.4],[1951,16.68,-5.89],
+  [1952,17.27,2.58],[1953,-1.94,2.12],[1954,53.71,5.51],[1955,32.1,-0.02],[1956,4.33,-5.14],[1957,-12.98,0.14],
+  [1958,41.23,0.4],[1959,10.15,-2.23],[1960,-1.01,7.69],[1961,25.79,2.89],[1962,-10.01,4.7],[1963,20.63,1.9],
+  [1964,15.3,3.44],[1965,10.28,0.03],[1966,-12.98,-3.6],[1967,20.15,-3.28],[1968,5.82,-0.63],[1969,-13.6,-9.15],
+  [1970,-1.9,5.33],[1971,10.61,8.35],[1972,14.84,3.59],[1973,-21.17,-4.34],[1974,-34.04,-12.05],[1975,28.11,0.37],
+  [1976,18.09,12.4],[1977,-12.82,-1.01],[1978,-2.3,-7.19],[1979,4.61,-12.32],[1980,17.08,-13.93],[1981,-12.51,-0.54],
+  [1982,15.98,26.1],[1983,17.87,5.69],[1984,2.11,10.32],[1985,26.43,20.22],[1986,17.21,21.55],[1987,1.32,-5.52],
+  [1988,11.6,6.94],[1989,25.64,11.56],[1990,-8.64,0.08],[1991,26.36,12.97],[1992,4.46,7.64],[1993,7.03,12.24],
+  [1994,-1.31,-7.16],[1995,33.8,18.8],[1996,18.74,-0.21],[1997,30.88,9.03],[1998,26.3,9.67],[1999,17.72,-6.22],
+  [2000,-12.01,9.29],[2001,-13.2,5.07],[2002,-23.78,11.01],[2003,25.99,4.98],[2004,7.25,3.81],[2005,1.37,0.46],
+  [2006,12.75,1.92],[2007,1.35,2.5],[2008,-36.61,7.42],[2009,22.6,3.3],[2010,13.13,6.81],[2011,-0.84,11.02],
+  [2012,13.91,4.72],[2013,30.19,-6.48],[2014,12.67,9.74],[2015,0.64,-0.43],[2016,9.5,3.38],[2017,19.09,4.07],
+  [2018,-6.02,-3.24],[2019,28.28,9.97],[2020,16.44,9.38],[2021,19.95,-8.26],[2022,-22.96,-21.22],[2023,22.2,3.73],
+  [2024,21.51,0.98],[2025,14.78,2.86]
 ];
+
+export const HISTORICAL_DATA = HISTORICAL_TUPLES.map(d => ({ y: d[0], s: d[1], b: d[2] }));
 
 export const RISK_EQUITY_WEIGHTS = {
   'High Risk': 0.90,
@@ -129,7 +118,7 @@ const BLANK_PLAN = {
     taper2Age: '',
     taper2Rate: '',
     drawdownStrategy: 'Phased Drawdown',
-    decumulationPolicy: 'Bracket Fill Basic' // Defaulted to Tax Smoothing (20% Basic Rate Fill)
+    decumulationPolicy: 'Bracket Fill Basic' // Default: Tax Smoothing
   },
   accounts: [
     { id: 'pen_self', owner: 'Myself', category: 'Pensions', balance: '', contrib: '', growth: '', risk: 'High Risk' },
@@ -393,7 +382,7 @@ function SalarySacrificeOptimizer({ plan, onApplyToSandbox, onApplyToPlan, onNav
             className="w-full p-2 bg-white border border-slate-300 rounded-xl font-mono text-slate-900 font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none"
           />
           <p className="text-[11px] text-slate-500 mt-1 leading-normal">
-            Add your salary to check how much salary sacrifice could boost your portfolio vs S&amp;S ISA. If left blank, savings assume higher rate tax relief (42%).
+            Add your salary to calculate tax and NIC relief. If left blank, savings assume higher rate tax relief (42%).
           </p>
         </div>
 
@@ -680,7 +669,7 @@ function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSand
           className="text-xs text-indigo-600 hover:text-indigo-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer self-start sm:self-auto"
         >
           <HelpCircle className="w-3.5 h-3.5" />
-          Full Tournament Methodology &amp; Philosophy Breakdown &rarr;
+          Tournament Methodology &amp; Philosophies &rarr;
         </button>
       </div>
 
@@ -2041,18 +2030,180 @@ export default function App() {
     link.remove();
   };
 
+  const runSingleTrial = (planState, spendOverride = null) => {
+    const testPlan = spendOverride !== null
+      ? { ...planState, spending: { ...planState.spending, targetSpend: spendOverride } }
+      : planState;
+
+    const ageSelfStart = Number(testPlan?.demographics?.currentAgeSelf) || 40;
+    const terminalAge = Number(testPlan?.demographics?.terminalAge) || 100;
+    const totalYears = Math.max(1, terminalAge - ageSelfStart);
+    const privatePenAge = Number(testPlan?.demographics?.privatePensionAge) || 58;
+
+    const pots = {};
+    (testPlan?.accounts || []).forEach(acc => {
+      pots[acc.id] = Number(acc.balance) || 0;
+    });
+
+    const tracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false };
+    let failed = false;
+    let failAge = null;
+    let pre58Failed = false;
+
+    for (let t = 0; t <= totalYears; t++) {
+      let u1 = 0, u2 = 0;
+      while (u1 === 0) u1 = Math.random();
+      while (u2 === 0) u2 = Math.random();
+      const z = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+
+      const step = runEngineYear(t, pots, testPlan, { z }, tracking);
+
+      if (!failed && (step.totalCombined <= (Number(testPlan?.config?.solvencyFloor) || 0) || step.unmetDemand > 5 || step.pre58Insolvent)) {
+        failed = true;
+        failAge = step.ageSelf;
+        pre58Failed = step.pre58Insolvent || (step.ageSelf < privatePenAge);
+      }
+    }
+
+    const terminalPot = (pots.pen_self || 0) + (pots.isa_self || 0) + (pots.other_self || 0) + (pots.cash_self || 0) +
+      (testPlan?.demographics?.planningMode !== 'single'
+        ? ((pots.pen_part || 0) + (pots.isa_part || 0) + (pots.other_part || 0) + (pots.cash_part || 0))
+        : 0);
+
+    return {
+      survived: !failed,
+      failAge,
+      pre58Failed,
+      terminalPot: Math.max(0, terminalPot)
+    };
+  };
+
+  const handleRunMC = () => {
+    setIsSimulating(true);
+    setTimeout(() => {
+      const NUM_TRIALS = 5000;
+      const terminalPots = [];
+      const failAges = [];
+      let successCount = 0;
+      let pre58FailCount = 0;
+      const currentSpend = Number(plan?.spending?.targetSpend) || 0;
+
+      for (let i = 0; i < NUM_TRIALS; i++) {
+        const res = runSingleTrial(plan);
+        if (res.survived) {
+          successCount++;
+        } else {
+          if (res.failAge !== null) failAges.push(res.failAge);
+          if (res.pre58Failed) pre58FailCount++;
+        }
+        terminalPots.push(res.terminalPot);
+      }
+
+      terminalPots.sort((a, b) => a - b);
+      failAges.sort((a, b) => a - b);
+
+      const p10 = terminalPots[Math.floor(NUM_TRIALS * 0.10)] || 0;
+      const median = terminalPots[Math.floor(NUM_TRIALS * 0.50)] || 0;
+      const p90 = terminalPots[Math.floor(NUM_TRIALS * 0.90)] || 0;
+
+      const medianFailAge = failAges.length > 0 ? failAges[Math.floor(failAges.length * 0.50)] : null;
+      const earliestFailAge = failAges.length > 0 ? failAges[0] : null;
+
+      setSimResult({
+        type: 'test',
+        title: 'Monte Carlo Stress Test',
+        spend: currentSpend,
+        successRate: (successCount / NUM_TRIALS) * 100,
+        p10Terminal: p10,
+        medianTerminal: median,
+        p90Terminal: p90,
+        failAge: medianFailAge,
+        earliestFailAge,
+        pre58Failed: pre58FailCount > 0 && medianFailAge !== null && medianFailAge < (Number(plan?.demographics?.privatePensionAge) || 58)
+      });
+      setIsSimulating(false);
+    }, 30);
+  };
+
+  const handleOptimize = () => {
+    setIsOptimizing(true);
+    setTimeout(() => {
+      const targetRate = targetConfidence;
+      let low = 0;
+      let high = 150000;
+
+      for (let iter = 0; iter < 10; iter++) {
+        const mid = Math.round((low + high) / 2 / 250) * 250;
+        let succ = 0;
+        const testTrials = 500;
+        for (let i = 0; i < testTrials; i++) {
+          if (runSingleTrial(plan, mid).survived) succ++;
+        }
+        const rate = (succ / testTrials) * 100;
+        if (rate >= targetRate) {
+          low = mid;
+        } else {
+          high = mid;
+        }
+      }
+
+      const optimalSpend = Math.round(low / 250) * 250;
+
+      const NUM_TRIALS = 5000;
+      const terminalPots = [];
+      const failAges = [];
+      let finalSucc = 0;
+      let pre58FailCount = 0;
+
+      for (let i = 0; i < NUM_TRIALS; i++) {
+        const res = runSingleTrial(plan, optimalSpend);
+        if (res.survived) {
+          finalSucc++;
+        } else {
+          if (res.failAge !== null) failAges.push(res.failAge);
+          if (res.pre58Failed) pre58FailCount++;
+        }
+        terminalPots.push(res.terminalPot);
+      }
+
+      terminalPots.sort((a, b) => a - b);
+      failAges.sort((a, b) => a - b);
+
+      const p10 = terminalPots[Math.floor(NUM_TRIALS * 0.10)] || 0;
+      const median = terminalPots[Math.floor(NUM_TRIALS * 0.50)] || 0;
+      const p90 = terminalPots[Math.floor(NUM_TRIALS * 0.90)] || 0;
+
+      const medianFailAge = failAges.length > 0 ? failAges[Math.floor(failAges.length * 0.50)] : null;
+      const earliestFailAge = failAges.length > 0 ? failAges[0] : null;
+
+      setSimResult({
+        type: 'optimize',
+        title: `Safe Max Annual Spend (${targetConfidence}% Target)`,
+        spend: optimalSpend,
+        successRate: (finalSucc / NUM_TRIALS) * 100,
+        p10Terminal: p10,
+        medianTerminal: median,
+        p90Terminal: p90,
+        failAge: medianFailAge,
+        earliestFailAge,
+        pre58Failed: pre58FailCount > 0 && medianFailAge !== null && medianFailAge < (Number(plan?.demographics?.privatePensionAge) || 58)
+      });
+      setIsOptimizing(false);
+    }, 30);
+  };
+
   const displayedAccounts = isCouple
     ? (plan?.accounts || [])
     : (plan?.accounts || []).filter(a => a.owner === 'Myself');
 
   const HISTORICAL_PRESETS = [
-    { label: '1929 Crash (Great Depression)', year: 1929, desc: 'Severe deflation & deepest stock drop' },
-    { label: '1945 Post-War (Scenario 1)', year: 1945, desc: 'Post-WWII boom, followed 25 yrs later by 1970s stagflation' },
-    { label: '1955 Mid-Century (Scenario 2)', year: 1955, desc: '15 favorable years, hitting oil shock at age 75' },
-    { label: '1965 Stagflation (Scenario 3)', year: 1965, desc: 'Toughest historical sequence: 17 yrs of negative bond returns' },
-    { label: '1973 Oil Shock', year: 1973, desc: 'High inflation crisis + rapid equity selloff' },
-    { label: '2000 Dot-Com Bust', year: 2000, desc: '3-year equity slide followed by 2008 GFC' },
-    { label: '2008 Global Financial Crisis', year: 2008, desc: 'Severe market plunge with low-rate recovery' }
+    { label: '1929 Crash (Great Depression)', year: 1929 },
+    { label: '1945 Post-War', year: 1945 },
+    { label: '1955 Mid-Century', year: 1955 },
+    { label: '1965 Stagflation', year: 1965 },
+    { label: '1973 Oil Shock', year: 1973 },
+    { label: '2000 Dot-Com Bust', year: 2000 },
+    { label: '2008 Global Financial Crisis', year: 2008 }
   ];
 
   return (
@@ -2307,53 +2458,6 @@ export default function App() {
                   <span className="text-[10px] text-slate-400 mt-1 block">
                     Fill in if you want to leave a minimum amount of money in your will or inheritance.
                   </span>
-                </div>
-              </div>
-
-              {/* Spending Tapers */}
-              <div className="pt-3 border-t border-slate-100">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
-                  <div>
-                    <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Lifestyle Spending Tapers (Optional)</h4>
-                    <span className="text-[11px] text-slate-500">Model gradual lifestyle reductions in later life (e.g. Go-Go to Slow-Go phases).</span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setActiveTab('docs');
-                      setTimeout(() => scrollToDocSection('doc-taper'), 80);
-                    }}
-                    className="text-xs text-blue-600 hover:text-blue-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer self-start sm:self-auto"
-                  >
-                    <HelpCircle className="w-3.5 h-3.5" />
-                    How two-stage spending tapers work &rarr;
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
-                  <div>
-                    <label className="text-slate-600 font-semibold block mb-1">Taper 1 Age (Optional)</label>
-                    <input type="number" placeholder="e.g. 75" onFocus={handleFocus} value={plan?.spending?.taper1Age ?? ''} onChange={(e) => updateSpending('taper1Age', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                  </div>
-                  <div>
-                    <label className="text-slate-600 font-semibold block mb-1">Taper 1 Reduction (%)</label>
-                    <div className="relative">
-                      <input type="number" step="1" placeholder="e.g. 10" onFocus={handleFocus} value={plan?.spending?.taper1Rate ?? ''} onChange={(e) => updateSpending('taper1Rate', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold pr-8 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                      <span className="absolute right-3 top-2 text-slate-400 font-bold">%</span>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="text-slate-600 font-semibold block mb-1">Taper 2 Age (Optional)</label>
-                    <input type="number" placeholder="e.g. 85" onFocus={handleFocus} value={plan?.spending?.taper2Age ?? ''} onChange={(e) => updateSpending('taper2Age', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                  </div>
-                  <div>
-                    <label className="text-slate-600 font-semibold block mb-1">Taper 2 Reduction (%)</label>
-                    <div className="relative">
-                      <input type="number" step="1" placeholder="e.g. 15" onFocus={handleFocus} value={plan?.spending?.taper2Rate ?? ''} onChange={(e) => updateSpending('taper2Rate', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold pr-8 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                      <span className="absolute right-3 top-2 text-slate-400 font-bold">%</span>
-                    </div>
-                    <span className="text-[10px] text-slate-400 mt-1 block">Taper 2 reduction is relative to income after Taper 1 reduction (e.g. 100% &rarr; 90% &rarr; 81%).</span>
-                  </div>
                 </div>
               </div>
             </div>
@@ -3694,7 +3798,7 @@ export default function App() {
                       onMouseMove={(e) => {
                         const rect = e.currentTarget.getBoundingClientRect();
                         const age = Math.round(xScale.invert(e.clientX - rect.left));
-                        const point = historicalTimeline.find(d => d.ageSelf === age);
+                        const point = visibleData.find(d => d.ageSelf === age);
                         if (point) setHoveredHistPoint(point);
                         else setHoveredHistPoint(null);
                       }}
