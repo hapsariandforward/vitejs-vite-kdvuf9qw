@@ -5,8 +5,10 @@ import {
   Layers,
   Check,
   RotateCcw,
+  Calculator,
   Dices,
   Zap,
+  Award,
   ShieldCheck,
   Target,
   Sliders,
@@ -23,8 +25,11 @@ import {
   CheckCircle2,
   AlertTriangle,
   Pencil,
+  Info,
   HelpCircle,
   BookOpen,
+  ArrowRight,
+  UserCheck,
   History,
   Bookmark,
   Save,
@@ -36,6 +41,7 @@ import {
 const STORAGE_KEY = 'rp_plan_full_v28';
 const SCENARIOS_STORAGE_KEY = 'rp_saved_scenarios_v3';
 
+// 98-Year Empirical Dataset (1928–2025): Real S&P 500 (s) and 50/50 Govt/Corp Real Bond (b) Returns
 export const HISTORICAL_DATA = [
   { y: 1928, s: 45.49, b: 3.22 }, { y: 1929, s: -8.83, b: 3.01 }, { y: 1930, s: -20.01, b: 9.55 }, { y: 1931, s: -38.07, b: 0.22 },
   { y: 1932, s: 1.82, b: 29.49 }, { y: 1933, s: 48.85, b: 6.6 }, { y: 1934, s: -2.66, b: 11.7 }, { y: 1935, s: 42.49, b: 5.73 },
@@ -123,7 +129,7 @@ const BLANK_PLAN = {
     taper2Age: '',
     taper2Rate: '',
     drawdownStrategy: 'Phased Drawdown',
-    decumulationPolicy: 'Bracket Fill'
+    decumulationPolicy: 'Bracket Fill Basic' // Defaulted to Tax Smoothing (20% Basic Rate Fill)
   },
   accounts: [
     { id: 'pen_self', owner: 'Myself', category: 'Pensions', balance: '', contrib: '', growth: '', risk: 'High Risk' },
@@ -295,6 +301,7 @@ function grossPensionNeededForNet(netTarget, otherTaxableIncome = 0, config, isF
   return low;
 }
 
+// Sub-Component: Salary Sacrifice vs ISA Ratio Optimizer
 function SalarySacrificeOptimizer({ plan, onApplyToSandbox, onApplyToPlan, onNavigateDocs }) {
   const [grossSalary, setGrossSalary] = useState('');
 
@@ -480,7 +487,8 @@ function SalarySacrificeOptimizer({ plan, onApplyToSandbox, onApplyToPlan, onNav
   );
 }
 
-function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSandbox }) {
+// Sub-Component: Strategy Tournament & Optimizer
+function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSandbox, onNavigateDocs }) {
   const [salaryInput, setSalaryInput] = useState('');
   const [scope, setScope] = useState('contributions');
   const [emergencyFloor, setEmergencyFloor] = useState(25000);
@@ -666,6 +674,14 @@ function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSand
             Tests 4 distinct UK wrapper philosophies head-to-head under 1,500 stochastic trials each using equal net take-home budgets.
           </p>
         </div>
+        <button
+          type="button"
+          onClick={onNavigateDocs}
+          className="text-xs text-indigo-600 hover:text-indigo-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer self-start sm:self-auto"
+        >
+          <HelpCircle className="w-3.5 h-3.5" />
+          Full Tournament Methodology &amp; Philosophy Breakdown &rarr;
+        </button>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs font-sans p-3 bg-slate-50 border border-slate-200 rounded-xl">
@@ -801,7 +817,7 @@ export default function App() {
         if (!parsed.demographics) parsed.demographics = BLANK_PLAN.demographics;
         if (!parsed.demographics.planningMode) parsed.demographics.planningMode = 'couple';
         if (!parsed.spending) parsed.spending = BLANK_PLAN.spending;
-        if (!parsed.spending.decumulationPolicy) parsed.spending.decumulationPolicy = 'Bracket Fill';
+        if (!parsed.spending.decumulationPolicy) parsed.spending.decumulationPolicy = 'Bracket Fill Basic';
         if (!parsed.accounts || !Array.isArray(parsed.accounts)) parsed.accounts = BLANK_PLAN.accounts;
         if (!parsed.config) parsed.config = BLANK_PLAN.config;
         if (!parsed.oneOffContributions) parsed.oneOffContributions = [];
@@ -990,7 +1006,7 @@ export default function App() {
     const pclsProp = (Number(planState?.config?.pclsProportion) || 25) / 100;
     const paAllowance = Number(planState?.config?.personalAllowance) || 12570;
     const basicLimit = Number(planState?.config?.basicBandLimit) || 50270;
-    const decumPolicy = planState?.spending?.decumulationPolicy || 'Bracket Fill';
+    const decumPolicy = planState?.spending?.decumulationPolicy || 'Bracket Fill Basic';
 
     const yf = calculateYearFraction(planState?.config?.valuationDate);
     const baseYear = planState?.config?.valuationDate ? parseInt(planState.config.valuationDate.slice(0, 4)) : 2026;
@@ -1762,168 +1778,6 @@ export default function App() {
     });
   }, [timelineData, plan?.activeProfileView, isCouple]);
 
-  const runSingleTrial = (planState, spendOverride = null) => {
-    const testPlan = spendOverride !== null
-      ? { ...planState, spending: { ...planState.spending, targetSpend: spendOverride } }
-      : planState;
-
-    const ageSelfStart = Number(testPlan?.demographics?.currentAgeSelf) || 40;
-    const terminalAge = Number(testPlan?.demographics?.terminalAge) || 100;
-    const totalYears = Math.max(1, terminalAge - ageSelfStart);
-    const privatePenAge = Number(testPlan?.demographics?.privatePensionAge) || 58;
-
-    const pots = {};
-    (testPlan?.accounts || []).forEach(acc => {
-      pots[acc.id] = Number(acc.balance) || 0;
-    });
-
-    const tracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false };
-    let failed = false;
-    let failAge = null;
-    let pre58Failed = false;
-
-    for (let t = 0; t <= totalYears; t++) {
-      let u1 = 0, u2 = 0;
-      while (u1 === 0) u1 = Math.random();
-      while (u2 === 0) u2 = Math.random();
-      const z = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
-
-      const step = runEngineYear(t, pots, testPlan, { z }, tracking);
-
-      if (!failed && (step.totalCombined <= (Number(testPlan?.config?.solvencyFloor) || 0) || step.unmetDemand > 5 || step.pre58Insolvent)) {
-        failed = true;
-        failAge = step.ageSelf;
-        pre58Failed = step.pre58Insolvent || (step.ageSelf < privatePenAge);
-      }
-    }
-
-    const terminalPot = (pots.pen_self || 0) + (pots.isa_self || 0) + (pots.other_self || 0) + (pots.cash_self || 0) +
-      (testPlan?.demographics?.planningMode !== 'single'
-        ? ((pots.pen_part || 0) + (pots.isa_part || 0) + (pots.other_part || 0) + (pots.cash_part || 0))
-        : 0);
-
-    return {
-      survived: !failed,
-      failAge,
-      pre58Failed,
-      terminalPot: Math.max(0, terminalPot)
-    };
-  };
-
-  const handleRunMC = () => {
-    setIsSimulating(true);
-    setTimeout(() => {
-      const NUM_TRIALS = 5000;
-      const terminalPots = [];
-      const failAges = [];
-      let successCount = 0;
-      let pre58FailCount = 0;
-      const currentSpend = Number(plan?.spending?.targetSpend) || 0;
-
-      for (let i = 0; i < NUM_TRIALS; i++) {
-        const res = runSingleTrial(plan);
-        if (res.survived) {
-          successCount++;
-        } else {
-          if (res.failAge !== null) failAges.push(res.failAge);
-          if (res.pre58Failed) pre58FailCount++;
-        }
-        terminalPots.push(res.terminalPot);
-      }
-
-      terminalPots.sort((a, b) => a - b);
-      failAges.sort((a, b) => a - b);
-
-      const p10 = terminalPots[Math.floor(NUM_TRIALS * 0.10)] || 0;
-      const median = terminalPots[Math.floor(NUM_TRIALS * 0.50)] || 0;
-      const p90 = terminalPots[Math.floor(NUM_TRIALS * 0.90)] || 0;
-
-      const medianFailAge = failAges.length > 0 ? failAges[Math.floor(failAges.length * 0.50)] : null;
-      const earliestFailAge = failAges.length > 0 ? failAges[0] : null;
-
-      setSimResult({
-        type: 'test',
-        title: 'Monte Carlo Stress Test',
-        spend: currentSpend,
-        successRate: (successCount / NUM_TRIALS) * 100,
-        p10Terminal: p10,
-        medianTerminal: median,
-        p90Terminal: p90,
-        failAge: medianFailAge,
-        earliestFailAge,
-        pre58Failed: pre58FailCount > 0 && medianFailAge !== null && medianFailAge < (Number(plan?.demographics?.privatePensionAge) || 58)
-      });
-      setIsSimulating(false);
-    }, 30);
-  };
-
-  const handleOptimize = () => {
-    setIsOptimizing(true);
-    setTimeout(() => {
-      const targetRate = targetConfidence;
-      let low = 0;
-      let high = 150000;
-
-      for (let iter = 0; iter < 10; iter++) {
-        const mid = Math.round((low + high) / 2 / 250) * 250;
-        let succ = 0;
-        const testTrials = 500;
-        for (let i = 0; i < testTrials; i++) {
-          if (runSingleTrial(plan, mid).survived) succ++;
-        }
-        const rate = (succ / testTrials) * 100;
-        if (rate >= targetRate) {
-          low = mid;
-        } else {
-          high = mid;
-        }
-      }
-
-      const optimalSpend = Math.round(low / 250) * 250;
-
-      const NUM_TRIALS = 5000;
-      const terminalPots = [];
-      const failAges = [];
-      let finalSucc = 0;
-      let pre58FailCount = 0;
-
-      for (let i = 0; i < NUM_TRIALS; i++) {
-        const res = runSingleTrial(plan, optimalSpend);
-        if (res.survived) {
-          finalSucc++;
-        } else {
-          if (res.failAge !== null) failAges.push(res.failAge);
-          if (res.pre58Failed) pre58FailCount++;
-        }
-        terminalPots.push(res.terminalPot);
-      }
-
-      terminalPots.sort((a, b) => a - b);
-      failAges.sort((a, b) => a - b);
-
-      const p10 = terminalPots[Math.floor(NUM_TRIALS * 0.10)] || 0;
-      const median = terminalPots[Math.floor(NUM_TRIALS * 0.50)] || 0;
-      const p90 = terminalPots[Math.floor(NUM_TRIALS * 0.90)] || 0;
-
-      const medianFailAge = failAges.length > 0 ? failAges[Math.floor(failAges.length * 0.50)] : null;
-      const earliestFailAge = failAges.length > 0 ? failAges[0] : null;
-
-      setSimResult({
-        type: 'optimize',
-        title: `Safe Max Annual Spend (${targetConfidence}% Target)`,
-        spend: optimalSpend,
-        successRate: (finalSucc / NUM_TRIALS) * 100,
-        p10Terminal: p10,
-        medianTerminal: median,
-        p90Terminal: p90,
-        failAge: medianFailAge,
-        earliestFailAge,
-        pre58Failed: pre58FailCount > 0 && medianFailAge !== null && medianFailAge < (Number(plan?.demographics?.privatePensionAge) || 58)
-      });
-      setIsOptimizing(false);
-    }, 30);
-  };
-
   const visibleData = useMemo(() => {
     return chartDisplayData.filter(d => d.ageSelf <= maxVisibleAge);
   }, [chartDisplayData, maxVisibleAge]);
@@ -2116,7 +1970,7 @@ export default function App() {
           if (!parsed.demographics) parsed.demographics = BLANK_PLAN.demographics;
           if (!parsed.demographics.planningMode) parsed.demographics.planningMode = 'couple';
           if (!parsed.spending) parsed.spending = BLANK_PLAN.spending;
-          if (!parsed.spending.decumulationPolicy) parsed.spending.decumulationPolicy = 'Bracket Fill';
+          if (!parsed.spending.decumulationPolicy) parsed.spending.decumulationPolicy = 'Bracket Fill Basic';
           if (!parsed.accounts || !Array.isArray(parsed.accounts)) parsed.accounts = BLANK_PLAN.accounts;
           if (!parsed.config) parsed.config = BLANK_PLAN.config;
           setSandboxCustomized(false);
@@ -2280,7 +2134,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* PERSISTENT SCENARIO TOOLBAR */}
+        {/* Persistent Scenario Toolbar */}
         <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3 flex-wrap">
             <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
@@ -2365,6 +2219,7 @@ export default function App() {
               </div>
             </div>
 
+            {/* Demographics & Targets */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
                 <div>
@@ -2837,8 +2692,8 @@ export default function App() {
                     onChange={(e) => updateSpending('decumulationPolicy', e.target.value)}
                     className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs text-blue-700 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer"
                   >
-                    <option value="Bracket Fill">UK FIRE Bracket Fill (Fill 0% PA first, then ISAs)</option>
                     <option value="Bracket Fill Basic">Tax Smoothing (Fill 20% Basic Rate first, preserve ISAs)</option>
+                    <option value="Bracket Fill">UK FIRE Bracket Fill (Fill 0% PA first, then ISAs)</option>
                     <option value="Sequential">Sequential (Cash &rarr; GIA &rarr; ISA &rarr; Pension)</option>
                   </select>
                   <span className="text-[10px] text-slate-400 mt-1 block">
@@ -3493,6 +3348,7 @@ export default function App() {
               </p>
             </div>
 
+            {/* Simulation Action Bar */}
             <div className="bg-white border border-slate-200/90 rounded-2xl p-5 shadow-xs flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Run Multi-Path Simulation</h3>
@@ -3533,6 +3389,7 @@ export default function App() {
               </div>
             </div>
 
+            {/* Results Banner */}
             {simResult && (
               <div className={`p-5 rounded-2xl shadow-xs border transition-all ${
                 simResult.successRate >= 90
@@ -3627,6 +3484,10 @@ export default function App() {
               plan={plan}
               runSingleTrial={runSingleTrial}
               onApplyStrategyToSandbox={handleApplyStrategyToSandbox}
+              onNavigateDocs={() => {
+                setActiveTab('docs');
+                setTimeout(() => scrollToDocSection('doc-tournament'), 80);
+              }}
             />
           </div>
         )}
@@ -3833,7 +3694,7 @@ export default function App() {
                       onMouseMove={(e) => {
                         const rect = e.currentTarget.getBoundingClientRect();
                         const age = Math.round(xScale.invert(e.clientX - rect.left));
-                        const point = visibleData.find(d => d.ageSelf === age);
+                        const point = historicalTimeline.find(d => d.ageSelf === age);
                         if (point) setHoveredHistPoint(point);
                         else setHoveredHistPoint(null);
                       }}
@@ -3953,6 +3814,64 @@ export default function App() {
         {/* TAB 7: DOCUMENTATION */}
         {activeTab === 'docs' && (
           <div className="space-y-6">
+            <div id="doc-tournament" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                <Zap className="w-4 h-4 text-indigo-600" /> Automated Strategy Tournament &amp; Optimization Methodology
+              </h2>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                The strategy tournament tests four distinct UK wealth management philosophies against 1,500 stochastic trials each (6,000 total runs) to determine how to allocate your savings between S&amp;S ISAs and Pensions:
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                  <strong className="text-slate-800 block">1. Equal Net Budget Constraint</strong>
+                  <p className="text-slate-500">
+                    To make comparisons fair, each strategy operates on the exact same net out-of-pocket salary cost. When a strategy directs funds into a Pension via salary sacrifice, it gross-ups the contribution with upfront tax and NIC relief (e.g. £1,000 take-home reduction yields ~£1,724 inside a pension for a 40% taxpayer).
+                  </p>
+                </div>
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                  <strong className="text-slate-800 block">2. Conservative Pre-58 Bridge Sizing</strong>
+                  <p className="text-slate-500">
+                    If you retire before the private pension age (NMPA, typically 58), pensions are legally locked. The algorithm assumes 0% real growth on liquid assets to calculate the required bridge reserve. This prevents market crashes from wiping out your bridge before age 58.
+                  </p>
+                </div>
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                  <strong className="text-slate-800 block">3. Survival Maximizer vs Tax Maximizer</strong>
+                  <p className="text-slate-500">
+                    <strong>Survival Maximizer</strong> locks in your pre-58 bridge first and then routes all remaining budget into pension tax relief. <strong>Tax Relief Maximizer</strong> prioritizes maximum salary sacrifice up to statutory allowances (£60k/yr pension cap, £20k/yr ISA cap) and optionally reallocates surplus liquid ISA reserves into a SIPP (Bed &amp; SIPP).
+                  </p>
+                </div>
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                  <strong className="text-slate-800 block">4. Decumulation Bracket Smoother</strong>
+                  <p className="text-slate-500">
+                    Works backwards from retirement. It sizes your pension to avoid retirement pension withdrawals crossing the £50,270 higher rate tax threshold alongside your State Pension, redirecting the surplus into ISAs to preserve tax-free flexibility in later life.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div id="doc-decumulation" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                <Sliders className="w-4 h-4 text-blue-600" /> Decumulation Policies &amp; Pension Drawdown Strategies
+              </h2>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                How money is withdrawn across wrappers during retirement has an enormous impact on portfolio longevity and net lifetime tax:
+              </p>
+              <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1.5">
+                <li>
+                  <strong>Tax Smoothing (Fill 20% Basic Rate first - Recommended Default):</strong> Draws pensions up to the £50,270 basic rate threshold (paying an effective ~15% tax rate due to the 25% tax-free PCLS) while leaving ISAs untouched. This allows your tax-free ISA pot to compound untouched into your 70s, 80s, and 90s as a shield against late-life tax spikes or care costs.
+                </li>
+                <li>
+                  <strong>UK FIRE Bracket Fill (Fill 0% PA first):</strong> Draws pension only up to the £12,570 Personal Allowance, using ISAs and cash to fund the rest. While it avoids tax in early retirement, it drains your flexible ISA wrapper first, leaving you exposed to larger taxable pension withdrawals in later life.
+                </li>
+                <li>
+                  <strong>Phased Drawdown (Recommended Default):</strong> Crystallizes 25% tax-free cash proportionally with each withdrawal, leaving the remaining uncrystallized pension funds sheltered in the investment market.
+                </li>
+                <li>
+                  <strong>Full 25% Lump Sum:</strong> Takes the maximum allowable 25% tax-free cash (capped at £268,275 LSA) as a single upfront lump sum into cash savings.
+                </li>
+              </ul>
+            </div>
+
             <div id="doc-salary-sacrifice" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
                 <Zap className="w-4 h-4 text-indigo-600" /> Salary Sacrifice vs S&amp;S ISAs
