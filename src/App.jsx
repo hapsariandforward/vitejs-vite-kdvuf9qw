@@ -487,7 +487,8 @@ function SalarySacrificeOptimizer({ plan, onApplyToSandbox, onApplyToPlan, onNav
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('inputs');
+  // Default tab initialized to 'trajectory' so changes are immediately visible
+  const [activeTab, setActiveTab] = useState('trajectory');
   const [isEditingRisk, setIsEditingRisk] = useState(false);
   const [selectedHistoricalYear, setSelectedHistoricalYear] = useState(1965);
 
@@ -1411,6 +1412,168 @@ export default function App() {
       };
     });
   }, [timelineData, plan.activeProfileView, isCouple]);
+
+  const runSingleTrial = (planState, spendOverride = null) => {
+    const testPlan = spendOverride !== null
+      ? { ...planState, spending: { ...planState.spending, targetSpend: spendOverride } }
+      : planState;
+
+    const ageSelfStart = Number(testPlan.demographics.currentAgeSelf) || 40;
+    const terminalAge = Number(testPlan.demographics.terminalAge) || 100;
+    const totalYears = Math.max(1, terminalAge - ageSelfStart);
+    const privatePenAge = Number(testPlan.demographics.privatePensionAge) || 58;
+
+    const pots = {};
+    testPlan.accounts.forEach(acc => {
+      pots[acc.id] = Number(acc.balance) || 0;
+    });
+
+    const tracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false };
+    let failed = false;
+    let failAge = null;
+    let pre58Failed = false;
+
+    for (let t = 0; t <= totalYears; t++) {
+      let u1 = 0, u2 = 0;
+      while (u1 === 0) u1 = Math.random();
+      while (u2 === 0) u2 = Math.random();
+      const z = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
+
+      const step = runEngineYear(t, pots, testPlan, { z }, tracking);
+
+      if (!failed && (step.totalCombined <= (Number(testPlan.config.solvencyFloor) || 0) || step.unmetDemand > 5 || step.pre58Insolvent)) {
+        failed = true;
+        failAge = step.ageSelf;
+        pre58Failed = step.pre58Insolvent || (step.ageSelf < privatePenAge);
+      }
+    }
+
+    const terminalPot = (pots.pen_self || 0) + (pots.isa_self || 0) + (pots.other_self || 0) + (pots.cash_self || 0) +
+      (testPlan.demographics.planningMode !== 'single'
+        ? ((pots.pen_part || 0) + (pots.isa_part || 0) + (pots.other_part || 0) + (pots.cash_part || 0))
+        : 0);
+
+    return {
+      survived: !failed,
+      failAge,
+      pre58Failed,
+      terminalPot: Math.max(0, terminalPot)
+    };
+  };
+
+  const handleRunMC = () => {
+    setIsSimulating(true);
+    setTimeout(() => {
+      const NUM_TRIALS = 5000;
+      const terminalPots = [];
+      const failAges = [];
+      let successCount = 0;
+      let pre58FailCount = 0;
+      const currentSpend = Number(plan.spending.targetSpend) || 0;
+
+      for (let i = 0; i < NUM_TRIALS; i++) {
+        const res = runSingleTrial(plan);
+        if (res.survived) {
+          successCount++;
+        } else {
+          if (res.failAge !== null) failAges.push(res.failAge);
+          if (res.pre58Failed) pre58FailCount++;
+        }
+        terminalPots.push(res.terminalPot);
+      }
+
+      terminalPots.sort((a, b) => a - b);
+      failAges.sort((a, b) => a - b);
+
+      const p10 = terminalPots[Math.floor(NUM_TRIALS * 0.10)] || 0;
+      const median = terminalPots[Math.floor(NUM_TRIALS * 0.50)] || 0;
+      const p90 = terminalPots[Math.floor(NUM_TRIALS * 0.90)] || 0;
+
+      const medianFailAge = failAges.length > 0 ? failAges[Math.floor(failAges.length * 0.50)] : null;
+      const earliestFailAge = failAges.length > 0 ? failAges[0] : null;
+
+      setSimResult({
+        type: 'test',
+        title: 'Monte Carlo Stress Test',
+        spend: currentSpend,
+        successRate: (successCount / NUM_TRIALS) * 100,
+        p10Terminal: p10,
+        medianTerminal: median,
+        p90Terminal: p90,
+        failAge: medianFailAge,
+        earliestFailAge,
+        pre58Failed: pre58FailCount > 0 && medianFailAge !== null && medianFailAge < (Number(plan.demographics.privatePensionAge) || 58)
+      });
+      setIsSimulating(false);
+    }, 30);
+  };
+
+  const handleOptimize = () => {
+    setIsOptimizing(true);
+    setTimeout(() => {
+      const targetRate = targetConfidence;
+      let low = 0;
+      let high = 150000;
+
+      for (let iter = 0; iter < 10; iter++) {
+        const mid = Math.round((low + high) / 2 / 250) * 250;
+        let succ = 0;
+        const testTrials = 500;
+        for (let i = 0; i < testTrials; i++) {
+          if (runSingleTrial(plan, mid).survived) succ++;
+        }
+        const rate = (succ / testTrials) * 100;
+        if (rate >= targetRate) {
+          low = mid;
+        } else {
+          high = mid;
+        }
+      }
+
+      const optimalSpend = Math.round(low / 250) * 250;
+
+      const NUM_TRIALS = 5000;
+      const terminalPots = [];
+      const failAges = [];
+      let finalSucc = 0;
+      let pre58FailCount = 0;
+
+      for (let i = 0; i < NUM_TRIALS; i++) {
+        const res = runSingleTrial(plan, optimalSpend);
+        if (res.survived) {
+          finalSucc++;
+        } else {
+          if (res.failAge !== null) failAges.push(res.failAge);
+          if (res.pre58Failed) pre58FailCount++;
+        }
+        terminalPots.push(res.terminalPot);
+      }
+
+      terminalPots.sort((a, b) => a - b);
+      failAges.sort((a, b) => a - b);
+
+      const p10 = terminalPots[Math.floor(NUM_TRIALS * 0.10)] || 0;
+      const median = terminalPots[Math.floor(NUM_TRIALS * 0.50)] || 0;
+      const p90 = terminalPots[Math.floor(NUM_TRIALS * 0.90)] || 0;
+
+      const medianFailAge = failAges.length > 0 ? failAges[Math.floor(failAges.length * 0.50)] : null;
+      const earliestFailAge = failAges.length > 0 ? failAges[0] : null;
+
+      setSimResult({
+        type: 'optimize',
+        title: `Safe Max Annual Spend (${targetConfidence}% Target)`,
+        spend: optimalSpend,
+        successRate: (finalSucc / NUM_TRIALS) * 100,
+        p10Terminal: p10,
+        medianTerminal: median,
+        p90Terminal: p90,
+        failAge: medianFailAge,
+        earliestFailAge,
+        pre58Failed: pre58FailCount > 0 && medianFailAge !== null && medianFailAge < (Number(plan.demographics.privatePensionAge) || 58)
+      });
+      setIsOptimizing(false);
+    }, 30);
+  };
 
   const visibleData = useMemo(() => {
     return chartDisplayData.filter(d => d.ageSelf <= maxVisibleAge);
