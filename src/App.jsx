@@ -1420,6 +1420,7 @@ export default function App() {
     const ageSelfStart = Number(testPlan.demographics.currentAgeSelf) || 40;
     const terminalAge = Number(testPlan.demographics.terminalAge) || 100;
     const totalYears = Math.max(1, terminalAge - ageSelfStart);
+    const privatePenAge = Number(testPlan.demographics.privatePensionAge) || 58;
 
     const pots = {};
     testPlan.accounts.forEach(acc => {
@@ -1428,6 +1429,8 @@ export default function App() {
 
     const tracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false };
     let failed = false;
+    let failAge = null;
+    let pre58Failed = false;
 
     for (let t = 0; t <= totalYears; t++) {
       let u1 = 0, u2 = 0;
@@ -1437,8 +1440,10 @@ export default function App() {
 
       const step = runEngineYear(t, pots, testPlan, { z }, tracking);
 
-      if (step.totalCombined <= (Number(testPlan.config.solvencyFloor) || 0) || step.unmetDemand > 5 || step.pre58Insolvent) {
+      if (!failed && (step.totalCombined <= (Number(testPlan.config.solvencyFloor) || 0) || step.unmetDemand > 5 || step.pre58Insolvent)) {
         failed = true;
+        failAge = step.ageSelf;
+        pre58Failed = step.pre58Insolvent || (step.ageSelf < privatePenAge);
       }
     }
 
@@ -1449,6 +1454,8 @@ export default function App() {
 
     return {
       survived: !failed,
+      failAge,
+      pre58Failed,
       terminalPot: Math.max(0, terminalPot)
     };
   };
@@ -1458,19 +1465,31 @@ export default function App() {
     setTimeout(() => {
       const NUM_TRIALS = 1000;
       const terminalPots = [];
+      const failAges = [];
       let successCount = 0;
+      let pre58FailCount = 0;
       const currentSpend = Number(plan.spending.targetSpend) || 0;
 
       for (let i = 0; i < NUM_TRIALS; i++) {
         const res = runSingleTrial(plan);
-        if (res.survived) successCount++;
+        if (res.survived) {
+          successCount++;
+        } else {
+          if (res.failAge !== null) failAges.push(res.failAge);
+          if (res.pre58Failed) pre58FailCount++;
+        }
         terminalPots.push(res.terminalPot);
       }
 
       terminalPots.sort((a, b) => a - b);
+      failAges.sort((a, b) => a - b);
+
       const p10 = terminalPots[Math.floor(NUM_TRIALS * 0.10)] || 0;
       const median = terminalPots[Math.floor(NUM_TRIALS * 0.50)] || 0;
       const p90 = terminalPots[Math.floor(NUM_TRIALS * 0.90)] || 0;
+
+      const medianFailAge = failAges.length > 0 ? failAges[Math.floor(failAges.length * 0.50)] : null;
+      const earliestFailAge = failAges.length > 0 ? failAges[0] : null;
 
       setSimResult({
         type: 'test',
@@ -1479,7 +1498,10 @@ export default function App() {
         successRate: (successCount / NUM_TRIALS) * 100,
         p10Terminal: p10,
         medianTerminal: median,
-        p90Terminal: p90
+        p90Terminal: p90,
+        failAge: medianFailAge,
+        earliestFailAge,
+        pre58Failed: pre58FailCount > 0 && medianFailAge !== null && medianFailAge < (Number(plan.demographics.privatePensionAge) || 58)
       });
       setIsSimulating(false);
     }, 30);
@@ -1510,17 +1532,30 @@ export default function App() {
       const optimalSpend = Math.round(low / 250) * 250;
       const NUM_TRIALS = 1000;
       const terminalPots = [];
+      const failAges = [];
       let finalSucc = 0;
+      let pre58FailCount = 0;
+
       for (let i = 0; i < NUM_TRIALS; i++) {
         const res = runSingleTrial(plan, optimalSpend);
-        if (res.survived) finalSucc++;
+        if (res.survived) {
+          finalSucc++;
+        } else {
+          if (res.failAge !== null) failAges.push(res.failAge);
+          if (res.pre58Failed) pre58FailCount++;
+        }
         terminalPots.push(res.terminalPot);
       }
 
       terminalPots.sort((a, b) => a - b);
+      failAges.sort((a, b) => a - b);
+
       const p10 = terminalPots[Math.floor(NUM_TRIALS * 0.10)] || 0;
       const median = terminalPots[Math.floor(NUM_TRIALS * 0.50)] || 0;
       const p90 = terminalPots[Math.floor(NUM_TRIALS * 0.90)] || 0;
+
+      const medianFailAge = failAges.length > 0 ? failAges[Math.floor(failAges.length * 0.50)] : null;
+      const earliestFailAge = failAges.length > 0 ? failAges[0] : null;
 
       setSimResult({
         type: 'optimize',
@@ -1529,7 +1564,10 @@ export default function App() {
         successRate: (finalSucc / NUM_TRIALS) * 100,
         p10Terminal: p10,
         medianTerminal: median,
-        p90Terminal: p90
+        p90Terminal: p90,
+        failAge: medianFailAge,
+        earliestFailAge,
+        pre58Failed: pre58FailCount > 0 && medianFailAge !== null && medianFailAge < (Number(plan.demographics.privatePensionAge) || 58)
       });
       setIsOptimizing(false);
     }, 30);
@@ -2736,13 +2774,25 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 w-full lg:w-auto text-xs border-t lg:border-t-0 border-slate-200/80 pt-3 lg:pt-0">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 w-full lg:w-auto text-xs border-t lg:border-t-0 border-slate-200/80 pt-3 lg:pt-0">
                     <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs">
                       <span className="text-slate-500 block mb-0.5">Survival Rate</span>
                       <span className={`text-base font-black font-mono ${
                         simResult.successRate >= 90 ? 'text-emerald-700' : simResult.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'
                       }`}>
                         {simResult.successRate.toFixed(1)}%
+                      </span>
+                    </div>
+
+                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs">
+                      <span className="text-slate-500 block mb-0.5">Age of Failure</span>
+                      <span className={`text-base font-black font-mono ${
+                        !simResult.failAge ? 'text-emerald-700' : simResult.failAge < (Number(plan.demographics.privatePensionAge) || 58) ? 'text-rose-700' : 'text-amber-700'
+                      }`}>
+                        {simResult.failAge ? `Age ${simResult.failAge}` : 'None'}
+                      </span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5 font-mono truncate">
+                        {simResult.failAge ? `Median fail age` : '100% Solvency'}
                       </span>
                     </div>
 
@@ -2768,6 +2818,16 @@ export default function App() {
                     </div>
                   </div>
                 </div>
+
+                {/* Pre-Pension Bridge Failure Warning Comment */}
+                {simResult.failAge && simResult.failAge < (Number(plan.demographics.privatePensionAge) || 58) && (
+                  <div className="mt-3.5 p-3 bg-rose-100/90 border border-rose-300 rounded-xl text-xs text-rose-950 flex items-start gap-2.5 shadow-2xs">
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    <div>
+                      <strong className="font-bold">Pre-Pension Bridge Exhaustion (Age {simResult.failAge}):</strong> Your non-pension investments (e.g. S&amp;S ISAs, other investments, and cash reserves) were exhausted before your pension pot became accessible at age {plan.demographics.privatePensionAge || 58}. Consider shifting more contributions to your S&amp;S ISA or adjusting your retirement age.
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -3198,7 +3258,7 @@ export default function App() {
               </p>
             </div>
 
-            <div className="bg-white border border-slate-200/90 rounded-2xl p-5 shadow-xs space-y-4">
+            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                 <div>
                   <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Select Historical Scenario or Start Year</h3>
