@@ -245,7 +245,6 @@ export default function App() {
   const [isEditingRisk, setIsEditingRisk] = useState(false);
   const [selectedHistoricalYear, setSelectedHistoricalYear] = useState(1965);
 
-  // Active working plan state
   const [plan, setPlan] = useState(() => {
     try {
       const cached = localStorage.getItem(STORAGE_KEY);
@@ -264,7 +263,6 @@ export default function App() {
     }
   });
 
-  // Multiple Saved Scenarios persistent in localStorage
   const [scenarios, setScenarios] = useState(() => {
     try {
       const cached = localStorage.getItem(SCENARIOS_STORAGE_KEY);
@@ -285,7 +283,6 @@ export default function App() {
   const [scenarioNameInput, setScenarioNameInput] = useState('');
   const [saveSuccessMsg, setSaveSuccessMsg] = useState('');
 
-  // Sandbox state: holds temporary edits for contributions and annual growth
   const [sandboxAccounts, setSandboxAccounts] = useState(() => {
     const init = {};
     plan.accounts.forEach(a => {
@@ -297,7 +294,6 @@ export default function App() {
     return init;
   });
 
-  // Keep sandbox state synced whenever core plan accounts are loaded or changed
   useEffect(() => {
     setSandboxAccounts(prev => {
       const updated = { ...prev };
@@ -310,14 +306,12 @@ export default function App() {
     });
   }, [plan.accounts]);
 
-  // Sync working plan to local storage
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(plan));
     } catch (e) {}
   }, [plan]);
 
-  // Sync scenarios collection to local storage
   useEffect(() => {
     try {
       localStorage.setItem(SCENARIOS_STORAGE_KEY, JSON.stringify(scenarios));
@@ -327,7 +321,6 @@ export default function App() {
   const fileInputRef = useRef(null);
   const isCouple = plan.demographics.planningMode !== 'single';
 
-  // Dynamic empirical start year limit (Horizon fitting within 1928-2025)
   const spanYears = useMemo(() => {
     const ageStart = Number(plan.demographics.currentAgeSelf) || 40;
     const ageEnd = Number(plan.demographics.terminalAge) || 100;
@@ -348,7 +341,6 @@ export default function App() {
     return init;
   });
   const [maxVisibleAge, setMaxVisibleAge] = useState(100);
-  const [showMilestones, setShowMilestones] = useState(true);
   const [hoveredPoint, setHoveredPoint] = useState(null);
   const [hoveredHistPoint, setHoveredHistPoint] = useState(null);
 
@@ -368,9 +360,6 @@ export default function App() {
     if (el) el.scrollIntoView({ behavior: 'smooth' });
   };
 
-  // =========================================================================
-  // SCENARIO SAVE & SWITCH HANDLERS
-  // =========================================================================
   const handleSaveScenario = () => {
     setScenarios(prev => prev.map(s => {
       if (s.id === activeScenarioId) {
@@ -431,9 +420,6 @@ export default function App() {
     }
   };
 
-  // =========================================================================
-  // UNIFIED SIMULATION ENGINE
-  // =========================================================================
   const runEngineYear = (t, potsMap, planState, regimeOrShock = 'expected', tracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false }) => {
     const planIsCouple = planState.demographics.planningMode !== 'single';
     const ageSelfStart = Number(planState.demographics.currentAgeSelf) || 40;
@@ -461,11 +447,10 @@ export default function App() {
     const workingSelf = ageSelf < retireAgeSelf;
     const workingPart = planIsCouple ? (agePart < retireAgePart) : false;
 
-    // Retrieve historical point if running in empirical backtest mode
     const isHistorical = typeof regimeOrShock === 'object' && regimeOrShock !== null && regimeOrShock.historical;
     const histPoint = isHistorical ? getHistoricalPoint(regimeOrShock.startYear, t) : null;
 
-    // 1. One-off Scheduled Contributions
+    // 1. One-off Contributions
     planState.oneOffContributions.filter(c => {
       const itemYear = c.date ? parseInt(c.date.slice(0, 4)) : (Number(c.year) || year);
       const isOwnerValid = planIsCouple || c.owner === 'Myself';
@@ -477,7 +462,7 @@ export default function App() {
       }
     });
 
-    // 2. Annual Accumulation Contributions
+    // 2. Annual Contributions
     const fractionThisYear = isYearZero ? yf : 1.0;
     planState.accounts.forEach(acc => {
       if (!planIsCouple && acc.owner === 'Partner') return;
@@ -839,7 +824,7 @@ export default function App() {
       }
     }
 
-    // 8. Asset Compounding (Stochastic vs Empirical Historical)
+    // 8. Compounding
     const compoundFactor = isYearZero ? yf : 1.0;
     planState.accounts.forEach(acc => {
       if (!planIsCouple && acc.owner === 'Partner') return;
@@ -902,7 +887,6 @@ export default function App() {
     };
   };
 
-  // Deterministic Multi-Regime Timeline (Baseline)
   const timelineData = useMemo(() => {
     const rows = [];
     const ageSelfStart = Number(plan.demographics.currentAgeSelf) || 40;
@@ -952,9 +936,6 @@ export default function App() {
     return rows;
   }, [plan, isCouple]);
 
-  // =========================================================================
-  // SANDBOX SIMULATION ENGINE & COMPARISON
-  // =========================================================================
   const sandboxPlan = useMemo(() => {
     return {
       ...plan,
@@ -1088,7 +1069,6 @@ export default function App() {
     });
   };
 
-  // Dedicated Historical Backtest Timeline
   const historicalTimeline = useMemo(() => {
     const rows = [];
     const ageSelfStart = Number(plan.demographics.currentAgeSelf) || 40;
@@ -1153,9 +1133,6 @@ export default function App() {
     });
   }, [timelineData, plan.activeProfileView, isCouple]);
 
-  // =========================================================================
-  // MONTE CARLO STOCHASTIC SIMULATION HANDLERS
-  // =========================================================================
   const runSingleTrial = (planState, spendOverride = null) => {
     const testPlan = spendOverride !== null
       ? { ...planState, spending: { ...planState.spending, targetSpend: spendOverride } }
@@ -1236,7 +1213,6 @@ export default function App() {
       let low = 0;
       let high = 150000;
 
-      // Fast binary search across 10 iterations to locate sustainable threshold
       for (let iter = 0; iter < 10; iter++) {
         const mid = Math.round((low + high) / 2 / 250) * 250;
         let succ = 0;
@@ -1253,8 +1229,6 @@ export default function App() {
       }
 
       const optimalSpend = Math.round(low / 250) * 250;
-
-      // Rigorous 1,000 trial verification run
       const NUM_TRIALS = 1000;
       const terminalPots = [];
       let finalSucc = 0;
@@ -1282,7 +1256,6 @@ export default function App() {
     }, 30);
   };
 
-  // D3 Geometry for Baseline Chart
   const visibleData = useMemo(() => {
     return chartDisplayData.filter(d => d.ageSelf <= maxVisibleAge);
   }, [chartDisplayData, maxVisibleAge]);
@@ -1371,7 +1344,6 @@ export default function App() {
 
   const formatGBP = (v) => new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', maximumFractionDigits: 0 }).format(v || 0);
 
-  // Field Handlers
   const updateAccountField = (id, field, value) => {
     setPlan(prev => ({
       ...prev,
@@ -1491,6 +1463,56 @@ export default function App() {
       localStorage.removeItem(STORAGE_KEY);
       setSimResult(null);
     }
+  };
+
+  const handleExportCSV = () => {
+    if (!timelineData.length) return;
+    const headers = [
+      'Year',
+      'Age (Myself)',
+      'Age (Partner)',
+      'Working (Myself)',
+      'Working (Partner)',
+      'Target Spend (£)',
+      'State Pension (Myself £)',
+      'State Pension (Partner £)',
+      'Net Drawdown Demand (£)',
+      'Pensions (£)',
+      'ISAs (£)',
+      'Other Investments (£)',
+      'Cash Savings (£)',
+      'Total Combined Pot (£)',
+      'Pre-58 Liquid (£)',
+      'Pension Drawdown (£)'
+    ];
+
+    const rows = timelineData.map(r => [
+      r.year,
+      r.ageSelf,
+      isCouple ? r.agePart : 'N/A',
+      r.workingSelf ? 'Yes' : 'No',
+      isCouple ? (r.workingPart ? 'Yes' : 'No') : 'N/A',
+      r.targetSpend.toFixed(0),
+      r.spSelf.toFixed(0),
+      isCouple ? r.spPart.toFixed(0) : '0',
+      r.netDrawdown.toFixed(0),
+      r.pensions.toFixed(0),
+      r.isas.toFixed(0),
+      r.other.toFixed(0),
+      r.cash.toFixed(0),
+      r.totalCombined.toFixed(0),
+      r.pre58LiquidEquity.toFixed(0),
+      r.drawdownPensions.toFixed(0)
+    ]);
+
+    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `retirement_audit_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
   };
 
   const displayedAccounts = isCouple
@@ -1663,7 +1685,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Demographics & Targets */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
                 <div>
@@ -1738,7 +1759,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Two-Stage Optional Taper Controls */}
               <div className="pt-3 border-t border-slate-100">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
                   <div>
@@ -1786,7 +1806,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Balances & Contributions */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2">
@@ -1871,12 +1890,11 @@ export default function App() {
               </table>
             </div>
 
-            {/* Expected Other Income */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex justify-between items-center">
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2">
-                    <Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (e.g. Defined Benefit Pension, Part time work, Rental Income, benefits)
+                    <Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (e.g. DB Pension, Part-time, Rental)
                   </h3>
                   <span className="text-[11px] text-slate-500">Taxable streams count toward personal allowance and tax bands; tax-free streams directly reduce net drawdown demand.</span>
                 </div>
@@ -1961,7 +1979,6 @@ export default function App() {
               )}
             </div>
 
-            {/* Sections 4 & 5: One-Offs */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
                 <div className="flex justify-between items-center">
@@ -2148,7 +2165,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Global Economic & Calculation Configuration */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
                 <Settings className="w-4 h-4 text-blue-600" /> Global Economic & Calculation Configuration
@@ -2194,11 +2210,10 @@ export default function App() {
               </div>
             </div>
 
-            {/* Editable Risk Profiles & Multi-Sigma Matrix */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
               <div className="flex justify-between items-center">
                 <div>
-                  <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">Asset Allocations, Return Matrix & Specific Volatilities (σ)</h3>
+                  <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">Asset Allocations, Return Matrix & Volatilities (σ)</h3>
                   <span className="text-[11px] text-slate-500">Each risk tier has its own annual volatility (σ) driving the Monte Carlo simulation. Click Edit to customize.</span>
                 </div>
                 <button
@@ -2303,7 +2318,6 @@ export default function App() {
               </table>
             </div>
 
-            {/* UK Tax Bands */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">UK Income Tax Bands & Pension Allowances</h3>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs font-mono">
@@ -2399,7 +2413,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Results Banner */}
             {simResult && (
               <div className={`p-5 rounded-2xl shadow-xs border transition-all ${
                 simResult.successRate >= 90
@@ -2693,7 +2706,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Sandbox Live Impact KPIs */}
               {sandboxMetrics && (
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                   <div className={`p-4 rounded-2xl border shadow-2xs ${
@@ -2760,7 +2772,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* Interactive Wrapper Control Grid */}
               <div className="overflow-x-auto border border-slate-200 rounded-xl">
                 <table className="w-full text-left text-xs border-collapse">
                   <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans">
@@ -3019,3 +3030,230 @@ export default function App() {
                         <text y={24} textAnchor="middle" fill="#b45309" fontSize="10" fontWeight="bold">Retire M ({Number(plan.demographics.retireAgeSelf) || 60})</text>
                       </g>
                     )}
+
+                    {isCouple && (Number(plan.demographics.retireAgePart) || 60) <= maxVisibleAge && (
+                      <g transform={`translate(${xScale(Number(plan.demographics.retireAgePart) || 60)}, 0)`}>
+                        <line y2={innerHeight} stroke="#d97706" strokeWidth="1.5" strokeDasharray="3,3" />
+                        <rect x={-42} y={32} width={84} height={20} rx={4} fill="#fef3c7" stroke="#fde68a" />
+                        <text y={46} textAnchor="middle" fill="#b45309" fontSize="10" fontWeight="bold">Retire P ({Number(plan.demographics.retireAgePart) || 60})</text>
+                      </g>
+                    )}
+
+                    {(Number(plan.demographics.privatePensionAge) || 58) <= maxVisibleAge && (
+                      <g transform={`translate(${xScale(Number(plan.demographics.privatePensionAge) || 58)}, 0)`}>
+                        <line y2={innerHeight} stroke="#0284c7" strokeWidth="1.5" strokeDasharray="4,4" />
+                        <rect x={-36} y={54} width={72} height={20} rx={4} fill="#e0f2fe" stroke="#bae6fd" />
+                        <text y={68} textAnchor="middle" fill="#0369a1" fontSize="10" fontWeight="bold">NMPA ({Number(plan.demographics.privatePensionAge) || 58})</text>
+                      </g>
+                    )}
+
+                    {(Number(plan.demographics.statePensionAge) || 68) <= maxVisibleAge && (
+                      <g transform={`translate(${xScale(Number(plan.demographics.statePensionAge) || 68)}, 0)`}>
+                        <line y2={innerHeight} stroke="#059669" strokeWidth="1.5" strokeDasharray="4,4" />
+                        <rect x={-38} y={76} width={76} height={20} rx={4} fill="#d1fae5" stroke="#a7f3d0" />
+                        <text y={90} textAnchor="middle" fill="#065f46" fontSize="10" fontWeight="bold">State Pen ({Number(plan.demographics.statePensionAge) || 68})</text>
+                      </g>
+                    )}
+
+                    {histLinePath && (
+                      <path
+                        d={histLinePath}
+                        fill="none"
+                        stroke="#6366f1"
+                        strokeWidth="3"
+                        strokeLinecap="round"
+                      />
+                    )}
+
+                    <rect
+                      width={innerWidth}
+                      height={innerHeight}
+                      fill="transparent"
+                      onMouseMove={(e) => {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const age = Math.round(xScale.invert(e.clientX - rect.left));
+                        const point = historicalTimeline.find(d => d.ageSelf === age);
+                        if (point) setHoveredHistPoint(point);
+                        else setHoveredHistPoint(null);
+                      }}
+                    />
+
+                    {hoveredHistPoint && (
+                      <g transform={`translate(${xScale(hoveredHistPoint.ageSelf)}, 0)`}>
+                        <line y2={innerHeight} stroke="#94a3b8" strokeWidth="1" strokeDasharray="2,2" />
+                        <circle cy={histYScale(hoveredHistPoint.totalCombined)} r="4" fill="#6366f1" stroke="#ffffff" strokeWidth="2" />
+                      </g>
+                    )}
+                  </g>
+                </svg>
+
+                {hoveredHistPoint && (
+                  <div className="absolute top-4 left-24 bg-white/95 border border-slate-200 p-3 rounded-xl shadow-lg text-xs space-y-1 backdrop-blur-md pointer-events-none">
+                    <div className="font-bold text-slate-800 border-b border-slate-100 pb-1 flex justify-between gap-4">
+                      <span>Age {hoveredHistPoint.ageSelf} (Simulated {hoveredHistPoint.histYear})</span>
+                      <span className="text-slate-500">Plan Year: {hoveredHistPoint.year}</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-1 font-mono">
+                      <div className="text-indigo-600 font-bold">Total Pot: {formatGBP(hoveredHistPoint.totalCombined)}</div>
+                      <div className="text-slate-600">Living Target: {formatGBP(hoveredHistPoint.targetSpend)}</div>
+                      {hoveredHistPoint.histStockReturn !== null && (
+                        <div className={hoveredHistPoint.histStockReturn >= 0 ? "text-emerald-600" : "text-rose-600"}>
+                          Equity Return: {hoveredHistPoint.histStockReturn.toFixed(1)}%
+                        </div>
+                      )}
+                      {hoveredHistPoint.histBondReturn !== null && (
+                        <div className={hoveredHistPoint.histBondReturn >= 0 ? "text-emerald-600" : "text-rose-600"}>
+                          Bond Return: {hoveredHistPoint.histBondReturn.toFixed(1)}%
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 5: AUDIT DATA TABLE */}
+        {activeTab === 'audit' && (
+          <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+              <div>
+                <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                  <Table className="w-4 h-4 text-blue-600" /> Year-by-Year Cash Flow & Wrapper Ledger
+                </h2>
+                <span className="text-xs text-slate-500">
+                  Detailed inspection of annual contributions, guaranteed income, decumulation waterfalls, and wrapper balances.
+                </span>
+              </div>
+              <button
+                onClick={handleExportCSV}
+                className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all border border-slate-200 cursor-pointer self-start sm:self-auto"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" /> Export CSV Spreadsheet
+              </button>
+            </div>
+
+            <div className="overflow-x-auto border border-slate-200 rounded-xl">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans">
+                  <tr>
+                    <th className="p-2.5">Year</th>
+                    <th className="p-2.5">Age (M)</th>
+                    {isCouple && <th className="p-2.5">Age (P)</th>}
+                    <th className="p-2.5">Spend Target</th>
+                    <th className="p-2.5">Net Drawdown</th>
+                    <th className="p-2.5">Pensions</th>
+                    <th className="p-2.5">ISAs</th>
+                    <th className="p-2.5">Other Inv</th>
+                    <th className="p-2.5">Cash</th>
+                    <th className="p-2.5">Total Combined</th>
+                    <th className="p-2.5">Pre-58 Liquid</th>
+                    <th className="p-2.5 text-right">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
+                  {timelineData.map(r => (
+                    <tr key={r.year} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="p-2 font-bold text-slate-800">{r.year}</td>
+                      <td className="p-2">{r.ageSelf}</td>
+                      {isCouple && <td className="p-2">{r.agePart}</td>}
+                      <td className="p-2 font-sans font-medium text-slate-700">{formatGBP(r.targetSpend)}</td>
+                      <td className="p-2 text-rose-600 font-medium">{formatGBP(r.netDrawdown)}</td>
+                      <td className="p-2 text-sky-700">{formatGBP(r.pensions)}</td>
+                      <td className="p-2 text-teal-700">{formatGBP(r.isas)}</td>
+                      <td className="p-2 text-amber-700">{formatGBP(r.other)}</td>
+                      <td className="p-2 text-slate-700">{formatGBP(r.cash)}</td>
+                      <td className="p-2 font-bold text-blue-700">{formatGBP(r.totalCombined)}</td>
+                      <td className="p-2 text-slate-600">{formatGBP(r.pre58LiquidEquity)}</td>
+                      <td className="p-2 text-right">
+                        {r.pre58Insolvent ? (
+                          <span className="px-2 py-0.5 bg-rose-100 text-rose-800 rounded font-sans text-[10px] font-bold">
+                            Pre-58 Gap
+                          </span>
+                        ) : r.unmetDemand > 5 ? (
+                          <span className="px-2 py-0.5 bg-rose-100 text-rose-800 rounded font-sans text-[10px] font-bold">
+                            Shortfall
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded font-sans text-[10px] font-bold">
+                            Solvent
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 6: DOCUMENTATION */}
+        {activeTab === 'docs' && (
+          <div className="space-y-6">
+            <div id="doc-taper" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                <HelpCircle className="w-4 h-4 text-blue-600" /> Lifestyle Spending Tapers
+              </h2>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Retirement spending rarely stays constant throughout life. Research into retirement spending curves indicates that spending typically follows three distinct phases:
+              </p>
+              <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
+                <li><strong>Go-Go Years:</strong> Active travel, hobbies, home modifications, and dining out in early retirement.</li>
+                <li><strong>Slow-Go Years (Taper 1):</strong> Spending on travel and lifestyle moderates naturally.</li>
+                <li><strong>No-Go Years (Taper 2):</strong> Further decrease in leisure travel and active pursuits, partially offset by potential healthcare needs.</li>
+              </ul>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Taper 2 applies relative to the post-Taper 1 spending figure. For example, £40,000 with a 10% Taper 1 reduces to £36,000, and a 10% Taper 2 subsequently reduces that to £32,400.
+              </p>
+            </div>
+
+            <div id="doc-risk-profiles" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-blue-600" /> Asset Allocations, Return Bounds & Volatility (σ)
+              </h2>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Each investment wrapper is assigned an asset allocation risk tier with specific real and nominal expectations:
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                  <span className="font-bold text-slate-800">High Risk (80–100% Equities)</span>
+                  <p className="text-slate-500">Global index funds and world equity trackers. Highest potential long-term real return (~4.4% net of fees), but higher annual volatility (σ = 15.5%).</p>
+                </div>
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                  <span className="font-bold text-slate-800">Medium Risk (40–60% Equities)</span>
+                  <p className="text-slate-500">Balanced multi-asset portfolios containing global equities, investment-grade bonds, and gilt holdings (σ = 8.0%).</p>
+                </div>
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                  <span className="font-bold text-slate-800">Low Risk (Fixed Income / Bonds)</span>
+                  <p className="text-slate-500">Sovereign bonds, gilts, high-interest cash savings, and short-dated capital preservation instruments (σ = 3.0%).</p>
+                </div>
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                  <span className="font-bold text-slate-800">Cash Equivalents</span>
+                  <p className="text-slate-500">Instant-access bank accounts and money market funds intended for immediate expenditure buffers.</p>
+                </div>
+              </div>
+            </div>
+
+            <div id="doc-one-offs" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                <Coins className="w-4 h-4 text-blue-600" /> One-Off Cost Liquidation Hierarchy
+              </h2>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                When a one-off capital cost is scheduled, the engine liquidates available assets following a strict tax-efficient ordering:
+              </p>
+              <ol className="list-decimal pl-5 text-xs text-slate-600 space-y-1">
+                <li><strong>Cash Savings:</strong> Unencumbered cash reserves are drained first.</li>
+                <li><strong>Other Investments (GIA):</strong> Taxable accounts are liquidated next.</li>
+                <li><strong>Stocks & Shares ISAs:</strong> Tax-free liquid wrapper covers remaining cost balance.</li>
+                <li><strong>Pensions:</strong> Can only be accessed once reaching the private pension access age (NMPA, typically age 58). If a cost exceeds liquid pre-58 capital before age 58, a pre-58 insolvency warning is triggered.</li>
+              </ol>
+            </div>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
