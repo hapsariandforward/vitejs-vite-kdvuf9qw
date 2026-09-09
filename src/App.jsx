@@ -240,6 +240,228 @@ function grossPensionNeededForNet(netTarget, otherTaxableIncome = 0, config, isF
   return low;
 }
 
+// Sub-Component: Salary Sacrifice vs ISA Optimizer
+function SalarySacrificeOptimizer({ plan, onApplyToSandbox, onApplyToPlan, onNavigateDocs }) {
+  const [grossSalary, setGrossSalary] = useState(65000);
+  const [totalMonthlyBudget, setTotalMonthlyBudget] = useState(1000);
+  const [pensionPercent, setPensionPercent] = useState(80);
+
+  const curAge = Number(plan.demographics.currentAgeSelf) || 40;
+  const retAge = Number(plan.demographics.retireAgeSelf) || 60;
+  const realRate = 0.044;
+
+  const calculateMarginalCost = (salary, grossSacrifice) => {
+    const getTaxAndNIC = (income) => {
+      let pa = 12570;
+      if (income > 100000) pa = Math.max(0, 12570 - (income - 100000) * 0.5);
+
+      let taxable = Math.max(0, income - pa);
+      let tax = 0;
+      if (taxable > 0) {
+        const basic = Math.min(taxable, Math.max(0, 50270 - 12570));
+        tax += basic * 0.20;
+        taxable -= basic;
+      }
+      if (taxable > 0) {
+        const higher = Math.min(taxable, 125140 - 50270);
+        tax += higher * 0.40;
+        taxable -= higher;
+      }
+      if (taxable > 0) tax += taxable * 0.45;
+
+      let nic = 0;
+      if (income > 12570) {
+        const mainBand = Math.min(income, 50270) - 12570;
+        nic += mainBand * 0.08;
+      }
+      if (income > 50270) {
+        nic += (income - 50270) * 0.02;
+      }
+      return tax + nic;
+    };
+
+    const initialDeductions = getTaxAndNIC(salary);
+    const postSacrificeDeductions = getTaxAndNIC(Math.max(0, salary - grossSacrifice));
+    const taxAndNICSaved = initialDeductions - postSacrificeDeductions;
+    const netTakeHomeCost = grossSacrifice - taxAndNICSaved;
+    const effectiveReliefRate = grossSacrifice > 0 ? (taxAndNICSaved / grossSacrifice) * 100 : 0;
+
+    return { netTakeHomeCost, taxAndNICSaved, effectiveReliefRate };
+  };
+
+  const annualBudget = totalMonthlyBudget * 12;
+  const isaShare = (100 - pensionPercent) / 100;
+  const pensionShare = pensionPercent / 100;
+
+  const netPensionSacrifice = annualBudget * pensionShare;
+  const netIsaContribution = annualBudget * isaShare;
+
+  let low = netPensionSacrifice;
+  let high = netPensionSacrifice * 2.8;
+  for (let i = 0; i < 20; i++) {
+    const mid = (low + high) / 2;
+    const { netTakeHomeCost } = calculateMarginalCost(grossSalary, mid);
+    if (netTakeHomeCost < netPensionSacrifice) low = mid;
+    else high = mid;
+  }
+  const grossPensionContribution = netPensionSacrifice > 0 ? low : 0;
+  const annualTaxSaved = grossPensionContribution - netPensionSacrifice;
+  const upfrontBoostPercent = netPensionSacrifice > 0 ? ((grossPensionContribution - netPensionSacrifice) / netPensionSacrifice) * 100 : 0;
+
+  const netExitFactor = 0.85;
+  const projectValue = (annualNet, annualGross, years) => {
+    if (years <= 0) return { isa: 0, penNet: 0, ratio: 1.0 };
+    const fvNetIsa = annualNet * ((Math.pow(1 + realRate, years) - 1) / realRate);
+    const fvGrossPen = annualGross * ((Math.pow(1 + realRate, years) - 1) / realRate);
+    const fvNetPen = fvGrossPen * netExitFactor;
+    const ratio = fvNetIsa > 0 ? (fvNetPen / fvNetIsa) : (annualGross * netExitFactor) / annualNet;
+    return { fvNetIsa, fvNetPen, ratio };
+  };
+
+  const yearsToRetire = Math.max(1, retAge - curAge);
+  const yearsTo80 = Math.max(1, 80 - curAge);
+  const yearsTo100 = Math.max(1, 100 - curAge);
+
+  const mRetire = projectValue(netPensionSacrifice, grossPensionContribution, yearsToRetire).ratio;
+  const m80 = projectValue(netPensionSacrifice, grossPensionContribution, yearsTo80).ratio;
+  const m100 = projectValue(netPensionSacrifice, grossPensionContribution, yearsTo100).ratio;
+
+  return (
+    <div className="p-4 sm:p-5 bg-gradient-to-br from-indigo-50/90 via-blue-50/50 to-slate-50 border border-indigo-100 rounded-2xl shadow-xs space-y-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-indigo-100/70">
+        <div className="flex items-center gap-2">
+          <div className="p-1.5 bg-indigo-600 text-white rounded-lg">
+            <Zap className="w-4 h-4 fill-amber-300 text-amber-300" />
+          </div>
+          <div>
+            <h4 className="text-xs font-bold text-indigo-950 uppercase tracking-wider">
+              Salary Sacrifice &amp; Wrapper Optimizer
+            </h4>
+            <span className="text-[11px] text-slate-500">
+              Calculate pre-tax salary sacrifice leverage vs post-tax S&amp;S ISA contributions.
+            </span>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onNavigateDocs}
+          className="text-xs text-indigo-600 hover:text-indigo-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer self-start sm:self-auto"
+        >
+          <HelpCircle className="w-3.5 h-3.5" />
+          How pre-tax salary sacrifice works &rarr;
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs font-sans">
+        <div>
+          <label className="text-slate-600 font-semibold block mb-1">Gross Annual Salary (£)</label>
+          <input
+            type="number"
+            step="1000"
+            value={grossSalary}
+            onChange={(e) => setGrossSalary(Math.max(0, Number(e.target.value) || 0))}
+            className="w-full p-2 bg-white border border-slate-300 rounded-xl font-mono text-slate-900 font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+          />
+          <span className="text-[10px] text-slate-400 mt-1 block">
+            {grossSalary > 100000 && grossSalary <= 125140 ? 'Inside 60% Personal Allowance Taper' : grossSalary > 50270 ? 'Higher Rate (40% Tax + 2% NIC)' : 'Basic Rate (20% Tax + 8% NIC)'}
+          </span>
+        </div>
+
+        <div>
+          <label className="text-slate-600 font-semibold block mb-1">Net Monthly Take-Home to Invest (£)</label>
+          <input
+            type="number"
+            step="50"
+            value={totalMonthlyBudget}
+            onChange={(e) => setTotalMonthlyBudget(Math.max(0, Number(e.target.value) || 0))}
+            className="w-full p-2 bg-white border border-slate-300 rounded-xl font-mono text-slate-900 font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+          />
+          <span className="text-[10px] text-slate-400 mt-1 block font-mono">£{(annualBudget).toLocaleString()}/year net out-of-pocket</span>
+        </div>
+
+        <div>
+          <div className="flex justify-between items-center mb-1">
+            <label className="text-slate-600 font-semibold">Allocation Ratio</label>
+            <span className="text-xs font-bold text-indigo-700 font-mono">
+              {100 - pensionPercent}% ISA / {pensionPercent}% Pension
+            </span>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="5"
+            value={pensionPercent}
+            onChange={(e) => setPensionPercent(Number(e.target.value))}
+            className="w-full accent-indigo-600 cursor-pointer mt-2"
+          />
+          <div className="flex justify-between text-[10px] text-slate-400 mt-0.5">
+            <span>100% ISA</span>
+            <span>50/50</span>
+            <span>100% Pension</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 text-xs">
+        <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
+          <span className="text-[10px] text-slate-500 uppercase font-bold block">Annual Tax/NIC Saved</span>
+          <span className="text-base font-black font-mono text-emerald-600">
+            +£{Math.round(annualTaxSaved).toLocaleString()}
+          </span>
+          <span className="text-[10px] text-slate-400 block mt-0.5">Free government match</span>
+        </div>
+
+        <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
+          <span className="text-[10px] text-slate-500 uppercase font-bold block">Upfront Capital Boost</span>
+          <span className="text-base font-black font-mono text-indigo-700">
+            +{upfrontBoostPercent.toFixed(1)}%
+          </span>
+          <span className="text-[10px] text-slate-400 block mt-0.5">Immediate day-1 leverage</span>
+        </div>
+
+        <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
+          <span className="text-[10px] text-slate-500 uppercase font-bold block">Boost Multiple @ Retire</span>
+          <span className="text-base font-black font-mono text-indigo-700">
+            {mRetire.toFixed(2)}x
+          </span>
+          <span className="text-[10px] text-slate-400 block mt-0.5">Net wealth vs 100% ISA</span>
+        </div>
+
+        <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
+          <span className="text-[10px] text-slate-500 uppercase font-bold block">Boost Multiple @ Age 100</span>
+          <span className="text-base font-black font-mono text-indigo-700">
+            {m100.toFixed(2)}x
+          </span>
+          <span className="text-[10px] text-slate-400 block mt-0.5">Net purchasing power</span>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-indigo-100/70">
+        <div className="text-[11px] text-slate-500">
+          Resulting Deposits: <strong className="text-teal-700 font-mono">£{Math.round(netIsaContribution).toLocaleString()}/yr ISA</strong> + <strong className="text-blue-700 font-mono">£{Math.round(grossPensionContribution).toLocaleString()}/yr Pension</strong> (Net cost: £{annualBudget.toLocaleString()})
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onApplyToSandbox(Math.round(grossPensionContribution), Math.round(netIsaContribution))}
+            className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold border border-indigo-200 transition-all cursor-pointer"
+          >
+            Apply to Sandbox Below
+          </button>
+          <button
+            type="button"
+            onClick={() => onApplyToPlan(Math.round(grossPensionContribution), Math.round(netIsaContribution))}
+            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-xs transition-all cursor-pointer"
+          >
+            Apply to Plan Inputs
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('inputs');
   const [isEditingRisk, setIsEditingRisk] = useState(false);
@@ -1069,6 +1291,29 @@ export default function App() {
     });
   };
 
+  const handleApplyOptimizerToSandbox = (grossPensionAnnual, netIsaAnnual) => {
+    setSandboxAccounts(prev => ({
+      ...prev,
+      pen_self: { ...(prev.pen_self || {}), contrib: grossPensionAnnual },
+      isa_self: { ...(prev.isa_self || {}), contrib: netIsaAnnual }
+    }));
+    setSaveSuccessMsg('Salary sacrifice applied to Sandbox');
+    setTimeout(() => setSaveSuccessMsg(''), 3000);
+  };
+
+  const handleApplyOptimizerToPlan = (grossPensionAnnual, netIsaAnnual) => {
+    setPlan(prev => ({
+      ...prev,
+      accounts: prev.accounts.map(acc => {
+        if (acc.id === 'pen_self') return { ...acc, contrib: grossPensionAnnual };
+        if (acc.id === 'isa_self') return { ...acc, contrib: netIsaAnnual };
+        return acc;
+      })
+    }));
+    setSaveSuccessMsg('Salary sacrifice saved to Plan Inputs');
+    setTimeout(() => setSaveSuccessMsg(''), 3000);
+  };
+
   const historicalTimeline = useMemo(() => {
     const rows = [];
     const ageSelfStart = Number(plan.demographics.currentAgeSelf) || 40;
@@ -1544,7 +1789,7 @@ export default function App() {
               <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 font-semibold border border-blue-100">v3.2</span>
             </div>
             <p className="text-xs text-slate-500 mt-1 max-w-3xl leading-relaxed">
-              UK multi-wrapper drawdown model, Monte Carlo & historical backtesting. <strong className="text-slate-700 font-semibold">For educational & illustrative purposes only — this is not financial advice.</strong> Please complete <span className="font-semibold text-blue-700">Plan Inputs</span> first; Config changes are optional (it is advised to start with current default settings).
+              UK multi-wrapper drawdown model, Monte Carlo &amp; historical backtesting. <strong className="text-slate-700 font-semibold">For educational &amp; illustrative purposes only — this is not financial advice.</strong> Please complete <span className="font-semibold text-blue-700">Plan Inputs</span> first; Config changes are optional (it is advised to start with current default settings).
             </p>
           </div>
 
@@ -1563,7 +1808,7 @@ export default function App() {
                 activeTab === 'config' ? 'bg-white text-blue-600 shadow-xs' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              <Settings className="w-3.5 h-3.5" /> Config & Assumptions
+              <Settings className="w-3.5 h-3.5" /> Config &amp; Assumptions
             </button>
             <button
               onClick={() => setActiveTab('dashboard')}
@@ -1571,7 +1816,7 @@ export default function App() {
                 activeTab === 'dashboard' ? 'bg-white text-blue-600 shadow-xs' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              <TrendingUp className="w-3.5 h-3.5" /> Dashboard & Simulation
+              <TrendingUp className="w-3.5 h-3.5" /> Dashboard &amp; Simulation
             </button>
             <button
               onClick={() => setActiveTab('historical')}
@@ -1668,7 +1913,7 @@ export default function App() {
           <div className="space-y-6">
             <div className="flex flex-wrap items-center justify-between gap-3 bg-white border border-slate-200/90 p-4 rounded-2xl shadow-xs">
               <div>
-                <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider">User Inputs & Wrapper Portfolios</h2>
+                <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider">User Inputs &amp; Wrapper Portfolios</h2>
                 <p className="text-xs text-slate-500">Press <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">Tab</kbd> to move between fields.</p>
               </div>
               <div className="flex items-center gap-2">
@@ -1685,11 +1930,12 @@ export default function App() {
               </div>
             </div>
 
+            {/* Demographics & Targets */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2">
-                    <Users className="w-4 h-4 text-blue-600" /> 1. Demographics & Retirement Targets
+                    <Users className="w-4 h-4 text-blue-600" /> 1. Demographics &amp; Retirement Targets
                   </h3>
                   <span className="text-xs text-slate-500">Choose whether this plan is for an individual or a couple.</span>
                 </div>
@@ -1759,6 +2005,7 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Spending Tapers */}
               <div className="pt-3 border-t border-slate-100">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
                   <div>
@@ -1774,7 +2021,7 @@ export default function App() {
                     className="text-xs text-blue-600 hover:text-blue-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer self-start sm:self-auto"
                   >
                     <HelpCircle className="w-3.5 h-3.5" />
-                    How two-stage spending tapers work →
+                    How two-stage spending tapers work &rarr;
                   </button>
                 </div>
 
@@ -1800,16 +2047,17 @@ export default function App() {
                       <input type="number" step="1" placeholder="e.g. 15" onFocus={handleFocus} value={plan.spending.taper2Rate} onChange={(e) => updateSpending('taper2Rate', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold pr-8 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                       <span className="absolute right-3 top-2 text-slate-400 font-bold">%</span>
                     </div>
-                    <span className="text-[10px] text-slate-400 mt-1 block">Taper 2 reduction is relative to income after Taper 1 reduction (e.g. 100% → 90% → 81%).</span>
+                    <span className="text-[10px] text-slate-400 mt-1 block">Taper 2 reduction is relative to income after Taper 1 reduction (e.g. 100% &rarr; 90% &rarr; 81%).</span>
                   </div>
                 </div>
               </div>
             </div>
 
+            {/* Balances & Contributions */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2">
-                  <Wallet className="w-4 h-4 text-blue-600" /> 2. Current Balances, Annual Contributions & Risk Profiles
+                  <Wallet className="w-4 h-4 text-blue-600" /> 2. Current Balances, Annual Contributions &amp; Risk Profiles
                 </h3>
                 <button
                   type="button"
@@ -1820,7 +2068,7 @@ export default function App() {
                   className="text-xs text-blue-600 hover:text-blue-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer self-start sm:self-auto"
                 >
                   <HelpCircle className="w-3.5 h-3.5" />
-                  Guide to investment allocations & fund types →
+                  Guide to investment allocations &amp; fund types &rarr;
                 </button>
               </div>
 
@@ -1890,11 +2138,12 @@ export default function App() {
               </table>
             </div>
 
+            {/* Expected Other Income */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex justify-between items-center">
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2">
-                    <Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (e.g. DB Pension, Part-time, Rental)
+                    <Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (e.g. DB Pension, Part time work, Rental)
                   </h3>
                   <span className="text-[11px] text-slate-500">Taxable streams count toward personal allowance and tax bands; tax-free streams directly reduce net drawdown demand.</span>
                 </div>
@@ -1979,6 +2228,7 @@ export default function App() {
               )}
             </div>
 
+            {/* One-Offs */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
                 <div className="flex justify-between items-center">
@@ -2028,7 +2278,7 @@ export default function App() {
                           className="p-1 bg-white border border-slate-300 rounded text-blue-700 font-semibold"
                         >
                           <option value="Pensions">Pensions</option>
-                          <option value="S&S ISAs">S&S ISAs</option>
+                          <option value="S&amp;S ISAs">S&amp;S ISAs</option>
                           <option value="Other Investments">Other Investments</option>
                           <option value="Cash Savings">Cash Savings</option>
                         </select>
@@ -2065,7 +2315,7 @@ export default function App() {
                       className="text-[11px] text-rose-600 hover:text-rose-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer mt-0.5"
                     >
                       <HelpCircle className="w-3 h-3" />
-                      How costs are liquidated from your portfolio wrappers →
+                      How costs are liquidated from your portfolio wrappers &rarr;
                     </button>
                   </div>
                   <button onClick={addOneOffCost} className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer border border-slate-200 self-start sm:self-auto">
@@ -2125,7 +2375,7 @@ export default function App() {
           <div className="space-y-6">
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                <Sliders className="w-4 h-4 text-blue-600" /> Decumulation & Pension Withdrawal Methodology
+                <Sliders className="w-4 h-4 text-blue-600" /> Decumulation &amp; Pension Withdrawal Methodology
               </h2>
               <p className="text-xs text-slate-500">Select how portfolio withdrawals are ordered across tax wrappers and how pensions are crystallized.</p>
 
@@ -2139,7 +2389,7 @@ export default function App() {
                   >
                     <option value="Bracket Fill">UK FIRE Bracket Fill (Fill 0% PA first, then ISAs)</option>
                     <option value="Bracket Fill Basic">Tax Smoothing (Fill 20% Basic Rate first, preserve ISAs)</option>
-                    <option value="Sequential">Sequential (Cash → GIA → ISA → Pension)</option>
+                    <option value="Sequential">Sequential (Cash &rarr; GIA &rarr; ISA &rarr; Pension)</option>
                   </select>
                   <span className="text-[10px] text-slate-400 mt-1 block">
                     {plan.spending.decumulationPolicy === 'Bracket Fill Basic'
@@ -2167,7 +2417,7 @@ export default function App() {
 
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                <Settings className="w-4 h-4 text-blue-600" /> Global Economic & Calculation Configuration
+                <Settings className="w-4 h-4 text-blue-600" /> Global Economic &amp; Calculation Configuration
               </h2>
               <p className="text-xs text-slate-500">Economic and regulatory tax settings used throughout the projection engine.</p>
 
@@ -2213,7 +2463,7 @@ export default function App() {
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
               <div className="flex justify-between items-center">
                 <div>
-                  <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">Asset Allocations, Return Matrix & Volatilities (σ)</h3>
+                  <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">Asset Allocations, Return Matrix &amp; Volatilities (σ)</h3>
                   <span className="text-[11px] text-slate-500">Each risk tier has its own annual volatility (σ) driving the Monte Carlo simulation. Click Edit to customize.</span>
                 </div>
                 <button
@@ -2319,7 +2569,7 @@ export default function App() {
             </div>
 
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
-              <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">UK Income Tax Bands & Pension Allowances</h3>
+              <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">UK Income Tax Bands &amp; Pension Allowances</h3>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs font-mono">
                 <div>
                   <span className="text-slate-600 font-sans font-semibold block mb-1">Personal Allowance (£)</span>
@@ -2672,7 +2922,7 @@ export default function App() {
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
                 <div>
                   <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                    <Sparkles className="w-4 h-4 text-amber-500" /> Contribution & Escalation Sandbox
+                    <Sparkles className="w-4 h-4 text-amber-500" /> Contribution &amp; Escalation Sandbox
                   </h3>
                   <p className="text-xs text-slate-500 mt-0.5">
                     Test increasing or decreasing annual contributions and escalation growth rates in real time without modifying your base plan inputs.
@@ -2706,6 +2956,7 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Sandbox Live Impact KPIs */}
               {sandboxMetrics && (
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                   <div className={`p-4 rounded-2xl border shadow-2xs ${
@@ -2725,7 +2976,7 @@ export default function App() {
                       {sandboxMetrics.terminalDelta >= 0 ? '+' : ''}{formatGBP(sandboxMetrics.terminalDelta)}
                     </div>
                     <span className="text-[11px] text-slate-500 block mt-0.5 font-mono">
-                      {formatGBP(sandboxMetrics.baseTerminal)} → {formatGBP(sandboxMetrics.sbTerminal)}
+                      {formatGBP(sandboxMetrics.baseTerminal)} &rarr; {formatGBP(sandboxMetrics.sbTerminal)}
                     </span>
                   </div>
 
@@ -2772,6 +3023,18 @@ export default function App() {
                 </div>
               )}
 
+              {/* SALARY SACRIFICE TOGGLE & WRAPPER OPTIMIZER */}
+              <SalarySacrificeOptimizer
+                plan={plan}
+                onApplyToSandbox={handleApplyOptimizerToSandbox}
+                onApplyToPlan={handleApplyOptimizerToPlan}
+                onNavigateDocs={() => {
+                  setActiveTab('docs');
+                  setTimeout(() => scrollToDocSection('doc-salary-sacrifice'), 80);
+                }}
+              />
+
+              {/* Interactive Wrapper Control Grid */}
               <div className="overflow-x-auto border border-slate-200 rounded-xl">
                 <table className="w-full text-left text-xs border-collapse">
                   <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans">
@@ -2886,7 +3149,7 @@ export default function App() {
               </p>
             </div>
 
-            <div className="bg-white border border-slate-200/90 rounded-2xl p-5 shadow-xs space-y-4">
+            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                 <div>
                   <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Select Historical Scenario or Start Year</h3>
@@ -3120,7 +3383,7 @@ export default function App() {
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
               <div>
                 <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                  <Table className="w-4 h-4 text-blue-600" /> Year-by-Year Cash Flow & Wrapper Ledger
+                  <Table className="w-4 h-4 text-blue-600" /> Year-by-Year Cash Flow &amp; Wrapper Ledger
                 </h2>
                 <span className="text-xs text-slate-500">
                   Detailed inspection of annual contributions, guaranteed income, decumulation waterfalls, and wrapper balances.
@@ -3192,6 +3455,20 @@ export default function App() {
         {/* TAB 6: DOCUMENTATION */}
         {activeTab === 'docs' && (
           <div className="space-y-6">
+            <div id="doc-salary-sacrifice" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                <Zap className="w-4 h-4 text-indigo-600" /> Salary Sacrifice vs S&amp;S ISAs
+              </h2>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Salary sacrifice redirects gross employment earnings directly into your pension scheme before Income Tax and National Insurance Contributions (NIC) are deducted.
+              </p>
+              <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
+                <li><strong>Day-One Leverage:</strong> A £1,000 net sacrifice yields £1,724 inside a pension for a higher-rate taxpayer (42% combined saving), compared to £1,000 inside an ISA.</li>
+                <li><strong>The Taper Cliff:</strong> For earnings between £100,000 and £125,140, every £2 earned removes £1 of Personal Allowance (effective 60% income tax + 2% NIC). Salary sacrifice into pensions recovers the Personal Allowance entirely.</li>
+                <li><strong>Decumulation Arbitrage:</strong> Even though pensions are taxable upon drawdown, the 25% tax-free PCLS plus the personal allowance ensures the effective exit tax rate is typically ~15%, retaining an overwhelming compounding advantage over ISAs.</li>
+              </ul>
+            </div>
+
             <div id="doc-taper" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
                 <HelpCircle className="w-4 h-4 text-blue-600" /> Lifestyle Spending Tapers
@@ -3211,7 +3488,7 @@ export default function App() {
 
             <div id="doc-risk-profiles" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4 text-blue-600" /> Asset Allocations, Return Bounds & Volatility (σ)
+                <ShieldCheck className="w-4 h-4 text-blue-600" /> Asset Allocations, Return Bounds &amp; Volatility (σ)
               </h2>
               <p className="text-xs text-slate-600 leading-relaxed">
                 Each investment wrapper is assigned an asset allocation risk tier with specific real and nominal expectations:
@@ -3246,7 +3523,7 @@ export default function App() {
               <ol className="list-decimal pl-5 text-xs text-slate-600 space-y-1">
                 <li><strong>Cash Savings:</strong> Unencumbered cash reserves are drained first.</li>
                 <li><strong>Other Investments (GIA):</strong> Taxable accounts are liquidated next.</li>
-                <li><strong>Stocks & Shares ISAs:</strong> Tax-free liquid wrapper covers remaining cost balance.</li>
+                <li><strong>Stocks &amp; Shares ISAs:</strong> Tax-free liquid wrapper covers remaining cost balance.</li>
                 <li><strong>Pensions:</strong> Can only be accessed once reaching the private pension access age (NMPA, typically age 58). If a cost exceeds liquid pre-58 capital before age 58, a pre-58 insolvency warning is triggered.</li>
               </ol>
             </div>
