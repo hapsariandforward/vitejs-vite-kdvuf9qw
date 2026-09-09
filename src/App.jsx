@@ -118,7 +118,7 @@ const BLANK_PLAN = {
     taper2Age: '',
     taper2Rate: '',
     drawdownStrategy: 'Phased Drawdown',
-    decumulationPolicy: 'Bracket Fill Basic' // Default: Tax Smoothing
+    decumulationPolicy: 'Bracket Fill Basic' // Default: Tax Smoothing (20% Basic Rate Fill)
   },
   accounts: [
     { id: 'pen_self', owner: 'Myself', category: 'Pensions', balance: '', contrib: '', growth: '', risk: 'High Risk' },
@@ -382,7 +382,7 @@ function SalarySacrificeOptimizer({ plan, onApplyToSandbox, onApplyToPlan, onNav
             className="w-full p-2 bg-white border border-slate-300 rounded-xl font-mono text-slate-900 font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none"
           />
           <p className="text-[11px] text-slate-500 mt-1 leading-normal">
-            Add your salary to calculate tax and NIC relief. If left blank, savings assume higher rate tax relief (42%).
+            Add your salary to calculate marginal tax and NIC relief. If left blank, savings assume higher rate tax relief (42%).
           </p>
         </div>
 
@@ -523,8 +523,17 @@ function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSand
         (Number(accounts.find(a => a.id === 'other_self')?.balance) || 0) +
         (isCouple ? (Number(accounts.find(a => a.id === 'other_part')?.balance) || 0) : 0);
 
-      const conservativeLiquidAtRetire = Math.max(0, totalLiquidToday - emergencyFloor);
-      const bridgeCapitalNeeded = gapYears > 0 ? (gapYears * targetSpend * 1.30) : 0;
+      // Account for scheduled pre-58 capital costs
+      const currentYear = plan?.config?.valuationDate ? parseInt(plan.config.valuationDate.slice(0, 4)) : 2026;
+      const pre58CostSum = (plan?.oneOffCosts || []).filter(c => {
+        const itemYear = c.date ? parseInt(c.date.slice(0, 4)) : (Number(c.year) || currentYear);
+        const ageAtCost = curAge + (itemYear - currentYear);
+        return ageAtCost < privAge;
+      }).reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
+
+      // Conservative 1.5x buffer for bridge
+      const conservativeLiquidAtRetire = Math.max(0, totalLiquidToday - emergencyFloor - pre58CostSum);
+      const bridgeCapitalNeeded = gapYears > 0 ? (gapYears * targetSpend * 1.50) : 0;
       const bridgeShortfall = Math.max(0, bridgeCapitalNeeded - conservativeLiquidAtRetire);
       const annualIsaNeeded = gapYears > 0 ? Math.min(isaAnnualCap, bridgeShortfall / yearsToRetire) : 0;
 
@@ -561,6 +570,16 @@ function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSand
       };
 
       // 2. Survival Maximizer (Balanced Relief + Guaranteed Bridge)
+      let survTransferNet = 0;
+      let survTransferGross = 0;
+      if (scope === 'full') {
+        const safeSurplus = Math.max(0, totalLiquidToday - (bridgeCapitalNeeded * 1.25 + emergencyFloor));
+        if (safeSurplus >= 5000) {
+          survTransferNet = Math.min(isCouple ? 20000 : 10000, Math.floor(safeSurplus / 1000) * 1000);
+          survTransferGross = grossUpNet(survTransferNet, salaryInput);
+        }
+      }
+
       const maxSurvIsa = Math.min(isaAnnualCap, Math.round(Math.max(annualIsaNeeded, totalNetBudget * (gapYears > 0 ? 0.35 : 0.15)) / 250) * 250);
       const maxSurvPenNet = Math.max(0, totalNetBudget - maxSurvIsa);
       const maxSurvPenGross = Math.min(pensionAnnualCap, grossUpNet(maxSurvPenNet, salaryInput));
@@ -570,10 +589,10 @@ function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSand
         description: 'Locks in your early bridge first, then routes all excess budget into maximum tax relief.',
         isaContrib: maxSurvIsa,
         penContrib: Math.round(maxSurvPenGross),
-        taxReliefSaved: maxSurvPenGross - maxSurvPenNet,
-        transferNet: 0,
-        transferGross: 0,
-        planState: createStrategyPlan(maxSurvIsa, Math.round(maxSurvPenGross))
+        taxReliefSaved: (maxSurvPenGross - maxSurvPenNet) + (survTransferGross - survTransferNet),
+        transferNet: Math.round(survTransferNet),
+        transferGross: Math.round(survTransferGross),
+        planState: createStrategyPlan(maxSurvIsa, Math.round(maxSurvPenGross), Math.round(survTransferNet), Math.round(survTransferGross))
       };
 
       // 3. Bridge-First & Liquidity
@@ -592,21 +611,25 @@ function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSand
         planState: createStrategyPlan(bridgeFirstIsa, Math.round(bridgeFirstPenGross))
       };
 
-      // 4. Tax Arbitrage & Bed/SIPP
+      // 4. Tax Relief Maximizer (with Pre-58 Solvency Floor)
       let bedSippNet = 0;
       let bedSippGross = 0;
-      if (scope === 'full' && gapYears === 0 && totalLiquidToday > emergencyFloor + 15000) {
-        bedSippNet = Math.min(20000, totalLiquidToday - emergencyFloor);
-        bedSippGross = grossUpNet(bedSippNet, salaryInput);
+      if (scope === 'full') {
+        const availableSurplus = Math.max(0, totalLiquidToday - (bridgeCapitalNeeded + emergencyFloor));
+        if (availableSurplus >= 3000) {
+          bedSippNet = Math.min(isCouple ? 40000 : 20000, Math.floor(availableSurplus / 1000) * 1000);
+          bedSippGross = grossUpNet(bedSippNet, salaryInput);
+        }
       }
 
-      const taxMaxIsa = Math.min(isaAnnualCap, Math.round(annualIsaNeeded / 250) * 250);
+      const minTaxMaxIsaFloor = gapYears > 0 ? totalNetBudget * 0.20 : 0;
+      const taxMaxIsa = Math.min(isaAnnualCap, Math.round(Math.max(annualIsaNeeded, minTaxMaxIsaFloor) / 250) * 250);
       const taxMaxPenNet = Math.max(0, totalNetBudget - taxMaxIsa);
       const taxMaxPenGross = Math.min(pensionAnnualCap, grossUpNet(taxMaxPenNet, salaryInput));
 
       const stratTaxMax = {
         name: 'Tax Relief Maximizer',
-        description: 'Pushes pension contributions to the legal limit. Reallocates surplus non-bridge ISA capital.',
+        description: 'Maximizes pension tax relief up to statutory limits, preserving a solvent early bridge.',
         isaContrib: taxMaxIsa,
         penContrib: Math.round(taxMaxPenGross),
         taxReliefSaved: (taxMaxPenGross - taxMaxPenNet) + (bedSippGross - bedSippNet),
@@ -743,7 +766,7 @@ function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSand
                 </div>
                 <p className="text-[11px] text-slate-500 leading-normal">{res.description}</p>
 
-                <div className="pt-2 border-t border-slate-100 space-y-1 text-[11px] font-mono">
+                <div className="pt-2 border-t border-slate-100 space-y-1.5 text-[11px] font-mono">
                   <div className="flex justify-between">
                     <span className="text-slate-500">S&amp;S ISA:</span>
                     <strong className="text-teal-700">£{Number(res.isaContrib || 0).toLocaleString()}/yr</strong>
@@ -758,12 +781,32 @@ function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSand
                       <span>+£{Math.round(Number(res.taxReliefSaved) || 0).toLocaleString()}/yr</span>
                     </div>
                   )}
-                  {res.transferNet > 0 && (
-                    <div className="flex justify-between text-indigo-700 font-bold">
-                      <span>Bed &amp; SIPP:</span>
-                      <span>£{Number(res.transferNet || 0).toLocaleString()} &rarr; £{Number(res.transferGross || 0).toLocaleString()}</span>
+
+                  {/* VISIBLE RE-ALLOCATION BLOCK (Active under Full Reallocation) */}
+                  {scope === 'full' && (
+                    <div className={`p-2 rounded-xl border text-[10px] font-mono mt-1 ${
+                      res.transferNet > 0
+                        ? 'bg-indigo-50/90 border-indigo-200 text-indigo-900'
+                        : 'bg-slate-100/70 border-slate-200 text-slate-600'
+                    }`}>
+                      <span className="font-sans font-bold block uppercase tracking-wider text-[9px] text-slate-500 mb-0.5">
+                        One-Off Reallocation (Bed &amp; SIPP):
+                      </span>
+                      {res.transferNet > 0 ? (
+                        <div>
+                          <strong className="text-indigo-700 block font-bold">
+                            Transfer £{res.transferNet.toLocaleString()} ISA &rarr; £{res.transferGross.toLocaleString()} Pension
+                          </strong>
+                          <span className="text-[9px] text-emerald-600 block">
+                            +£{(res.transferGross - res.transferNet).toLocaleString()} gross-up relief
+                          </span>
+                        </div>
+                      ) : (
+                        <span>£0 Transferred (Liquid reserves protected)</span>
+                      )}
                     </div>
                   )}
+
                   <div className="flex justify-between pt-1 border-t border-slate-100">
                     <span className="text-slate-500 font-sans">Median Pot @ 100:</span>
                     <span className="font-bold text-slate-800">£{Math.round(Number(res.medianPot || 0) / 1000).toLocaleString()}k</span>
@@ -1853,359 +1896,6 @@ export default function App() {
     return lineGen(historicalTimeline);
   }, [historicalTimeline, xScale, histYScale]);
 
-  const formatGBP = (v) => new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', maximumFractionDigits: 0 }).format(v || 0);
-
-  const updateAccountField = (id, field, value) => {
-    setPlan(prev => ({
-      ...prev,
-      accounts: (prev.accounts || []).map(a => a.id === id ? { ...a, [field]: field === 'risk' ? value : parseInputNumber(value) } : a)
-    }));
-  };
-
-  const updateRiskField = (riskKey, field, value) => {
-    setPlan(prev => ({
-      ...prev,
-      riskProfiles: {
-        ...(prev.riskProfiles || DEFAULT_RISK_PROFILES),
-        [riskKey]: {
-          ...(prev.riskProfiles || DEFAULT_RISK_PROFILES)[riskKey],
-          [field]: parseInputNumber(value)
-        }
-      }
-    }));
-  };
-
-  const updateDemographics = (field, value) => {
-    setPlan(prev => ({ ...prev, demographics: { ...(prev.demographics || {}), [field]: field === 'planningMode' ? value : parseInputNumber(value) } }));
-  };
-
-  const updateSpending = (field, value) => {
-    setPlan(prev => ({ ...prev, spending: { ...(prev.spending || {}), [field]: (field === 'drawdownStrategy' || field === 'decumulationPolicy') ? value : parseInputNumber(value) } }));
-  };
-
-  const updateConfig = (field, value) => {
-    setPlan(prev => ({ ...prev, config: { ...(prev.config || {}), [field]: field === 'valuationDate' ? value : parseInputNumber(value) } }));
-  };
-
-  const addOtherIncome = () => {
-    const newInc = {
-      id: 'inc_' + Date.now(),
-      name: '',
-      owner: 'Myself',
-      startAge: '',
-      endAge: '',
-      amount: '',
-      taxTreatment: 'Taxable',
-      notes: ''
-    };
-    setPlan(prev => ({ ...prev, otherIncomes: [...(prev.otherIncomes || []), newInc] }));
-  };
-
-  const deleteOtherIncome = (id) => {
-    setPlan(prev => ({ ...prev, otherIncomes: (prev.otherIncomes || []).filter(i => i.id !== id) }));
-  };
-
-  const addOneOffContrib = () => {
-    const newC = {
-      id: 'c_' + Date.now(),
-      date: `${new Date().getFullYear() + 1}-01-01`,
-      year: new Date().getFullYear() + 1,
-      owner: 'Myself',
-      category: 'Pensions',
-      amount: '',
-      desc: ''
-    };
-    setPlan(prev => ({ ...prev, oneOffContributions: [...(prev.oneOffContributions || []), newC] }));
-  };
-
-  const deleteOneOffContrib = (id) => {
-    setPlan(prev => ({ ...prev, oneOffContributions: (prev.oneOffContributions || []).filter(c => c.id !== id) }));
-  };
-
-  const addOneOffCost = () => {
-    const newCost = {
-      id: 'cost_' + Date.now(),
-      date: `${new Date().getFullYear() + 1}-06-01`,
-      year: new Date().getFullYear() + 1,
-      owner: 'Myself',
-      amount: '',
-      desc: ''
-    };
-    setPlan(prev => ({ ...prev, oneOffCosts: [...(prev.oneOffCosts || []), newCost] }));
-  };
-
-  const deleteOneOffCost = (id) => {
-    setPlan(prev => ({ ...prev, oneOffCosts: (prev.oneOffCosts || []).filter(c => c.id !== id) }));
-  };
-
-  const handleExportJSON = () => {
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(plan, null, 2));
-    const downloadAnchor = document.createElement('a');
-    downloadAnchor.setAttribute("href", dataStr);
-    downloadAnchor.setAttribute("download", `retirement_plan_${new Date().toISOString().slice(0, 10)}.json`);
-    document.body.appendChild(downloadAnchor);
-    downloadAnchor.click();
-    downloadAnchor.remove();
-  };
-
-  const handleImportJSON = (e) => {
-    const fileReader = new FileReader();
-    if (e.target.files && e.target.files[0]) {
-      fileReader.readAsText(e.target.files[0], "UTF-8");
-      fileReader.onload = (event) => {
-        try {
-          const parsed = JSON.parse(event.target.result);
-          if (!parsed.riskProfiles) parsed.riskProfiles = DEFAULT_RISK_PROFILES;
-          if (!parsed.demographics) parsed.demographics = BLANK_PLAN.demographics;
-          if (!parsed.demographics.planningMode) parsed.demographics.planningMode = 'couple';
-          if (!parsed.spending) parsed.spending = BLANK_PLAN.spending;
-          if (!parsed.spending.decumulationPolicy) parsed.spending.decumulationPolicy = 'Bracket Fill Basic';
-          if (!parsed.accounts || !Array.isArray(parsed.accounts)) parsed.accounts = BLANK_PLAN.accounts;
-          if (!parsed.config) parsed.config = BLANK_PLAN.config;
-          setSandboxCustomized(false);
-          setPlan(parsed);
-        } catch (err) {
-          alert("Invalid JSON configuration file.");
-        }
-      };
-    }
-  };
-
-  const handleResetDefaults = () => {
-    if (confirm("Reset all inputs back to blank?")) {
-      setSandboxCustomized(false);
-      setPlan(BLANK_PLAN);
-      localStorage.removeItem(STORAGE_KEY);
-      setSimResult(null);
-    }
-  };
-
-  const handleExportCSV = () => {
-    if (!timelineData.length) return;
-    const headers = [
-      'Year',
-      'Age (Myself)',
-      'Age (Partner)',
-      'Working (Myself)',
-      'Working (Partner)',
-      'Target Spend (£)',
-      'State Pension (Myself £)',
-      'State Pension (Partner £)',
-      'Net Drawdown Demand (£)',
-      'Pensions (£)',
-      'ISAs (£)',
-      'Other Investments (£)',
-      'Cash Savings (£)',
-      'Total Combined Pot (£)',
-      'Pre-58 Liquid (£)',
-      'Pension Drawdown (£)'
-    ];
-
-    const rows = timelineData.map(r => [
-      r.year,
-      r.ageSelf,
-      isCouple ? r.agePart : 'N/A',
-      r.workingSelf ? 'Yes' : 'No',
-      isCouple ? (r.workingPart ? 'Yes' : 'No') : 'N/A',
-      r.targetSpend.toFixed(0),
-      r.spSelf.toFixed(0),
-      isCouple ? r.spPart.toFixed(0) : '0',
-      r.netDrawdown.toFixed(0),
-      r.pensions.toFixed(0),
-      r.isas.toFixed(0),
-      r.other.toFixed(0),
-      r.cash.toFixed(0),
-      r.totalCombined.toFixed(0),
-      r.pre58LiquidEquity.toFixed(0),
-      r.drawdownPensions.toFixed(0)
-    ]);
-
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `retirement_audit_${new Date().toISOString().slice(0, 10)}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-  };
-
-  const runSingleTrial = (planState, spendOverride = null) => {
-    const testPlan = spendOverride !== null
-      ? { ...planState, spending: { ...planState.spending, targetSpend: spendOverride } }
-      : planState;
-
-    const ageSelfStart = Number(testPlan?.demographics?.currentAgeSelf) || 40;
-    const terminalAge = Number(testPlan?.demographics?.terminalAge) || 100;
-    const totalYears = Math.max(1, terminalAge - ageSelfStart);
-    const privatePenAge = Number(testPlan?.demographics?.privatePensionAge) || 58;
-
-    const pots = {};
-    (testPlan?.accounts || []).forEach(acc => {
-      pots[acc.id] = Number(acc.balance) || 0;
-    });
-
-    const tracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false };
-    let failed = false;
-    let failAge = null;
-    let pre58Failed = false;
-
-    for (let t = 0; t <= totalYears; t++) {
-      let u1 = 0, u2 = 0;
-      while (u1 === 0) u1 = Math.random();
-      while (u2 === 0) u2 = Math.random();
-      const z = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
-
-      const step = runEngineYear(t, pots, testPlan, { z }, tracking);
-
-      if (!failed && (step.totalCombined <= (Number(testPlan?.config?.solvencyFloor) || 0) || step.unmetDemand > 5 || step.pre58Insolvent)) {
-        failed = true;
-        failAge = step.ageSelf;
-        pre58Failed = step.pre58Insolvent || (step.ageSelf < privatePenAge);
-      }
-    }
-
-    const terminalPot = (pots.pen_self || 0) + (pots.isa_self || 0) + (pots.other_self || 0) + (pots.cash_self || 0) +
-      (testPlan?.demographics?.planningMode !== 'single'
-        ? ((pots.pen_part || 0) + (pots.isa_part || 0) + (pots.other_part || 0) + (pots.cash_part || 0))
-        : 0);
-
-    return {
-      survived: !failed,
-      failAge,
-      pre58Failed,
-      terminalPot: Math.max(0, terminalPot)
-    };
-  };
-
-  const handleRunMC = () => {
-    setIsSimulating(true);
-    setTimeout(() => {
-      const NUM_TRIALS = 5000;
-      const terminalPots = [];
-      const failAges = [];
-      let successCount = 0;
-      let pre58FailCount = 0;
-      const currentSpend = Number(plan?.spending?.targetSpend) || 0;
-
-      for (let i = 0; i < NUM_TRIALS; i++) {
-        const res = runSingleTrial(plan);
-        if (res.survived) {
-          successCount++;
-        } else {
-          if (res.failAge !== null) failAges.push(res.failAge);
-          if (res.pre58Failed) pre58FailCount++;
-        }
-        terminalPots.push(res.terminalPot);
-      }
-
-      terminalPots.sort((a, b) => a - b);
-      failAges.sort((a, b) => a - b);
-
-      const p10 = terminalPots[Math.floor(NUM_TRIALS * 0.10)] || 0;
-      const median = terminalPots[Math.floor(NUM_TRIALS * 0.50)] || 0;
-      const p90 = terminalPots[Math.floor(NUM_TRIALS * 0.90)] || 0;
-
-      const medianFailAge = failAges.length > 0 ? failAges[Math.floor(failAges.length * 0.50)] : null;
-      const earliestFailAge = failAges.length > 0 ? failAges[0] : null;
-
-      setSimResult({
-        type: 'test',
-        title: 'Monte Carlo Stress Test',
-        spend: currentSpend,
-        successRate: (successCount / NUM_TRIALS) * 100,
-        p10Terminal: p10,
-        medianTerminal: median,
-        p90Terminal: p90,
-        failAge: medianFailAge,
-        earliestFailAge,
-        pre58Failed: pre58FailCount > 0 && medianFailAge !== null && medianFailAge < (Number(plan?.demographics?.privatePensionAge) || 58)
-      });
-      setIsSimulating(false);
-    }, 30);
-  };
-
-  const handleOptimize = () => {
-    setIsOptimizing(true);
-    setTimeout(() => {
-      const targetRate = targetConfidence;
-      let low = 0;
-      let high = 150000;
-
-      for (let iter = 0; iter < 10; iter++) {
-        const mid = Math.round((low + high) / 2 / 250) * 250;
-        let succ = 0;
-        const testTrials = 500;
-        for (let i = 0; i < testTrials; i++) {
-          if (runSingleTrial(plan, mid).survived) succ++;
-        }
-        const rate = (succ / testTrials) * 100;
-        if (rate >= targetRate) {
-          low = mid;
-        } else {
-          high = mid;
-        }
-      }
-
-      const optimalSpend = Math.round(low / 250) * 250;
-
-      const NUM_TRIALS = 5000;
-      const terminalPots = [];
-      const failAges = [];
-      let finalSucc = 0;
-      let pre58FailCount = 0;
-
-      for (let i = 0; i < NUM_TRIALS; i++) {
-        const res = runSingleTrial(plan, optimalSpend);
-        if (res.survived) {
-          finalSucc++;
-        } else {
-          if (res.failAge !== null) failAges.push(res.failAge);
-          if (res.pre58Failed) pre58FailCount++;
-        }
-        terminalPots.push(res.terminalPot);
-      }
-
-      terminalPots.sort((a, b) => a - b);
-      failAges.sort((a, b) => a - b);
-
-      const p10 = terminalPots[Math.floor(NUM_TRIALS * 0.10)] || 0;
-      const median = terminalPots[Math.floor(NUM_TRIALS * 0.50)] || 0;
-      const p90 = terminalPots[Math.floor(NUM_TRIALS * 0.90)] || 0;
-
-      const medianFailAge = failAges.length > 0 ? failAges[Math.floor(failAges.length * 0.50)] : null;
-      const earliestFailAge = failAges.length > 0 ? failAges[0] : null;
-
-      setSimResult({
-        type: 'optimize',
-        title: `Safe Max Annual Spend (${targetConfidence}% Target)`,
-        spend: optimalSpend,
-        successRate: (finalSucc / NUM_TRIALS) * 100,
-        p10Terminal: p10,
-        medianTerminal: median,
-        p90Terminal: p90,
-        failAge: medianFailAge,
-        earliestFailAge,
-        pre58Failed: pre58FailCount > 0 && medianFailAge !== null && medianFailAge < (Number(plan?.demographics?.privatePensionAge) || 58)
-      });
-      setIsOptimizing(false);
-    }, 30);
-  };
-
-  const displayedAccounts = isCouple
-    ? (plan?.accounts || [])
-    : (plan?.accounts || []).filter(a => a.owner === 'Myself');
-
-  const HISTORICAL_PRESETS = [
-    { label: '1929 Crash (Great Depression)', year: 1929 },
-    { label: '1945 Post-War', year: 1945 },
-    { label: '1955 Mid-Century', year: 1955 },
-    { label: '1965 Stagflation', year: 1965 },
-    { label: '1973 Oil Shock', year: 1973 },
-    { label: '2000 Dot-Com Bust', year: 2000 },
-    { label: '2008 Global Financial Crisis', year: 2008 }
-  ];
-
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 p-4 sm:p-6 lg:p-8 font-sans">
       <div className="max-w-7xl mx-auto space-y-6">
@@ -2458,6 +2148,53 @@ export default function App() {
                   <span className="text-[10px] text-slate-400 mt-1 block">
                     Fill in if you want to leave a minimum amount of money in your will or inheritance.
                   </span>
+                </div>
+              </div>
+
+              {/* Spending Tapers */}
+              <div className="pt-3 border-t border-slate-100">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+                  <div>
+                    <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Lifestyle Spending Tapers (Optional)</h4>
+                    <span className="text-[11px] text-slate-500">Model gradual lifestyle reductions in later life (e.g. Go-Go to Slow-Go phases).</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTab('docs');
+                      setTimeout(() => scrollToDocSection('doc-taper'), 80);
+                    }}
+                    className="text-xs text-blue-600 hover:text-blue-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer self-start sm:self-auto"
+                  >
+                    <HelpCircle className="w-3.5 h-3.5" />
+                    How two-stage spending tapers work &rarr;
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
+                  <div>
+                    <label className="text-slate-600 font-semibold block mb-1">Taper 1 Age (Optional)</label>
+                    <input type="number" placeholder="e.g. 75" onFocus={handleFocus} value={plan?.spending?.taper1Age ?? ''} onChange={(e) => updateSpending('taper1Age', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-slate-600 font-semibold block mb-1">Taper 1 Reduction (%)</label>
+                    <div className="relative">
+                      <input type="number" step="1" placeholder="e.g. 10" onFocus={handleFocus} value={plan?.spending?.taper1Rate ?? ''} onChange={(e) => updateSpending('taper1Rate', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold pr-8 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                      <span className="absolute right-3 top-2 text-slate-400 font-bold">%</span>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-slate-600 font-semibold block mb-1">Taper 2 Age (Optional)</label>
+                    <input type="number" placeholder="e.g. 85" onFocus={handleFocus} value={plan?.spending?.taper2Age ?? ''} onChange={(e) => updateSpending('taper2Age', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-slate-600 font-semibold block mb-1">Taper 2 Reduction (%)</label>
+                    <div className="relative">
+                      <input type="number" step="1" placeholder="e.g. 15" onFocus={handleFocus} value={plan?.spending?.taper2Rate ?? ''} onChange={(e) => updateSpending('taper2Rate', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold pr-8 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                      <span className="absolute right-3 top-2 text-slate-400 font-bold">%</span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 mt-1 block">Taper 2 reduction is relative to income after Taper 1 reduction (e.g. 100% &rarr; 90% &rarr; 81%).</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -3935,19 +3672,19 @@ export default function App() {
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
                   <strong className="text-slate-800 block">2. Conservative Pre-58 Bridge Sizing</strong>
                   <p className="text-slate-500">
-                    If you retire before the private pension age (NMPA, typically 58), pensions are legally locked. The algorithm assumes 0% real growth on liquid assets to calculate the required bridge reserve. This prevents market crashes from wiping out your bridge before age 58.
+                    If you retire before the private pension age (NMPA, typically 58), pensions are legally locked. The algorithm requires a 1.5x buffer on your living expenses and includes pre-58 one-off costs to ensure market crashes cannot deplete your bridge before age 58.
                   </p>
                 </div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
                   <strong className="text-slate-800 block">3. Survival Maximizer vs Tax Maximizer</strong>
                   <p className="text-slate-500">
-                    <strong>Survival Maximizer</strong> locks in your pre-58 bridge first and then routes all remaining budget into pension tax relief. <strong>Tax Relief Maximizer</strong> prioritizes maximum salary sacrifice up to statutory allowances (£60k/yr pension cap, £20k/yr ISA cap) and optionally reallocates surplus liquid ISA reserves into a SIPP (Bed &amp; SIPP).
+                    <strong>Survival Maximizer</strong> guarantees that at least 35% of savings flow into ISAs to insulate the bridge, routing the rest into pensions. <strong>Tax Relief Maximizer</strong> prioritizes maximum salary sacrifice up to statutory allowances (£60k/yr pension cap, £20k/yr ISA cap) while enforcing a 20% ISA floor to avoid stochastic early depletion.
                   </p>
                 </div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
-                  <strong className="text-slate-800 block">4. Decumulation Bracket Smoother</strong>
+                  <strong className="text-slate-800 block">4. Full Reallocation (Bed &amp; SIPP)</strong>
                   <p className="text-slate-500">
-                    Works backwards from retirement. It sizes your pension to avoid retirement pension withdrawals crossing the £50,270 higher rate tax threshold alongside your State Pension, redirecting the surplus into ISAs to preserve tax-free flexibility in later life.
+                    When the scope is set to Full Reallocation, the cards show whether surplus liquid capital above your emergency buffer and bridge requirement should be moved into a SIPP to claim fresh government tax relief.
                   </p>
                 </div>
               </div>
@@ -3992,7 +3729,7 @@ export default function App() {
 
             <div id="doc-taper" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                <HelpCircle className="w-4 h-4 text-blue-600" /> Lifestyle Spending Tapers
+                <HelpCircle className="w-3.5 h-3.5" /> Lifestyle Spending Tapers
               </h2>
               <p className="text-xs text-slate-600 leading-relaxed">
                 Retirement spending rarely stays constant throughout life. Research into retirement spending curves indicates that spending typically follows three distinct phases:
