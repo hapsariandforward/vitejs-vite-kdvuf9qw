@@ -36,7 +36,6 @@ import {
 const STORAGE_KEY = 'rp_plan_full_v28';
 const SCENARIOS_STORAGE_KEY = 'rp_saved_scenarios_v3';
 
-// 98-Year Empirical Dataset (1928–2025): Real S&P 500 (s) and 50/50 Govt/Corp Real Bond (b) Returns
 export const HISTORICAL_DATA = [
   { y: 1928, s: 45.49, b: 3.22 }, { y: 1929, s: -8.83, b: 3.01 }, { y: 1930, s: -20.01, b: 9.55 }, { y: 1931, s: -38.07, b: 0.22 },
   { y: 1932, s: 1.82, b: 29.49 }, { y: 1933, s: 48.85, b: 6.6 }, { y: 1934, s: -2.66, b: 11.7 }, { y: 1935, s: 42.49, b: 5.73 },
@@ -296,7 +295,6 @@ function grossPensionNeededForNet(netTarget, otherTaxableIncome = 0, config, isF
   return low;
 }
 
-// Sub-Component: Salary Sacrifice vs ISA Ratio Optimizer
 function SalarySacrificeOptimizer({ plan, onApplyToSandbox, onApplyToPlan, onNavigateDocs }) {
   const [grossSalary, setGrossSalary] = useState('');
 
@@ -482,7 +480,6 @@ function SalarySacrificeOptimizer({ plan, onApplyToSandbox, onApplyToPlan, onNav
   );
 }
 
-// Sub-Component: Strategy Tournament & Optimizer
 function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSandbox }) {
   const [salaryInput, setSalaryInput] = useState('');
   const [scope, setScope] = useState('contributions');
@@ -505,10 +502,16 @@ function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSand
       const targetSpend = Number(plan?.spending?.targetSpend) || 0;
 
       const accounts = plan?.accounts || [];
-      const currentPenGross = (Number(accounts.find(a => a.id === 'pen_self')?.contrib) || 0) +
-        (isCouple ? (Number(accounts.find(a => a.id === 'pen_part')?.contrib) || 0) : 0);
-      const currentIsaNet = (Number(accounts.find(a => a.id === 'isa_self')?.contrib) || 0) +
-        (isCouple ? (Number(accounts.find(a => a.id === 'isa_part')?.contrib) || 0) : 0);
+      const penSelfContrib = Number(accounts.find(a => a.id === 'pen_self')?.contrib) || 0;
+      const penPartContrib = isCouple ? (Number(accounts.find(a => a.id === 'pen_part')?.contrib) || 0) : 0;
+      const currentPenGross = penSelfContrib + penPartContrib;
+
+      const isaSelfContrib = Number(accounts.find(a => a.id === 'isa_self')?.contrib) || 0;
+      const isaPartContrib = isCouple ? (Number(accounts.find(a => a.id === 'isa_part')?.contrib) || 0) : 0;
+      const currentIsaNet = isaSelfContrib + isaPartContrib;
+
+      const selfPenRatio = currentPenGross > 0 ? (penSelfContrib / currentPenGross) : 1.0;
+      const selfIsaRatio = currentIsaNet > 0 ? (isaSelfContrib / currentIsaNet) : 1.0;
 
       const currentPenNetCost = calculateMarginalRelief(salaryInput, currentPenGross).netCost;
       let totalNetBudget = currentIsaNet + currentPenNetCost;
@@ -516,39 +519,27 @@ function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSand
         totalNetBudget = Number(salaryInput) ? Number(salaryInput) * 0.15 : 12000;
       }
 
-      const currentIsaBal = (Number(accounts.find(a => a.id === 'isa_self')?.balance) || 0) +
-        (isCouple ? (Number(accounts.find(a => a.id === 'isa_part')?.balance) || 0) : 0);
-      const currentCashBal = (Number(accounts.find(a => a.id === 'cash_self')?.balance) || 0) +
-        (isCouple ? (Number(accounts.find(a => a.id === 'cash_part')?.balance) || 0) : 0);
-      const currentOtherBal = (Number(accounts.find(a => a.id === 'other_self')?.balance) || 0) +
+      const totalLiquidToday = (Number(accounts.find(a => a.id === 'isa_self')?.balance) || 0) +
+        (isCouple ? (Number(accounts.find(a => a.id === 'isa_part')?.balance) || 0) : 0) +
+        (Number(accounts.find(a => a.id === 'cash_self')?.balance) || 0) +
+        (isCouple ? (Number(accounts.find(a => a.id === 'cash_part')?.balance) || 0) : 0) +
+        (Number(accounts.find(a => a.id === 'other_self')?.balance) || 0) +
         (isCouple ? (Number(accounts.find(a => a.id === 'other_part')?.balance) || 0) : 0);
-      const totalLiquidToday = currentIsaBal + currentCashBal + currentOtherBal;
 
-      const projectedLiquidAtRetire = totalLiquidToday * Math.pow(1.04, yearsToRetire);
-      const bridgeCapitalNeeded = gapYears > 0 ? (gapYears * targetSpend * 1.25) : 0;
-      const bridgeShortfall = Math.max(0, bridgeCapitalNeeded - projectedLiquidAtRetire);
-
-      const annuityFactor = Math.pow(1.04, yearsToRetire) - 1;
-      const annualIsaNeededForBridge = annuityFactor > 0 ? (bridgeShortfall * 0.04) / annuityFactor : (bridgeShortfall / yearsToRetire);
+      const conservativeLiquidAtRetire = Math.max(0, totalLiquidToday - emergencyFloor);
+      const bridgeCapitalNeeded = gapYears > 0 ? (gapYears * targetSpend * 1.30) : 0;
+      const bridgeShortfall = Math.max(0, bridgeCapitalNeeded - conservativeLiquidAtRetire);
+      const annualIsaNeeded = gapYears > 0 ? Math.min(isaAnnualCap, bridgeShortfall / yearsToRetire) : 0;
 
       const createStrategyPlan = (isaAnnualNet, penAnnualGross, transferNet = 0, transferGross = 0) => {
         const cloned = JSON.parse(JSON.stringify(plan || BLANK_PLAN));
         if (!cloned.accounts) cloned.accounts = BLANK_PLAN.accounts;
-        if (!cloned.demographics) cloned.demographics = BLANK_PLAN.demographics;
-        if (!cloned.spending) cloned.spending = BLANK_PLAN.spending;
-        if (!cloned.config) cloned.config = BLANK_PLAN.config;
-        if (!cloned.oneOffContributions) cloned.oneOffContributions = [];
-        if (!cloned.oneOffCosts) cloned.oneOffCosts = [];
-        if (!cloned.otherIncomes) cloned.otherIncomes = [];
 
         cloned.accounts.forEach(a => {
-          if (isCouple) {
-            if (a.id === 'pen_self' || a.id === 'pen_part') a.contrib = Math.round(penAnnualGross / 2);
-            if (a.id === 'isa_self' || a.id === 'isa_part') a.contrib = Math.round(isaAnnualNet / 2);
-          } else {
-            if (a.id === 'pen_self') a.contrib = penAnnualGross;
-            if (a.id === 'isa_self') a.contrib = isaAnnualNet;
-          }
+          if (a.id === 'pen_self') a.contrib = Math.round(penAnnualGross * selfPenRatio);
+          if (a.id === 'pen_part') a.contrib = Math.round(penAnnualGross * (1 - selfPenRatio));
+          if (a.id === 'isa_self') a.contrib = Math.round(isaAnnualNet * selfIsaRatio);
+          if (a.id === 'isa_part') a.contrib = Math.round(isaAnnualNet * (1 - selfIsaRatio));
         });
 
         if (transferNet > 0 && transferGross > 0) {
@@ -572,80 +563,62 @@ function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSand
         planState: JSON.parse(JSON.stringify(plan || BLANK_PLAN))
       };
 
-      // 2. Tax Arbitrage Maximizer
-      const taxMaxIsaNet = Math.min(isaAnnualCap, Math.min(totalNetBudget, Math.round(annualIsaNeededForBridge / 250) * 250));
-      const taxMaxPenNet = Math.max(0, totalNetBudget - taxMaxIsaNet);
-      const taxMaxPenGross = Math.min(pensionAnnualCap, grossUpNet(taxMaxPenNet, salaryInput));
+      // 2. Survival Maximizer (Balanced Relief + Guaranteed Bridge)
+      const maxSurvIsa = Math.min(isaAnnualCap, Math.round(Math.max(annualIsaNeeded, totalNetBudget * (gapYears > 0 ? 0.35 : 0.15)) / 250) * 250);
+      const maxSurvPenNet = Math.max(0, totalNetBudget - maxSurvIsa);
+      const maxSurvPenGross = Math.min(pensionAnnualCap, grossUpNet(maxSurvPenNet, salaryInput));
 
-      let bedSippNet = 0;
-      let bedSippGross = 0;
-      if (scope === 'full' && totalLiquidToday > (bridgeCapitalNeeded + emergencyFloor)) {
-        const surplusLiquid = totalLiquidToday - (bridgeCapitalNeeded + emergencyFloor);
-        bedSippNet = Math.min(surplusLiquid, isCouple ? 40000 : 20000);
-        bedSippGross = grossUpNet(bedSippNet, salaryInput);
-      }
-
-      const stratTaxMax = {
-        name: 'Tax Arbitrage Maximizer',
-        description: 'Prioritizes maximum salary sacrifice relief; funds only the bare mathematical bridge.',
-        isaContrib: taxMaxIsaNet,
-        penContrib: Math.round(taxMaxPenGross),
-        taxReliefSaved: (taxMaxPenGross - taxMaxPenNet) + (bedSippGross - bedSippNet),
-        transferNet: Math.round(bedSippNet),
-        transferGross: Math.round(bedSippGross),
-        planState: createStrategyPlan(taxMaxIsaNet, Math.round(taxMaxPenGross), Math.round(bedSippNet), Math.round(bedSippGross))
+      const stratSurvivalMax = {
+        name: 'Survival Maximizer',
+        description: 'Locks in your early bridge first, then routes all excess budget into maximum tax relief.',
+        isaContrib: maxSurvIsa,
+        penContrib: Math.round(maxSurvPenGross),
+        taxReliefSaved: maxSurvPenGross - maxSurvPenNet,
+        transferNet: 0,
+        transferGross: 0,
+        planState: createStrategyPlan(maxSurvIsa, Math.round(maxSurvPenGross))
       };
 
       // 3. Bridge-First & Liquidity
-      const robustBridgeNeeded = gapYears > 0 ? (gapYears * targetSpend * 1.50) : 0;
-      const robustShortfall = Math.max(0, robustBridgeNeeded - projectedLiquidAtRetire);
-      const robustAnnualIsa = annuityFactor > 0 ? (robustShortfall * 0.04) / annuityFactor : (robustShortfall / yearsToRetire);
-
-      const bridgeFirstIsaNet = Math.min(isaAnnualCap, Math.max(totalNetBudget * 0.5, Math.min(totalNetBudget, Math.round(robustAnnualIsa / 250) * 250)));
-      const bridgeFirstPenNet = Math.max(0, totalNetBudget - bridgeFirstIsaNet);
+      const bridgeFirstIsa = Math.min(isaAnnualCap, Math.round(Math.max(annualIsaNeeded * 1.3, totalNetBudget * 0.55) / 250) * 250);
+      const bridgeFirstPenNet = Math.max(0, totalNetBudget - bridgeFirstIsa);
       const bridgeFirstPenGross = Math.min(pensionAnnualCap, grossUpNet(bridgeFirstPenNet, salaryInput));
 
       const stratBridgeFirst = {
         name: 'Bridge-First & Liquidity',
-        description: 'Generously funds your pre-58 ISA bridge to insulate against early retirement shocks.',
-        isaContrib: bridgeFirstIsaNet,
+        description: 'Prioritizes maximum penalty-free liquid ISA reserves ahead of retirement.',
+        isaContrib: bridgeFirstIsa,
         penContrib: Math.round(bridgeFirstPenGross),
         taxReliefSaved: bridgeFirstPenGross - bridgeFirstPenNet,
         transferNet: 0,
         transferGross: 0,
-        planState: createStrategyPlan(bridgeFirstIsaNet, Math.round(bridgeFirstPenGross))
+        planState: createStrategyPlan(bridgeFirstIsa, Math.round(bridgeFirstPenGross))
       };
 
-      // 4. Decumulation Tax Bracket Smoother
-      const statePen = Number(plan?.demographics?.statePensionSelf) || 11500;
-      const maxSmoothDraw = Math.max(0, 50270 - statePen);
-      const maxSmoothPot = maxSmoothDraw / 0.04;
-      const existingPenBal = (Number(accounts.find(a => a.id === 'pen_self')?.balance) || 0) +
-        (isCouple ? (Number(accounts.find(a => a.id === 'pen_part')?.balance) || 0) : 0);
-      const projectedPenAtRetire = existingPenBal * Math.pow(1.044, yearsToRetire);
-
-      let smoothIsaNet, smoothPenNet;
-      if (projectedPenAtRetire > maxSmoothPot) {
-        smoothIsaNet = Math.min(isaAnnualCap, totalNetBudget);
-        smoothPenNet = Math.max(0, totalNetBudget - smoothIsaNet);
-      } else {
-        smoothPenNet = totalNetBudget * 0.65;
-        smoothIsaNet = Math.min(isaAnnualCap, Math.max(0, totalNetBudget - smoothPenNet));
+      // 4. Tax Arbitrage & Bed/SIPP
+      let bedSippNet = 0;
+      let bedSippGross = 0;
+      if (scope === 'full' && gapYears === 0 && totalLiquidToday > emergencyFloor + 15000) {
+        bedSippNet = Math.min(20000, totalLiquidToday - emergencyFloor);
+        bedSippGross = grossUpNet(bedSippNet, salaryInput);
       }
-      const smoothPenGross = Math.min(pensionAnnualCap, grossUpNet(smoothPenNet, salaryInput));
 
-      const stratSmooth = {
-        name: 'Tax Bracket Smoother',
-        description: 'Limits pension pot size to prevent retirement withdrawals hitting the 40% higher rate band.',
-        isaContrib: Math.round(smoothIsaNet),
-        penContrib: Math.round(smoothPenGross),
-        taxReliefSaved: smoothPenGross - smoothPenNet,
-        transferNet: 0,
-        transferGross: 0,
-        planState: createStrategyPlan(Math.round(smoothIsaNet), Math.round(smoothPenGross))
+      const taxMaxIsa = Math.min(isaAnnualCap, Math.round(annualIsaNeeded / 250) * 250);
+      const taxMaxPenNet = Math.max(0, totalNetBudget - taxMaxIsa);
+      const taxMaxPenGross = Math.min(pensionAnnualCap, grossUpNet(taxMaxPenNet, salaryInput));
+
+      const stratTaxMax = {
+        name: 'Tax Relief Maximizer',
+        description: 'Pushes pension contributions to the legal limit. Reallocates surplus non-bridge ISA capital.',
+        isaContrib: taxMaxIsa,
+        penContrib: Math.round(taxMaxPenGross),
+        taxReliefSaved: (taxMaxPenGross - taxMaxPenNet) + (bedSippGross - bedSippNet),
+        transferNet: Math.round(bedSippNet),
+        transferGross: Math.round(bedSippGross),
+        planState: createStrategyPlan(taxMaxIsa, Math.round(taxMaxPenGross), Math.round(bedSippNet), Math.round(bedSippGross))
       };
 
-      const strats = [stratBaseline, stratTaxMax, stratBridgeFirst, stratSmooth];
+      const strats = [stratBaseline, stratSurvivalMax, stratBridgeFirst, stratTaxMax];
       const TRIALS = 1500;
 
       const results = strats.map(st => {
@@ -668,17 +641,12 @@ function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSand
         terminalPots.sort((a, b) => a - b);
         failAges.sort((a, b) => a - b);
 
-        const successRate = (succ / TRIALS) * 100;
-        const medianPot = terminalPots[Math.floor(TRIALS * 0.5)] || 0;
-        const medianFailAge = failAges.length > 0 ? failAges[Math.floor(failAges.length * 0.5)] : null;
-        const pre58Risk = (pre58Fails / TRIALS) * 100;
-
         return {
           ...st,
-          successRate,
-          medianPot,
-          medianFailAge,
-          pre58Risk
+          successRate: (succ / TRIALS) * 100,
+          medianPot: terminalPots[Math.floor(TRIALS * 0.5)] || 0,
+          medianFailAge: failAges.length > 0 ? failAges[Math.floor(failAges.length * 0.5)] : null,
+          pre58Risk: (pre58Fails / TRIALS) * 100
         };
       });
 
@@ -695,7 +663,7 @@ function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSand
             <Zap className="w-4 h-4 text-indigo-600 fill-indigo-600" /> Automated Strategy Tournament &amp; Optimizer
           </h3>
           <p className="text-xs text-slate-500 mt-0.5">
-            Test 4 distinct UK wrapper philosophies head-to-head under 1,500 stochastic trials each to find your optimal balance between tax relief and liquidity.
+            Tests 4 distinct UK wrapper philosophies head-to-head under 1,500 stochastic trials each using equal net take-home budgets.
           </p>
         </div>
       </div>
@@ -834,7 +802,7 @@ export default function App() {
         if (!parsed.demographics.planningMode) parsed.demographics.planningMode = 'couple';
         if (!parsed.spending) parsed.spending = BLANK_PLAN.spending;
         if (!parsed.spending.decumulationPolicy) parsed.spending.decumulationPolicy = 'Bracket Fill';
-        if (!parsed.accounts || !Array.isArray(parsed.accounts) || parsed.accounts.length === 0) parsed.accounts = BLANK_PLAN.accounts;
+        if (!parsed.accounts || !Array.isArray(parsed.accounts)) parsed.accounts = BLANK_PLAN.accounts;
         if (!parsed.config) parsed.config = BLANK_PLAN.config;
         if (!parsed.oneOffContributions) parsed.oneOffContributions = [];
         if (!parsed.oneOffCosts) parsed.oneOffCosts = [];
@@ -891,7 +859,7 @@ export default function App() {
       });
       setSandboxAccounts(fresh);
     }
-  }, [plan.accounts, sandboxCustomized]);
+  }, [plan?.accounts, sandboxCustomized]);
 
   useEffect(() => {
     try {
@@ -1675,13 +1643,24 @@ export default function App() {
   const handleApplyStrategyToSandbox = (isaAmt, penAmt, transferNet = 0, transferGross = 0) => {
     setSandboxCustomized(true);
     const isPlanCouple = plan?.demographics?.planningMode !== 'single';
+    const accounts = plan?.accounts || [];
+    const penSelfContrib = Number(accounts.find(a => a.id === 'pen_self')?.contrib) || 0;
+    const penPartContrib = isPlanCouple ? (Number(accounts.find(a => a.id === 'pen_part')?.contrib) || 0) : 0;
+    const curPenGross = penSelfContrib + penPartContrib;
+    const isaSelfContrib = Number(accounts.find(a => a.id === 'isa_self')?.contrib) || 0;
+    const isaPartContrib = isPlanCouple ? (Number(accounts.find(a => a.id === 'isa_part')?.contrib) || 0) : 0;
+    const curIsaNet = isaSelfContrib + isaPartContrib;
+
+    const selfPenRatio = curPenGross > 0 ? (penSelfContrib / curPenGross) : 1.0;
+    const selfIsaRatio = curIsaNet > 0 ? (isaSelfContrib / curIsaNet) : 1.0;
+
     setSandboxAccounts(prev => {
       const updated = { ...prev };
       if (isPlanCouple) {
-        updated.pen_self = { ...(prev.pen_self || {}), contrib: Math.round(penAmt / 2) };
-        updated.pen_part = { ...(prev.pen_part || {}), contrib: Math.round(penAmt / 2) };
-        updated.isa_self = { ...(prev.isa_self || {}), contrib: Math.round(isaAmt / 2) };
-        updated.isa_part = { ...(prev.isa_part || {}), contrib: Math.round(isaAmt / 2) };
+        updated.pen_self = { ...(prev.pen_self || {}), contrib: Math.round(penAmt * selfPenRatio) };
+        updated.pen_part = { ...(prev.pen_part || {}), contrib: Math.round(penAmt * (1 - selfPenRatio)) };
+        updated.isa_self = { ...(prev.isa_self || {}), contrib: Math.round(isaAmt * selfIsaRatio) };
+        updated.isa_part = { ...(prev.isa_part || {}), contrib: Math.round(isaAmt * (1 - selfIsaRatio)) };
       } else {
         updated.pen_self = { ...(prev.pen_self || {}), contrib: penAmt };
         updated.isa_self = { ...(prev.isa_self || {}), contrib: isaAmt };
@@ -2386,7 +2365,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Demographics & Targets */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
                 <div>
@@ -3288,7 +3266,6 @@ export default function App() {
                 </p>
               </div>
 
-              {/* SALARY SACRIFICE TOGGLE & WRAPPER OPTIMIZER */}
               <SalarySacrificeOptimizer
                 plan={plan}
                 onApplyToSandbox={handleApplyOptimizerToSandbox}
@@ -3299,7 +3276,6 @@ export default function App() {
                 }}
               />
 
-              {/* ACTION BAR: RESET SANDBOX & APPLY BUTTONS */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 pb-3 border-y border-slate-100">
                 <div>
                   <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
@@ -3337,7 +3313,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Sandbox Live Impact KPIs */}
               {sandboxMetrics && (
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                   <div className={`p-4 rounded-2xl border shadow-2xs ${
@@ -3404,7 +3379,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* Interactive Wrapper Control Grid */}
               <div className="overflow-x-auto border border-slate-200 rounded-xl">
                 <table className="w-full text-left text-xs border-collapse">
                   <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans">
@@ -3519,7 +3493,6 @@ export default function App() {
               </p>
             </div>
 
-            {/* Simulation Action Bar */}
             <div className="bg-white border border-slate-200/90 rounded-2xl p-5 shadow-xs flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Run Multi-Path Simulation</h3>
@@ -3560,7 +3533,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Results Banner */}
             {simResult && (
               <div className={`p-5 rounded-2xl shadow-xs border transition-all ${
                 simResult.successRate >= 90
@@ -3651,7 +3623,6 @@ export default function App() {
               </div>
             )}
 
-            {/* AUTOMATED STRATEGY TOURNAMENT & OPTIMIZER */}
             <WrapperStrategyTournament
               plan={plan}
               runSingleTrial={runSingleTrial}
@@ -3862,7 +3833,7 @@ export default function App() {
                       onMouseMove={(e) => {
                         const rect = e.currentTarget.getBoundingClientRect();
                         const age = Math.round(xScale.invert(e.clientX - rect.left));
-                        const point = historicalTimeline.find(d => d.ageSelf === age);
+                        const point = visibleData.find(d => d.ageSelf === age);
                         if (point) setHoveredHistPoint(point);
                         else setHoveredHistPoint(null);
                       }}
