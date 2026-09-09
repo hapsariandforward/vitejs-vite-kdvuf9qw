@@ -1463,7 +1463,7 @@ export default function App() {
   const handleRunMC = () => {
     setIsSimulating(true);
     setTimeout(() => {
-      const NUM_TRIALS = 1000;
+      const NUM_TRIALS = 5000;
       const terminalPots = [];
       const failAges = [];
       let successCount = 0;
@@ -1514,10 +1514,11 @@ export default function App() {
       let low = 0;
       let high = 150000;
 
+      // 500 trials during binary search iterations for speed
       for (let iter = 0; iter < 10; iter++) {
         const mid = Math.round((low + high) / 2 / 250) * 250;
         let succ = 0;
-        const testTrials = 250;
+        const testTrials = 500;
         for (let i = 0; i < testTrials; i++) {
           if (runSingleTrial(plan, mid).survived) succ++;
         }
@@ -1530,7 +1531,9 @@ export default function App() {
       }
 
       const optimalSpend = Math.round(low / 250) * 250;
-      const NUM_TRIALS = 1000;
+
+      // Rigorous 5,000 trial verification pass
+      const NUM_TRIALS = 5000;
       const terminalPots = [];
       const failAges = [];
       let finalSucc = 0;
@@ -2685,7 +2688,7 @@ export default function App() {
               <div>
                 <strong className="text-blue-900 block font-semibold mb-0.5">Simulation Modes:</strong>
                 <span>
-                  <strong>Test Current Spend</strong> evaluates your target annual spend against 1,000 market paths using asset-specific volatilities. <strong>Safe Max Annual Spend</strong> determines the highest annual budget that survives to age 100 at your chosen confidence level.
+                  <strong>Test Current Spend</strong> evaluates your target annual spend against 5,000 market paths using asset-specific volatilities. <strong>Safe Max Annual Spend</strong> determines the highest annual budget that survives to age 100 at your chosen confidence level.
                 </span>
               </div>
             </div>
@@ -2726,7 +2729,7 @@ export default function App() {
                   className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs active:scale-95"
                 >
                   <Dices className="w-3.5 h-3.5 text-blue-200" />
-                  {isSimulating ? 'Testing 1,000 Paths...' : 'Test Current Spend'}
+                  {isSimulating ? 'Testing 5,000 Paths...' : 'Test Current Spend'}
                 </button>
 
                 <button
@@ -2766,7 +2769,7 @@ export default function App() {
                         }`}>
                           {simResult.title}
                         </span>
-                        <span className="text-xs text-slate-500 font-medium">1,000 trials</span>
+                        <span className="text-xs text-slate-500 font-medium">5,000 trials</span>
                       </div>
                       <div className="text-2xl font-black font-mono text-slate-900 mt-1">
                         {formatGBP(simResult.spend)} <span className="text-sm font-normal text-slate-600">/ year net spend</span>
