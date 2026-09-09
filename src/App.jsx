@@ -486,8 +486,322 @@ function SalarySacrificeOptimizer({ plan, onApplyToSandbox, onApplyToPlan, onNav
   );
 }
 
+// Sub-Component: Strategy Tournament & Optimizer
+function WrapperStrategyTournament({ plan, runSingleTrial, onApplyStrategyToSandbox }) {
+  const [salaryInput, setSalaryInput] = useState('');
+  const [scope, setScope] = useState('contributions'); // 'contributions' or 'full'
+  const [emergencyFloor, setEmergencyFloor] = useState(25000);
+  const [tournamentResults, setTournamentResults] = useState(null);
+  const [isEvaluating, setIsEvaluating] = useState(false);
+
+  const isCouple = plan.demographics.planningMode !== 'single';
+  const isaMaxLimit = isCouple ? 40000 : 20000;
+  const pensionMaxLimit = isCouple ? 120000 : 60000;
+
+  const handleRunTournament = () => {
+    setIsEvaluating(true);
+    setTimeout(() => {
+      const curAge = Number(plan.demographics.currentAgeSelf) || 40;
+      const retAge = Number(plan.demographics.retireAgeSelf) || 60;
+      const privAge = Number(plan.demographics.privatePensionAge) || 58;
+      const gapYears = Math.max(0, privAge - retAge);
+      const targetSpend = Number(plan.spending.targetSpend) || 0;
+
+      const currentPenContrib = (Number(plan.accounts.find(a => a.id === 'pen_self')?.contrib) || 0) +
+        (isCouple ? (Number(plan.accounts.find(a => a.id === 'pen_part')?.contrib) || 0) : 0);
+      const currentIsaContrib = (Number(plan.accounts.find(a => a.id === 'isa_self')?.contrib) || 0) +
+        (isCouple ? (Number(plan.accounts.find(a => a.id === 'isa_part')?.contrib) || 0) : 0);
+      const totalBudget = currentPenContrib + currentIsaContrib;
+
+      const currentIsaBal = (Number(plan.accounts.find(a => a.id === 'isa_self')?.balance) || 0) +
+        (isCouple ? (Number(plan.accounts.find(a => a.id === 'isa_part')?.balance) || 0) : 0);
+      const currentCashBal = (Number(plan.accounts.find(a => a.id === 'cash_self')?.balance) || 0) +
+        (isCouple ? (Number(plan.accounts.find(a => a.id === 'cash_part')?.balance) || 0) : 0);
+      const liquidTotal = currentIsaBal + currentCashBal;
+
+      // 1. Baseline
+      const stratBaseline = {
+        name: 'Current Plan Baseline',
+        description: 'Your existing contribution and wrapper configuration.',
+        isaContrib: currentIsaContrib,
+        penContrib: currentPenContrib,
+        transferAmount: 0,
+        planState: JSON.parse(JSON.stringify(plan))
+      };
+
+      // 2. Tax Maximizer (Aggressive SIPP)
+      const minBridgeNeeded = gapYears * targetSpend * 1.15;
+      const yearsToRetire = Math.max(1, retAge - curAge);
+      const projectedLiquid = liquidTotal * Math.pow(1.04, yearsToRetire);
+      const bridgeShortfall = Math.max(0, minBridgeNeeded - projectedLiquid);
+      const neededAnnualIsaForBridge = Math.min(isaMaxLimit, bridgeShortfall / yearsToRetire);
+
+      const taxMaxIsa = Math.round(neededAnnualIsaForBridge / 250) * 250;
+      const taxMaxPen = Math.min(pensionMaxLimit, Math.max(0, totalBudget - taxMaxIsa));
+
+      let taxMaxTransfer = 0;
+      if (scope === 'full' && liquidTotal > minBridgeNeeded + emergencyFloor) {
+        const surplusLiquid = liquidTotal - (minBridgeNeeded + emergencyFloor);
+        taxMaxTransfer = Math.min(surplusLiquid, 20000);
+      }
+
+      const planTaxMax = JSON.parse(JSON.stringify(plan));
+      planTaxMax.accounts.forEach(a => {
+        if (a.id === 'pen_self') a.contrib = taxMaxPen;
+        if (a.id === 'isa_self') a.contrib = taxMaxIsa;
+      });
+      if (taxMaxTransfer > 0) {
+        planTaxMax.oneOffContributions.push({
+          id: 'opt_bed_sipp',
+          date: `${new Date().getFullYear() + 1}-04-06`,
+          year: new Date().getFullYear() + 1,
+          owner: 'Myself',
+          category: 'Pensions',
+          amount: taxMaxTransfer
+        });
+        planTaxMax.oneOffCosts.push({
+          id: 'opt_bed_sipp_cost',
+          date: `${new Date().getFullYear() + 1}-04-06`,
+          year: new Date().getFullYear() + 1,
+          owner: 'Myself',
+          amount: taxMaxTransfer,
+          desc: 'Bed & SIPP transfer from ISA'
+        });
+      }
+
+      const stratTaxMax = {
+        name: 'Tax Arbitrage Maximizer',
+        description: 'Prioritizes maximum salary sacrifice relief; funds only the bare mathematical bridge.',
+        isaContrib: taxMaxIsa,
+        penContrib: taxMaxPen,
+        transferAmount: taxMaxTransfer,
+        planState: planTaxMax
+      };
+
+      // 3. Bridge-First & Liquidity
+      const robustBridgeNeeded = gapYears * targetSpend * 1.45 + emergencyFloor;
+      const robustShortfall = Math.max(0, robustBridgeNeeded - projectedLiquid);
+      const bridgeFirstIsa = Math.min(isaMaxLimit, Math.max(totalBudget * 0.6, robustShortfall / yearsToRetire));
+      const bridgeFirstPen = Math.max(0, totalBudget - bridgeFirstIsa);
+
+      const planBridgeFirst = JSON.parse(JSON.stringify(plan));
+      planBridgeFirst.accounts.forEach(a => {
+        if (a.id === 'pen_self') a.contrib = bridgeFirstPen;
+        if (a.id === 'isa_self') a.contrib = bridgeFirstIsa;
+      });
+
+      const stratBridgeFirst = {
+        name: 'Bridge-First & Liquidity',
+        description: 'Generously funds your pre-58 ISA bridge and preserves emergency reserves.',
+        isaContrib: Math.round(bridgeFirstIsa / 250) * 250,
+        penContrib: Math.round(bridgeFirstPen / 250) * 250,
+        transferAmount: 0,
+        planState: planBridgeFirst
+      };
+
+      // 4. Decumulation Bracket Smoother
+      const maxSmoothDraw = Math.max(0, 50270 - (Number(plan.demographics.statePensionSelf) || 11500));
+      const maxSmoothPenPot = maxSmoothDraw / 0.04;
+      const projectedPensionBal = (Number(plan.accounts.find(a => a.id === 'pen_self')?.balance) || 0) * Math.pow(1.044, yearsToRetire);
+
+      let smoothPenContrib = currentPenContrib;
+      let smoothIsaContrib = currentIsaContrib;
+
+      if (projectedPensionBal > maxSmoothPenPot) {
+        smoothIsaContrib = Math.min(isaMaxLimit, totalBudget);
+        smoothPenContrib = Math.max(0, totalBudget - smoothIsaContrib);
+      } else {
+        smoothPenContrib = Math.min(pensionMaxLimit, totalBudget * 0.7);
+        smoothIsaContrib = Math.max(0, totalBudget - smoothPenContrib);
+      }
+
+      const planSmooth = JSON.parse(JSON.stringify(plan));
+      planSmooth.accounts.forEach(a => {
+        if (a.id === 'pen_self') a.contrib = smoothPenContrib;
+        if (a.id === 'isa_self') a.contrib = smoothIsaContrib;
+      });
+
+      const stratSmooth = {
+        name: 'Tax Bracket Smoother',
+        description: 'Aims to prevent pension draws from entering the 40% higher rate band post-58.',
+        isaContrib: Math.round(smoothIsaContrib / 250) * 250,
+        penContrib: Math.round(smoothPenContrib / 250) * 250,
+        transferAmount: 0,
+        planState: planSmooth
+      };
+
+      // Evaluate each strategy across 1,500 trials
+      const strats = [stratBaseline, stratTaxMax, stratBridgeFirst, stratSmooth];
+      const TRIALS = 1500;
+
+      const results = strats.map(st => {
+        let succ = 0;
+        const failAges = [];
+        const terminalPots = [];
+        let pre58Fails = 0;
+
+        for (let i = 0; i < TRIALS; i++) {
+          const res = runSingleTrial(st.planState);
+          if (res.survived) {
+            succ++;
+          } else {
+            if (res.failAge !== null) failAges.push(res.failAge);
+            if (res.pre58Failed) pre58Fails++;
+          }
+          terminalPots.push(res.terminalPot);
+        }
+
+        terminalPots.sort((a, b) => a - b);
+        failAges.sort((a, b) => a - b);
+
+        const successRate = (succ / TRIALS) * 100;
+        const medianPot = terminalPots[Math.floor(TRIALS * 0.5)] || 0;
+        const medianFailAge = failAges.length > 0 ? failAges[Math.floor(failAges.length * 0.5)] : null;
+        const pre58Risk = (pre58Fails / TRIALS) * 100;
+
+        return {
+          ...st,
+          successRate,
+          medianPot,
+          medianFailAge,
+          pre58Risk
+        };
+      });
+
+      setTournamentResults(results);
+      setIsEvaluating(false);
+    }, 40);
+  };
+
+  return (
+    <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+        <div>
+          <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+            <Zap className="w-4 h-4 text-indigo-600 fill-indigo-600" /> Automated Strategy Tournament &amp; Optimizer
+          </h3>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Test 4 distinct UK wrapper philosophies head-to-head under 1,500 stochastic trials each to locate your optimal survival strategy.
+          </p>
+        </div>
+      </div>
+
+      {/* Inline Tuning Controls */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs font-sans p-3 bg-slate-50 border border-slate-200 rounded-xl">
+        <div>
+          <label className="text-slate-700 font-semibold block mb-1">Gross Annual Salary (£)</label>
+          <input
+            type="number"
+            placeholder="e.g. 65000 (assumes 40% if blank)"
+            value={salaryInput}
+            onChange={(e) => setSalaryInput(e.target.value)}
+            className="w-full p-2 bg-white border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none"
+          />
+        </div>
+
+        <div>
+          <label className="text-slate-700 font-semibold block mb-1">Optimization Scope</label>
+          <select
+            value={scope}
+            onChange={(e) => setScope(e.target.value)}
+            className="w-full p-2 bg-white border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer"
+          >
+            <option value="contributions">Contributions Only (Rebalance future deposits)</option>
+            <option value="full">Full Reallocation (Contributions + Bed &amp; SIPP transfers)</option>
+          </select>
+        </div>
+
+        <div>
+          <div className="flex justify-between items-center mb-1">
+            <label className="text-slate-700 font-semibold">Protected Emergency Floor</label>
+            <span className="font-mono font-bold text-indigo-700">£{emergencyFloor.toLocaleString()}</span>
+          </div>
+          <input
+            type="range"
+            min="10000"
+            max="60000"
+            step="5000"
+            value={emergencyFloor}
+            onChange={(e) => setEmergencyFloor(Number(e.target.value))}
+            className="w-full accent-indigo-600 cursor-pointer mt-2"
+          />
+        </div>
+      </div>
+
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={handleRunTournament}
+          disabled={isEvaluating}
+          className="px-4 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 transition-all cursor-pointer"
+        >
+          <Zap className="w-3.5 h-3.5 fill-amber-300 text-amber-300" />
+          {isEvaluating ? 'Evaluating 6,000 Paths across 4 Strategies...' : '⚡ Run Strategy Tournament'}
+        </button>
+      </div>
+
+      {/* Tournament Results Grid */}
+      {tournamentResults && (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 pt-2">
+          {tournamentResults.map((res, idx) => (
+            <div key={idx} className={`p-4 rounded-2xl border flex flex-col justify-between space-y-3 ${
+              idx === 0 ? 'bg-slate-50 border-slate-200' : 'bg-white border-indigo-100 shadow-xs'
+            }`}>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-900 leading-tight">{res.name}</span>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${
+                    res.successRate >= 90 ? 'bg-emerald-100 text-emerald-800' : res.successRate >= 75 ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-800'
+                  }`}>
+                    {res.successRate.toFixed(1)}% Safe
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500 leading-normal">{res.description}</p>
+
+                <div className="pt-2 border-t border-slate-100 space-y-1 text-[11px] font-mono">
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">S&amp;S ISA:</span>
+                    <strong className="text-teal-700">£{res.isaContrib.toLocaleString()}/yr</strong>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Pension:</span>
+                    <strong className="text-blue-700">£{res.penContrib.toLocaleString()}/yr</strong>
+                  </div>
+                  {res.transferAmount > 0 && (
+                    <div className="flex justify-between text-indigo-600 font-bold">
+                      <span>Bed &amp; SIPP:</span>
+                      <span>+£{res.transferAmount.toLocaleString()} this yr</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between pt-1 border-t border-slate-100">
+                    <span className="text-slate-500 font-sans">Median Pot @ 100:</span>
+                    <span className="font-bold text-slate-800">£{Math.round(res.medianPot / 1000).toLocaleString()}k</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500 font-sans">Failure Point:</span>
+                    <span className={`font-bold ${res.pre58Risk > 10 ? 'text-rose-600' : 'text-slate-700'}`}>
+                      {res.medianFailAge ? `Age ${res.medianFailAge}` : 'None'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => onApplyStrategyToSandbox(res.isaContrib, res.penContrib, res.transferAmount)}
+                className="w-full py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold transition-colors cursor-pointer"
+              >
+                Apply to Sandbox
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
-  // Default tab initialized to 'trajectory' so changes are immediately visible
   const [activeTab, setActiveTab] = useState('trajectory');
   const [isEditingRisk, setIsEditingRisk] = useState(false);
   const [selectedHistoricalYear, setSelectedHistoricalYear] = useState(1965);
@@ -1335,6 +1649,18 @@ export default function App() {
     setTimeout(() => setSaveSuccessMsg(''), 3000);
   };
 
+  const handleApplyStrategyToSandbox = (isaAmt, penAmt, transferAmt) => {
+    setSandboxCustomized(true);
+    setSandboxAccounts(prev => ({
+      ...prev,
+      pen_self: { ...(prev.pen_self || {}), contrib: penAmt },
+      isa_self: { ...(prev.isa_self || {}), contrib: isaAmt }
+    }));
+    setActiveTab('trajectory');
+    setSaveSuccessMsg('Strategy applied to Sandbox. Inspect your trajectory below.');
+    setTimeout(() => setSaveSuccessMsg(''), 3500);
+  };
+
   const handleApplyOptimizerToPlan = (grossPensionAnnual, netIsaAnnual) => {
     setSandboxCustomized(false);
     setPlan(prev => ({
@@ -1862,10 +2188,10 @@ export default function App() {
                 <TrendingUp className="w-5 h-5" />
               </div>
               <h1 className="text-xl font-bold tracking-tight text-slate-900">Retirement Planning Studio</h1>
-              <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 font-semibold border border-blue-100">v3.2</span>
+              <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 font-semibold border border-blue-100">v3.3</span>
             </div>
             <p className="text-xs text-slate-500 mt-1 max-w-3xl leading-relaxed">
-              UK multi-wrapper drawdown model, Monte Carlo &amp; historical backtesting. <strong className="text-slate-700 font-semibold">For educational &amp; illustrative purposes only — this is not financial advice.</strong> Please complete <span className="font-semibold text-blue-700">Plan Inputs</span> first; Config changes are optional (it is advised to start with current default settings).
+              UK multi-wrapper drawdown model, Monte Carlo &amp; historical backtesting. <strong className="text-slate-700 font-semibold">For educational &amp; illustrative purposes only — this is not financial advice.</strong> Please complete <span className="font-semibold text-blue-700">Plan Inputs</span> first; Config changes are optional.
             </p>
           </div>
 
@@ -2906,7 +3232,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* CONTRIBUTION & ESCALATION SANDBOX (Placed directly in Trajectory tab) */}
+            {/* CONTRIBUTION & ESCALATION SANDBOX */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-5">
               <div className="pb-3 border-b border-slate-100">
                 <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
@@ -2928,7 +3254,7 @@ export default function App() {
                 }}
               />
 
-              {/* ACTION BAR: RESET SANDBOX & APPLY BUTTONS */}
+              {/* RESET SANDBOX & APPLY ACTION BAR (Directly below Optimizer Box) */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 pb-3 border-y border-slate-100">
                 <div>
                   <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
@@ -3281,6 +3607,13 @@ export default function App() {
                 )}
               </div>
             )}
+
+            {/* AUTOMATED STRATEGY TOURNAMENT & OPTIMIZER */}
+            <WrapperStrategyTournament
+              plan={plan}
+              runSingleTrial={runSingleTrial}
+              onApplyStrategyToSandbox={handleApplyStrategyToSandbox}
+            />
           </div>
         )}
 
