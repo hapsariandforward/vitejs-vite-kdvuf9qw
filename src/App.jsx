@@ -1412,170 +1412,6 @@ export default function App() {
     });
   }, [timelineData, plan.activeProfileView, isCouple]);
 
-  const runSingleTrial = (planState, spendOverride = null) => {
-    const testPlan = spendOverride !== null
-      ? { ...planState, spending: { ...planState.spending, targetSpend: spendOverride } }
-      : planState;
-
-    const ageSelfStart = Number(testPlan.demographics.currentAgeSelf) || 40;
-    const terminalAge = Number(testPlan.demographics.terminalAge) || 100;
-    const totalYears = Math.max(1, terminalAge - ageSelfStart);
-    const privatePenAge = Number(testPlan.demographics.privatePensionAge) || 58;
-
-    const pots = {};
-    testPlan.accounts.forEach(acc => {
-      pots[acc.id] = Number(acc.balance) || 0;
-    });
-
-    const tracking = { cumPclsSelf: 0, cumPclsPart: 0, lumpSumTakenSelf: false, lumpSumTakenPart: false };
-    let failed = false;
-    let failAge = null;
-    let pre58Failed = false;
-
-    for (let t = 0; t <= totalYears; t++) {
-      let u1 = 0, u2 = 0;
-      while (u1 === 0) u1 = Math.random();
-      while (u2 === 0) u2 = Math.random();
-      const z = Math.sqrt(-2.0 * Math.log(u1)) * Math.cos(2.0 * Math.PI * u2);
-
-      const step = runEngineYear(t, pots, testPlan, { z }, tracking);
-
-      if (!failed && (step.totalCombined <= (Number(testPlan.config.solvencyFloor) || 0) || step.unmetDemand > 5 || step.pre58Insolvent)) {
-        failed = true;
-        failAge = step.ageSelf;
-        pre58Failed = step.pre58Insolvent || (step.ageSelf < privatePenAge);
-      }
-    }
-
-    const terminalPot = (pots.pen_self || 0) + (pots.isa_self || 0) + (pots.other_self || 0) + (pots.cash_self || 0) +
-      (testPlan.demographics.planningMode !== 'single'
-        ? ((pots.pen_part || 0) + (pots.isa_part || 0) + (pots.other_part || 0) + (pots.cash_part || 0))
-        : 0);
-
-    return {
-      survived: !failed,
-      failAge,
-      pre58Failed,
-      terminalPot: Math.max(0, terminalPot)
-    };
-  };
-
-  const handleRunMC = () => {
-    setIsSimulating(true);
-    setTimeout(() => {
-      const NUM_TRIALS = 5000;
-      const terminalPots = [];
-      const failAges = [];
-      let successCount = 0;
-      let pre58FailCount = 0;
-      const currentSpend = Number(plan.spending.targetSpend) || 0;
-
-      for (let i = 0; i < NUM_TRIALS; i++) {
-        const res = runSingleTrial(plan);
-        if (res.survived) {
-          successCount++;
-        } else {
-          if (res.failAge !== null) failAges.push(res.failAge);
-          if (res.pre58Failed) pre58FailCount++;
-        }
-        terminalPots.push(res.terminalPot);
-      }
-
-      terminalPots.sort((a, b) => a - b);
-      failAges.sort((a, b) => a - b);
-
-      const p10 = terminalPots[Math.floor(NUM_TRIALS * 0.10)] || 0;
-      const median = terminalPots[Math.floor(NUM_TRIALS * 0.50)] || 0;
-      const p90 = terminalPots[Math.floor(NUM_TRIALS * 0.90)] || 0;
-
-      const medianFailAge = failAges.length > 0 ? failAges[Math.floor(failAges.length * 0.50)] : null;
-      const earliestFailAge = failAges.length > 0 ? failAges[0] : null;
-
-      setSimResult({
-        type: 'test',
-        title: 'Monte Carlo Stress Test',
-        spend: currentSpend,
-        successRate: (successCount / NUM_TRIALS) * 100,
-        p10Terminal: p10,
-        medianTerminal: median,
-        p90Terminal: p90,
-        failAge: medianFailAge,
-        earliestFailAge,
-        pre58Failed: pre58FailCount > 0 && medianFailAge !== null && medianFailAge < (Number(plan.demographics.privatePensionAge) || 58)
-      });
-      setIsSimulating(false);
-    }, 30);
-  };
-
-  const handleOptimize = () => {
-    setIsOptimizing(true);
-    setTimeout(() => {
-      const targetRate = targetConfidence;
-      let low = 0;
-      let high = 150000;
-
-      // 500 trials during binary search iterations for speed
-      for (let iter = 0; iter < 10; iter++) {
-        const mid = Math.round((low + high) / 2 / 250) * 250;
-        let succ = 0;
-        const testTrials = 500;
-        for (let i = 0; i < testTrials; i++) {
-          if (runSingleTrial(plan, mid).survived) succ++;
-        }
-        const rate = (succ / testTrials) * 100;
-        if (rate >= targetRate) {
-          low = mid;
-        } else {
-          high = mid;
-        }
-      }
-
-      const optimalSpend = Math.round(low / 250) * 250;
-
-      // Rigorous 5,000 trial verification pass
-      const NUM_TRIALS = 5000;
-      const terminalPots = [];
-      const failAges = [];
-      let finalSucc = 0;
-      let pre58FailCount = 0;
-
-      for (let i = 0; i < NUM_TRIALS; i++) {
-        const res = runSingleTrial(plan, optimalSpend);
-        if (res.survived) {
-          finalSucc++;
-        } else {
-          if (res.failAge !== null) failAges.push(res.failAge);
-          if (res.pre58Failed) pre58FailCount++;
-        }
-        terminalPots.push(res.terminalPot);
-      }
-
-      terminalPots.sort((a, b) => a - b);
-      failAges.sort((a, b) => a - b);
-
-      const p10 = terminalPots[Math.floor(NUM_TRIALS * 0.10)] || 0;
-      const median = terminalPots[Math.floor(NUM_TRIALS * 0.50)] || 0;
-      const p90 = terminalPots[Math.floor(NUM_TRIALS * 0.90)] || 0;
-
-      const medianFailAge = failAges.length > 0 ? failAges[Math.floor(failAges.length * 0.50)] : null;
-      const earliestFailAge = failAges.length > 0 ? failAges[0] : null;
-
-      setSimResult({
-        type: 'optimize',
-        title: `Safe Max Annual Spend (${targetConfidence}% Target)`,
-        spend: optimalSpend,
-        successRate: (finalSucc / NUM_TRIALS) * 100,
-        p10Terminal: p10,
-        medianTerminal: median,
-        p90Terminal: p90,
-        failAge: medianFailAge,
-        earliestFailAge,
-        pre58Failed: pre58FailCount > 0 && medianFailAge !== null && medianFailAge < (Number(plan.demographics.privatePensionAge) || 58)
-      });
-      setIsOptimizing(false);
-    }, 30);
-  };
-
   const visibleData = useMemo(() => {
     return chartDisplayData.filter(d => d.ageSelf <= maxVisibleAge);
   }, [chartDisplayData, maxVisibleAge]);
@@ -1888,12 +1724,20 @@ export default function App() {
               <Settings className="w-3.5 h-3.5" /> Config &amp; Assumptions
             </button>
             <button
-              onClick={() => setActiveTab('dashboard')}
+              onClick={() => setActiveTab('trajectory')}
               className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
-                activeTab === 'dashboard' ? 'bg-white text-blue-600 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                activeTab === 'trajectory' ? 'bg-white text-blue-600 shadow-xs' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              <TrendingUp className="w-3.5 h-3.5" /> Dashboard &amp; Simulation
+              <Layers className="w-3.5 h-3.5" /> Portfolio Trajectory
+            </button>
+            <button
+              onClick={() => setActiveTab('simulation')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                activeTab === 'simulation' ? 'bg-white text-indigo-600 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Dices className="w-3.5 h-3.5" /> Monte Carlo Simulation
             </button>
             <button
               onClick={() => setActiveTab('historical')}
@@ -2680,17 +2524,21 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 3: DASHBOARD & SIMULATION */}
-        {activeTab === 'dashboard' && (
+        {/* TAB 3: PORTFOLIO TRAJECTORY & SANDBOX */}
+        {activeTab === 'trajectory' && (
           <div className="space-y-6">
-            <div className="p-3.5 bg-blue-50/70 border border-blue-200/80 rounded-2xl text-xs text-slate-700 flex items-start gap-3">
-              <HelpCircle className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
-              <div>
-                <strong className="text-blue-900 block font-semibold mb-0.5">Simulation Modes:</strong>
-                <span>
-                  <strong>Test Current Spend</strong> evaluates your target annual spend against 5,000 market paths using asset-specific volatilities. <strong>Safe Max Annual Spend</strong> determines the highest annual budget that survives to age 100 at your chosen confidence level.
-                </span>
+            {/* Explainer Banner */}
+            <div className="p-4 bg-blue-50/80 border border-blue-200 rounded-2xl text-xs text-slate-700 space-y-1.5 shadow-2xs">
+              <div className="flex items-center gap-2 font-bold text-blue-950 text-sm">
+                <Layers className="w-4 h-4 text-blue-600" />
+                Deterministic Portfolio Trajectory &amp; Sandbox
               </div>
+              <p className="leading-relaxed">
+                <strong>What it does:</strong> Models continuous compound wealth paths and tax-wrapper decumulation using steady real rates of return (Expected baseline, Lucky 90th percentile, and Unlucky 10th percentile). Use the Sandbox below to test adjusting contributions and salary sacrifice ratios.
+              </p>
+              <p className="text-slate-500 text-[11px] leading-relaxed">
+                <strong>Why these figures differ from Monte Carlo:</strong> This trajectory assumes smooth, constant returns every year without market volatility or sequence-of-returns shocks. It shows what your baseline savings compound to under stable economic conditions.
+              </p>
             </div>
 
             <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
@@ -2708,131 +2556,7 @@ export default function App() {
                   </button>
                 ))}
               </div>
-
-              <div className="flex items-center gap-2">
-                <div className="flex items-center bg-slate-100 border border-slate-200 rounded-xl p-1 text-xs">
-                  <span className="text-slate-500 px-2 font-medium">Confidence:</span>
-                  {[85, 90, 95].map(rate => (
-                    <button
-                      key={rate}
-                      onClick={() => setTargetConfidence(rate)}
-                      className={`px-2 py-0.5 rounded-lg font-semibold transition-all ${targetConfidence === rate ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}
-                    >
-                      {rate}%
-                    </button>
-                  ))}
-                </div>
-
-                <button
-                  onClick={handleRunMC}
-                  disabled={isSimulating || isOptimizing}
-                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs active:scale-95"
-                >
-                  <Dices className="w-3.5 h-3.5 text-blue-200" />
-                  {isSimulating ? 'Testing 5,000 Paths...' : 'Test Current Spend'}
-                </button>
-
-                <button
-                  onClick={handleOptimize}
-                  disabled={isSimulating || isOptimizing}
-                  className="px-3.5 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95"
-                >
-                  <Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300" />
-                  {isOptimizing ? 'Solving...' : `⚡ Safe Max Annual Spend (${targetConfidence}%)`}
-                </button>
-              </div>
             </div>
-
-            {simResult && (
-              <div className={`p-5 rounded-2xl shadow-xs border transition-all ${
-                simResult.successRate >= 90
-                  ? 'bg-emerald-50/90 border-emerald-200'
-                  : simResult.successRate >= 75
-                  ? 'bg-amber-50/90 border-amber-200'
-                  : 'bg-rose-50/90 border-rose-200'
-              }`}>
-                <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
-                  <div className="flex items-center gap-3.5">
-                    <div className={`p-3 rounded-2xl border ${
-                      simResult.successRate >= 90
-                        ? 'bg-emerald-100 border-emerald-300 text-emerald-700'
-                        : simResult.successRate >= 75
-                        ? 'bg-amber-100 border-amber-300 text-amber-700'
-                        : 'bg-rose-100 border-rose-300 text-rose-700'
-                    }`}>
-                      {simResult.successRate >= 90 ? <CheckCircle2 className="w-6 h-6" /> : <AlertTriangle className="w-6 h-6" />}
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className={`text-[11px] font-bold tracking-wider uppercase px-2 py-0.5 rounded-md ${
-                          simResult.type === 'optimize' ? 'bg-indigo-100 text-indigo-800' : 'bg-blue-100 text-blue-800'
-                        }`}>
-                          {simResult.title}
-                        </span>
-                        <span className="text-xs text-slate-500 font-medium">5,000 trials</span>
-                      </div>
-                      <div className="text-2xl font-black font-mono text-slate-900 mt-1">
-                        {formatGBP(simResult.spend)} <span className="text-sm font-normal text-slate-600">/ year net spend</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 w-full lg:w-auto text-xs border-t lg:border-t-0 border-slate-200/80 pt-3 lg:pt-0">
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs">
-                      <span className="text-slate-500 block mb-0.5">Survival Rate</span>
-                      <span className={`text-base font-black font-mono ${
-                        simResult.successRate >= 90 ? 'text-emerald-700' : simResult.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'
-                      }`}>
-                        {simResult.successRate.toFixed(1)}%
-                      </span>
-                    </div>
-
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs">
-                      <span className="text-slate-500 block mb-0.5">Age of Failure</span>
-                      <span className={`text-base font-black font-mono ${
-                        !simResult.failAge ? 'text-emerald-700' : simResult.failAge < (Number(plan.demographics.privatePensionAge) || 58) ? 'text-rose-700' : 'text-amber-700'
-                      }`}>
-                        {simResult.failAge ? `Age ${simResult.failAge}` : 'None'}
-                      </span>
-                      <span className="text-[10px] text-slate-400 block mt-0.5 font-mono truncate">
-                        {simResult.failAge ? `Median fail age` : '100% Solvency'}
-                      </span>
-                    </div>
-
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs">
-                      <span className="text-slate-500 block mb-0.5">10th %ile Pot @ 100</span>
-                      <span className="text-base font-bold font-mono text-rose-700">
-                        {formatGBP(simResult.p10Terminal)}
-                      </span>
-                    </div>
-
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs">
-                      <span className="text-slate-500 block mb-0.5">Median Pot @ 100</span>
-                      <span className="text-base font-bold font-mono text-blue-700">
-                        {formatGBP(simResult.medianTerminal)}
-                      </span>
-                    </div>
-
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs">
-                      <span className="text-slate-500 block mb-0.5">90th %ile Pot @ 100</span>
-                      <span className="text-base font-bold font-mono text-emerald-700">
-                        {formatGBP(simResult.p90Terminal)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Pre-Pension Bridge Failure Warning Comment */}
-                {simResult.failAge && simResult.failAge < (Number(plan.demographics.privatePensionAge) || 58) && (
-                  <div className="mt-3.5 p-3 bg-rose-100/90 border border-rose-300 rounded-xl text-xs text-rose-950 flex items-start gap-2.5 shadow-2xs">
-                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-                    <div>
-                      <strong className="font-bold">Pre-Pension Bridge Exhaustion (Age {simResult.failAge}):</strong> Your non-pension investments (e.g. S&amp;S ISAs, other investments, and cash reserves) were exhausted before your pension pot became accessible at age {plan.demographics.privatePensionAge || 58}. Consider shifting more contributions to your S&amp;S ISA or adjusting your retirement age.
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs">
@@ -2840,21 +2564,21 @@ export default function App() {
                 <div className="text-2xl font-black font-mono text-blue-600 mt-2">
                   {formatGBP(chartDisplayData[chartDisplayData.length - 1]?.expected)}
                 </div>
-                <div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Target className="w-3.5 h-3.5 text-blue-600" /> Projected balance at age 100</div>
+                <div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Target className="w-3.5 h-3.5 text-blue-600" /> Constant expected real growth to age 100</div>
               </div>
               <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs">
                 <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Lucky Scenario (90th %ile)</div>
                 <div className="text-2xl font-black font-mono text-emerald-600 mt-2">
                   {formatGBP(timelineData[timelineData.length - 1]?.lucky)}
                 </div>
-                <div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><TrendingUp className="w-3.5 h-3.5 text-emerald-600" /> Higher-than-average market returns</div>
+                <div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><TrendingUp className="w-3.5 h-3.5 text-emerald-600" /> Constant above-average return rate</div>
               </div>
               <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs">
                 <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Unlucky Scenario (10th %ile)</div>
                 <div className="text-2xl font-black font-mono text-rose-600 mt-2">
                   {formatGBP(timelineData[timelineData.length - 1]?.unlucky)}
                 </div>
-                <div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><ShieldCheck className="w-3.5 h-3.5 text-rose-600" /> Lower-than-average market returns</div>
+                <div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><ShieldCheck className="w-3.5 h-3.5 text-rose-600" /> Constant below-average return rate</div>
               </div>
             </div>
 
@@ -3019,7 +2743,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* CONTRIBUTION & ESCALATION SANDBOX */}
+            {/* CONTRIBUTION & ESCALATION SANDBOX (Placed directly in Trajectory tab) */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-5">
               <div className="pb-3 border-b border-slate-100">
                 <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
@@ -3041,7 +2765,7 @@ export default function App() {
                 }}
               />
 
-              {/* RESET SANDBOX & APPLY ACTION BAR (Directly below Optimizer Box) */}
+              {/* ACTION BAR: RESET SANDBOX & APPLY BUTTONS */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 pb-3 border-y border-slate-100">
                 <div>
                   <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
@@ -3245,7 +2969,159 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 4: HISTORICAL BACKTEST */}
+        {/* TAB 4: MONTE CARLO SIMULATION */}
+        {activeTab === 'simulation' && (
+          <div className="space-y-6">
+            {/* Explainer Banner */}
+            <div className="p-4 bg-indigo-50/80 border border-indigo-200 rounded-2xl text-xs text-slate-700 space-y-1.5 shadow-2xs">
+              <div className="flex items-center gap-2 font-bold text-indigo-950 text-sm">
+                <Dices className="w-4 h-4 text-indigo-600" />
+                Stochastic Monte Carlo Stress Testing (5,000 Randomized Paths)
+              </div>
+              <p className="leading-relaxed">
+                <strong>What it does:</strong> Stress-tests your target living expenditure against 5,000 randomized market runs utilizing asset-specific annual volatilities (&sigma;). It identifies failure probabilities, the exact age where capital depletes, and solves for your sustainable maximum spending.
+              </p>
+              <p className="text-slate-500 text-[11px] leading-relaxed">
+                <strong>Why these figures differ from the Trajectory Dashboard:</strong> The Trajectory tab assumes smooth, constant returns every year. Monte Carlo incorporates realistic sequence-of-returns risk—where a market crash early in retirement can permanently impair a portfolio's longevity even if the long-term mathematical average return matches your expectations.
+              </p>
+            </div>
+
+            {/* Simulation Action Bar */}
+            <div className="bg-white border border-slate-200/90 rounded-2xl p-5 shadow-xs flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Run Multi-Path Simulation</h3>
+                <span className="text-[11px] text-slate-500">Run 5,000 stochastic trials or calculate your sustainable safe spending limit.</span>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="flex items-center bg-slate-100 border border-slate-200 rounded-xl p-1 text-xs">
+                  <span className="text-slate-500 px-2 font-medium">Confidence:</span>
+                  {[85, 90, 95].map(rate => (
+                    <button
+                      key={rate}
+                      onClick={() => setTargetConfidence(rate)}
+                      className={`px-2 py-0.5 rounded-lg font-semibold transition-all ${targetConfidence === rate ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}
+                    >
+                      {rate}%
+                    </button>
+                  ))}
+                </div>
+
+                <button
+                  onClick={handleRunMC}
+                  disabled={isSimulating || isOptimizing}
+                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs active:scale-95"
+                >
+                  <Dices className="w-3.5 h-3.5 text-blue-200" />
+                  {isSimulating ? 'Testing 5,000 Paths...' : 'Test Current Spend'}
+                </button>
+
+                <button
+                  onClick={handleOptimize}
+                  disabled={isSimulating || isOptimizing}
+                  className="px-3.5 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95"
+                >
+                  <Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300" />
+                  {isOptimizing ? 'Solving...' : `⚡ Safe Max Annual Spend (${targetConfidence}%)`}
+                </button>
+              </div>
+            </div>
+
+            {/* Results Banner */}
+            {simResult && (
+              <div className={`p-5 rounded-2xl shadow-xs border transition-all ${
+                simResult.successRate >= 90
+                  ? 'bg-emerald-50/90 border-emerald-200'
+                  : simResult.successRate >= 75
+                  ? 'bg-amber-50/90 border-amber-200'
+                  : 'bg-rose-50/90 border-rose-200'
+              }`}>
+                <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
+                  <div className="flex items-center gap-3.5">
+                    <div className={`p-3 rounded-2xl border ${
+                      simResult.successRate >= 90
+                        ? 'bg-emerald-100 border-emerald-300 text-emerald-700'
+                        : simResult.successRate >= 75
+                        ? 'bg-amber-100 border-amber-300 text-amber-700'
+                        : 'bg-rose-100 border-rose-300 text-rose-700'
+                    }`}>
+                      {simResult.successRate >= 90 ? <CheckCircle2 className="w-6 h-6" /> : <AlertTriangle className="w-6 h-6" />}
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className={`text-[11px] font-bold tracking-wider uppercase px-2 py-0.5 rounded-md ${
+                          simResult.type === 'optimize' ? 'bg-indigo-100 text-indigo-800' : 'bg-blue-100 text-blue-800'
+                        }`}>
+                          {simResult.title}
+                        </span>
+                        <span className="text-xs text-slate-500 font-medium">5,000 trials</span>
+                      </div>
+                      <div className="text-2xl font-black font-mono text-slate-900 mt-1">
+                        {formatGBP(simResult.spend)} <span className="text-sm font-normal text-slate-600">/ year net spend</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 w-full lg:w-auto text-xs border-t lg:border-t-0 border-slate-200/80 pt-3 lg:pt-0">
+                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs">
+                      <span className="text-slate-500 block mb-0.5">Survival Rate</span>
+                      <span className={`text-base font-black font-mono ${
+                        simResult.successRate >= 90 ? 'text-emerald-700' : simResult.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'
+                      }`}>
+                        {simResult.successRate.toFixed(1)}%
+                      </span>
+                    </div>
+
+                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs">
+                      <span className="text-slate-500 block mb-0.5">Age of Failure</span>
+                      <span className={`text-base font-black font-mono ${
+                        !simResult.failAge ? 'text-emerald-700' : simResult.failAge < (Number(plan.demographics.privatePensionAge) || 58) ? 'text-rose-700' : 'text-amber-700'
+                      }`}>
+                        {simResult.failAge ? `Age ${simResult.failAge}` : 'None'}
+                      </span>
+                      <span className="text-[10px] text-slate-400 block mt-0.5 font-mono truncate">
+                        {simResult.failAge ? `Median fail age` : '100% Solvency'}
+                      </span>
+                    </div>
+
+                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs">
+                      <span className="text-slate-500 block mb-0.5">10th %ile Pot @ 100</span>
+                      <span className="text-base font-bold font-mono text-rose-700">
+                        {formatGBP(simResult.p10Terminal)}
+                      </span>
+                    </div>
+
+                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs">
+                      <span className="text-slate-500 block mb-0.5">Median Pot @ 100</span>
+                      <span className="text-base font-bold font-mono text-blue-700">
+                        {formatGBP(simResult.medianTerminal)}
+                      </span>
+                    </div>
+
+                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs">
+                      <span className="text-slate-500 block mb-0.5">90th %ile Pot @ 100</span>
+                      <span className="text-base font-bold font-mono text-emerald-700">
+                        {formatGBP(simResult.p90Terminal)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Pre-Pension Bridge Failure Warning Comment */}
+                {simResult.failAge && simResult.failAge < (Number(plan.demographics.privatePensionAge) || 58) && (
+                  <div className="mt-3.5 p-3 bg-rose-100/90 border border-rose-300 rounded-xl text-xs text-rose-950 flex items-start gap-2.5 shadow-2xs">
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    <div>
+                      <strong className="font-bold">Pre-Pension Bridge Exhaustion (Age {simResult.failAge}):</strong> Your non-pension investments (e.g. S&amp;S ISAs, other investments, and cash reserves) were exhausted before your pension pot became accessible at age {plan.demographics.privatePensionAge || 58}. Consider shifting more contributions to your S&amp;S ISA or adjusting your retirement age.
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 5: HISTORICAL BACKTEST */}
         {activeTab === 'historical' && (
           <div className="space-y-6">
             <div className="p-4 bg-indigo-50/70 border border-indigo-200/80 rounded-2xl text-xs text-slate-700 space-y-2">
@@ -3489,7 +3365,7 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 5: AUDIT DATA TABLE */}
+        {/* TAB 6: AUDIT DATA TABLE */}
         {activeTab === 'audit' && (
           <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
@@ -3564,7 +3440,7 @@ export default function App() {
           </div>
         )}
 
-        {/* TAB 6: DOCUMENTATION */}
+        {/* TAB 7: DOCUMENTATION */}
         {activeTab === 'docs' && (
           <div className="space-y-6">
             <div id="doc-salary-sacrifice" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
