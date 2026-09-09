@@ -240,21 +240,29 @@ function grossPensionNeededForNet(netTarget, otherTaxableIncome = 0, config, isF
   return low;
 }
 
-// Sub-Component: Salary Sacrifice vs ISA Optimizer
+// Sub-Component: Salary Sacrifice vs ISA Ratio Optimizer
 function SalarySacrificeOptimizer({ plan, onApplyToSandbox, onApplyToPlan, onNavigateDocs }) {
-  const [grossSalary, setGrossSalary] = useState(65000);
-  const [totalMonthlyBudget, setTotalMonthlyBudget] = useState(1000);
-  const [pensionPercent, setPensionPercent] = useState(80);
+  const [grossSalary, setGrossSalary] = useState('');
+
+  const currentPen = Number(plan.accounts.find(a => a.id === 'pen_self')?.contrib) || 0;
+  const currentIsa = Number(plan.accounts.find(a => a.id === 'isa_self')?.contrib) || 0;
+  const totalExistingInvested = currentPen + currentIsa;
 
   const curAge = Number(plan.demographics.currentAgeSelf) || 40;
   const retAge = Number(plan.demographics.retireAgeSelf) || 60;
   const realRate = 0.044;
 
-  const calculateMarginalCost = (salary, grossSacrifice) => {
+  const getMarginalRelief = (salaryInput, grossSacrifice) => {
+    if (salaryInput === '' || salaryInput === null || salaryInput === undefined || Number(salaryInput) <= 0) {
+      const taxAndNICSaved = grossSacrifice * 0.42;
+      const netTakeHomeCost = grossSacrifice - taxAndNICSaved;
+      return { netTakeHomeCost, taxAndNICSaved, effectiveReliefRate: 42.0 };
+    }
+
+    const salary = Number(salaryInput);
     const getTaxAndNIC = (income) => {
       let pa = 12570;
       if (income > 100000) pa = Math.max(0, 12570 - (income - 100000) * 0.5);
-
       let taxable = Math.max(0, income - pa);
       let tax = 0;
       if (taxable > 0) {
@@ -284,47 +292,68 @@ function SalarySacrificeOptimizer({ plan, onApplyToSandbox, onApplyToPlan, onNav
     const postSacrificeDeductions = getTaxAndNIC(Math.max(0, salary - grossSacrifice));
     const taxAndNICSaved = initialDeductions - postSacrificeDeductions;
     const netTakeHomeCost = grossSacrifice - taxAndNICSaved;
-    const effectiveReliefRate = grossSacrifice > 0 ? (taxAndNICSaved / grossSacrifice) * 100 : 0;
+    const effectiveReliefRate = grossSacrifice > 0 ? (taxAndNICSaved / grossSacrifice) * 100 : 42.0;
 
     return { netTakeHomeCost, taxAndNICSaved, effectiveReliefRate };
   };
 
-  const annualBudget = totalMonthlyBudget * 12;
-  const isaShare = (100 - pensionPercent) / 100;
-  const pensionShare = pensionPercent / 100;
+  const grossUpNetSacrifice = (netAmt, salaryInput) => {
+    if (netAmt <= 0) return 0;
+    if (salaryInput === '' || salaryInput === null || salaryInput === undefined || Number(salaryInput) <= 0) {
+      return netAmt / 0.58;
+    }
+    let low = netAmt;
+    let high = netAmt * 3.0;
+    for (let i = 0; i < 22; i++) {
+      const mid = (low + high) / 2;
+      const { netTakeHomeCost } = getMarginalRelief(salaryInput, mid);
+      if (netTakeHomeCost < netAmt) low = mid;
+      else high = mid;
+    }
+    return low;
+  };
 
-  const netPensionSacrifice = annualBudget * pensionShare;
-  const netIsaContribution = annualBudget * isaShare;
+  const currentNetCostOfPension = getMarginalRelief(grossSalary, currentPen).netTakeHomeCost;
+  const currentTotalTakeHomeCost = currentIsa + currentNetCostOfPension;
 
-  let low = netPensionSacrifice;
-  let high = netPensionSacrifice * 2.8;
-  for (let i = 0; i < 20; i++) {
-    const mid = (low + high) / 2;
-    const { netTakeHomeCost } = calculateMarginalCost(grossSalary, mid);
-    if (netTakeHomeCost < netPensionSacrifice) low = mid;
-    else high = mid;
+  const baselineRatio = currentTotalTakeHomeCost > 0
+    ? Math.round((currentNetCostOfPension / currentTotalTakeHomeCost) * 100)
+    : 50;
+
+  const [pensionPercent, setPensionPercent] = useState(baselineRatio);
+
+  useEffect(() => {
+    setPensionPercent(baselineRatio);
+  }, [baselineRatio]);
+
+  let newPensionContrib = currentPen;
+  let newIsaContrib = currentIsa;
+
+  if (currentTotalTakeHomeCost > 0) {
+    const targetNetPension = currentTotalTakeHomeCost * (pensionPercent / 100);
+    newIsaContrib = Math.max(0, currentTotalTakeHomeCost * (1 - pensionPercent / 100));
+    newPensionContrib = Math.max(0, grossUpNetSacrifice(targetNetPension, grossSalary));
   }
-  const grossPensionContribution = netPensionSacrifice > 0 ? low : 0;
-  const annualTaxSaved = grossPensionContribution - netPensionSacrifice;
-  const upfrontBoostPercent = netPensionSacrifice > 0 ? ((grossPensionContribution - netPensionSacrifice) / netPensionSacrifice) * 100 : 0;
+
+  const newTotalNominal = newPensionContrib + newIsaContrib;
+  const dayOneDelta = newTotalNominal - totalExistingInvested;
+  const dayOnePercentBoost = totalExistingInvested > 0 ? (dayOneDelta / totalExistingInvested) * 100 : 0;
 
   const netExitFactor = 0.85;
-  const projectValue = (annualNet, annualGross, years) => {
-    if (years <= 0) return { isa: 0, penNet: 0, ratio: 1.0 };
-    const fvNetIsa = annualNet * ((Math.pow(1 + realRate, years) - 1) / realRate);
-    const fvGrossPen = annualGross * ((Math.pow(1 + realRate, years) - 1) / realRate);
-    const fvNetPen = fvGrossPen * netExitFactor;
-    const ratio = fvNetIsa > 0 ? (fvNetPen / fvNetIsa) : (annualGross * netExitFactor) / annualNet;
-    return { fvNetIsa, fvNetPen, ratio };
+  const calculateWealthMultiple = (years) => {
+    if (currentTotalTakeHomeCost <= 0) return 1.0;
+    const fvNewNet = (newIsaContrib + newPensionContrib * netExitFactor) * ((Math.pow(1 + realRate, years) - 1) / realRate);
+    const fvAllIsa = currentTotalTakeHomeCost * ((Math.pow(1 + realRate, years) - 1) / realRate);
+    return fvAllIsa > 0 ? (fvNewNet / fvAllIsa) : 1.0;
   };
 
   const yearsToRetire = Math.max(1, retAge - curAge);
   const yearsTo80 = Math.max(1, 80 - curAge);
   const yearsTo100 = Math.max(1, 100 - curAge);
 
-  const mRetire = projectValue(netPensionSacrifice, grossPensionContribution, yearsToRetire).ratio;
-  const m80 = projectValue(netPensionSacrifice, grossPensionContribution, yearsTo80).ratio;
-  const m100 = projectValue(netPensionSacrifice, grossPensionContribution, yearsTo100).ratio;
+  const mRetire = calculateWealthMultiple(yearsToRetire);
+  const m80 = calculateWealthMultiple(yearsTo80);
+  const m100 = calculateWealthMultiple(yearsTo100);
 
   return (
     <div className="p-4 sm:p-5 bg-gradient-to-br from-indigo-50/90 via-blue-50/50 to-slate-50 border border-indigo-100 rounded-2xl shadow-xs space-y-4">
@@ -338,7 +367,7 @@ function SalarySacrificeOptimizer({ plan, onApplyToSandbox, onApplyToPlan, onNav
               Salary Sacrifice &amp; Wrapper Optimizer
             </h4>
             <span className="text-[11px] text-slate-500">
-              Calculate pre-tax salary sacrifice leverage vs post-tax S&amp;S ISA contributions.
+              Rebalance your existing investment budget between S&amp;S ISA and pre-tax Pension salary sacrifice.
             </span>
           </div>
         </div>
@@ -352,76 +381,63 @@ function SalarySacrificeOptimizer({ plan, onApplyToSandbox, onApplyToPlan, onNav
         </button>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs font-sans">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-sans items-start">
         <div>
-          <label className="text-slate-600 font-semibold block mb-1">Gross Annual Salary (£)</label>
+          <label className="text-slate-700 font-semibold block mb-1">Gross Annual Salary (£)</label>
           <input
             type="number"
-            step="1000"
+            placeholder="e.g. 65000 (assumes 40% Higher Rate if blank)"
             value={grossSalary}
-            onChange={(e) => setGrossSalary(Math.max(0, Number(e.target.value) || 0))}
+            onChange={(e) => setGrossSalary(e.target.value)}
             className="w-full p-2 bg-white border border-slate-300 rounded-xl font-mono text-slate-900 font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none"
           />
-          <span className="text-[10px] text-slate-400 mt-1 block">
-            {grossSalary > 100000 && grossSalary <= 125140 ? 'Inside 60% Personal Allowance Taper' : grossSalary > 50270 ? 'Higher Rate (40% Tax + 2% NIC)' : 'Basic Rate (20% Tax + 8% NIC)'}
-          </span>
+          <p className="text-[11px] text-slate-500 mt-1 leading-normal">
+            add your salary to check how much salary sacrifice could boost your portfolio vs S&amp;S ISA, if you leave this blank it will assume savings are all higher rate tax payer.
+          </p>
         </div>
 
-        <div>
-          <label className="text-slate-600 font-semibold block mb-1">Net Monthly Take-Home to Invest (£)</label>
-          <input
-            type="number"
-            step="50"
-            value={totalMonthlyBudget}
-            onChange={(e) => setTotalMonthlyBudget(Math.max(0, Number(e.target.value) || 0))}
-            className="w-full p-2 bg-white border border-slate-300 rounded-xl font-mono text-slate-900 font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-          />
-          <span className="text-[10px] text-slate-400 mt-1 block font-mono">£{(annualBudget).toLocaleString()}/year net out-of-pocket</span>
-        </div>
-
-        <div>
-          <div className="flex justify-between items-center mb-1">
-            <label className="text-slate-600 font-semibold">Allocation Ratio</label>
+        <div className="bg-white/80 p-3.5 rounded-xl border border-indigo-100 space-y-2">
+          <div className="flex justify-between items-center">
+            <span className="text-slate-600 font-semibold">Allocation Ratio:</span>
             <span className="text-xs font-bold text-indigo-700 font-mono">
               {100 - pensionPercent}% ISA / {pensionPercent}% Pension
             </span>
           </div>
+
           <input
             type="range"
             min="0"
             max="100"
-            step="5"
+            step="1"
             value={pensionPercent}
             onChange={(e) => setPensionPercent(Number(e.target.value))}
-            className="w-full accent-indigo-600 cursor-pointer mt-2"
+            className="w-full accent-indigo-600 cursor-pointer"
           />
-          <div className="flex justify-between text-[10px] text-slate-400 mt-0.5">
-            <span>100% ISA</span>
-            <span>50/50</span>
-            <span>100% Pension</span>
+
+          <div className="flex justify-between text-[10px] text-slate-500 font-mono">
+            <span>100% ISA (£0 Pen)</span>
+            <span className="text-indigo-600 font-bold">Base: {baselineRatio}% Pen</span>
+            <span>100% Pen (£0 ISA)</span>
+          </div>
+
+          <div className="pt-1 border-t border-slate-100 text-[11px] text-slate-600 flex justify-between font-mono">
+            <span>Current Total: <strong>£{totalExistingInvested.toLocaleString()}/yr</strong></span>
+            <span className="text-indigo-700 font-bold">New Total: £{Math.round(newTotalNominal).toLocaleString()}/yr</span>
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 text-xs">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-1 text-xs">
         <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
-          <span className="text-[10px] text-slate-500 uppercase font-bold block">Annual Tax/NIC Saved</span>
-          <span className="text-base font-black font-mono text-emerald-600">
-            +£{Math.round(annualTaxSaved).toLocaleString()}
+          <span className="text-[10px] text-slate-500 uppercase font-bold block">Day-1 Capital Boost</span>
+          <span className={`text-base font-black font-mono ${dayOneDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+            {dayOneDelta >= 0 ? '+' : ''}£{Math.round(dayOneDelta).toLocaleString()}
           </span>
-          <span className="text-[10px] text-slate-400 block mt-0.5">Free government match</span>
+          <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">{dayOnePercentBoost >= 0 ? '+' : ''}{dayOnePercentBoost.toFixed(1)}% nominal boost</span>
         </div>
 
         <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
-          <span className="text-[10px] text-slate-500 uppercase font-bold block">Upfront Capital Boost</span>
-          <span className="text-base font-black font-mono text-indigo-700">
-            +{upfrontBoostPercent.toFixed(1)}%
-          </span>
-          <span className="text-[10px] text-slate-400 block mt-0.5">Immediate day-1 leverage</span>
-        </div>
-
-        <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
-          <span className="text-[10px] text-slate-500 uppercase font-bold block">Boost Multiple @ Retire</span>
+          <span className="text-[10px] text-slate-500 uppercase font-bold block">Multiple @ Retire ({retAge})</span>
           <span className="text-base font-black font-mono text-indigo-700">
             {mRetire.toFixed(2)}x
           </span>
@@ -429,29 +445,37 @@ function SalarySacrificeOptimizer({ plan, onApplyToSandbox, onApplyToPlan, onNav
         </div>
 
         <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
-          <span className="text-[10px] text-slate-500 uppercase font-bold block">Boost Multiple @ Age 100</span>
+          <span className="text-[10px] text-slate-500 uppercase font-bold block">Multiple @ Age 80</span>
+          <span className="text-base font-black font-mono text-indigo-700">
+            {m80.toFixed(2)}x
+          </span>
+          <span className="text-[10px] text-slate-400 block mt-0.5">Net wealth vs 100% ISA</span>
+        </div>
+
+        <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
+          <span className="text-[10px] text-slate-500 uppercase font-bold block">Multiple @ Age 100</span>
           <span className="text-base font-black font-mono text-indigo-700">
             {m100.toFixed(2)}x
           </span>
-          <span className="text-[10px] text-slate-400 block mt-0.5">Net purchasing power</span>
+          <span className="text-[10px] text-slate-400 block mt-0.5">Purchasing power multiple</span>
         </div>
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-indigo-100/70">
-        <div className="text-[11px] text-slate-500">
-          Resulting Deposits: <strong className="text-teal-700 font-mono">£{Math.round(netIsaContribution).toLocaleString()}/yr ISA</strong> + <strong className="text-blue-700 font-mono">£{Math.round(grossPensionContribution).toLocaleString()}/yr Pension</strong> (Net cost: £{annualBudget.toLocaleString()})
+        <div className="text-[11px] text-slate-600">
+          Resulting Contributions: <strong className="text-teal-700 font-mono">£{Math.round(newIsaContrib).toLocaleString()}/yr ISA</strong> + <strong className="text-blue-700 font-mono">£{Math.round(newPensionContrib).toLocaleString()}/yr Pension</strong> (Net salary cost: £{Math.round(currentTotalTakeHomeCost).toLocaleString()}/yr)
         </div>
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => onApplyToSandbox(Math.round(grossPensionContribution), Math.round(netIsaContribution))}
+            onClick={() => onApplyToSandbox(Math.round(newPensionContrib), Math.round(newIsaContrib))}
             className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold border border-indigo-200 transition-all cursor-pointer"
           >
             Apply to Sandbox Below
           </button>
           <button
             type="button"
-            onClick={() => onApplyToPlan(Math.round(grossPensionContribution), Math.round(netIsaContribution))}
+            onClick={() => onApplyToPlan(Math.round(newPensionContrib), Math.round(newIsaContrib))}
             className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-xs transition-all cursor-pointer"
           >
             Apply to Plan Inputs
@@ -505,28 +529,31 @@ export default function App() {
   const [scenarioNameInput, setScenarioNameInput] = useState('');
   const [saveSuccessMsg, setSaveSuccessMsg] = useState('');
 
+  const [sandboxCustomized, setSandboxCustomized] = useState(false);
+
   const [sandboxAccounts, setSandboxAccounts] = useState(() => {
     const init = {};
     plan.accounts.forEach(a => {
       init[a.id] = {
-        contrib: Number(a.contrib) || 0,
-        growth: Number(a.growth) || 0
+        contrib: a.contrib !== '' && a.contrib !== null && a.contrib !== undefined ? Number(a.contrib) : 0,
+        growth: a.growth !== '' && a.growth !== null && a.growth !== undefined ? Number(a.growth) : 0
       };
     });
     return init;
   });
 
   useEffect(() => {
-    setSandboxAccounts(prev => {
-      const updated = { ...prev };
+    if (!sandboxCustomized) {
+      const fresh = {};
       plan.accounts.forEach(a => {
-        if (!updated[a.id]) {
-          updated[a.id] = { contrib: Number(a.contrib) || 0, growth: Number(a.growth) || 0 };
-        }
+        fresh[a.id] = {
+          contrib: a.contrib !== '' && a.contrib !== null && a.contrib !== undefined ? Number(a.contrib) : 0,
+          growth: a.growth !== '' && a.growth !== null && a.growth !== undefined ? Number(a.growth) : 0
+        };
       });
-      return updated;
-    });
-  }, [plan.accounts]);
+      setSandboxAccounts(fresh);
+    }
+  }, [plan.accounts, sandboxCustomized]);
 
   useEffect(() => {
     try {
@@ -618,6 +645,7 @@ export default function App() {
   const handleSelectScenario = (id) => {
     const selected = scenarios.find(s => s.id === id);
     if (selected) {
+      setSandboxCustomized(false);
       setActiveScenarioId(id);
       setPlan(JSON.parse(JSON.stringify(selected.data)));
       setSimResult(null);
@@ -1245,6 +1273,7 @@ export default function App() {
   }, [timelineData, sandboxTimeline, plan.demographics.retireAgeSelf, plan.demographics.currentAgeSelf, plan.accounts, sandboxAccounts, isCouple]);
 
   const handleApplySandboxToPlan = () => {
+    setSandboxCustomized(false);
     setPlan(prev => ({
       ...prev,
       accounts: prev.accounts.map(acc => {
@@ -1261,6 +1290,7 @@ export default function App() {
   };
 
   const handleResetSandbox = () => {
+    setSandboxCustomized(false);
     const fresh = {};
     plan.accounts.forEach(a => {
       fresh[a.id] = { contrib: Number(a.contrib) || 0, growth: Number(a.growth) || 0 };
@@ -1269,6 +1299,7 @@ export default function App() {
   };
 
   const updateSandboxField = (id, field, value) => {
+    setSandboxCustomized(true);
     setSandboxAccounts(prev => ({
       ...prev,
       [id]: {
@@ -1279,6 +1310,7 @@ export default function App() {
   };
 
   const adjustSandboxContrib = (id, delta) => {
+    setSandboxCustomized(true);
     setSandboxAccounts(prev => {
       const cur = Number(prev[id]?.contrib) || 0;
       return {
@@ -1292,6 +1324,7 @@ export default function App() {
   };
 
   const handleApplyOptimizerToSandbox = (grossPensionAnnual, netIsaAnnual) => {
+    setSandboxCustomized(true);
     setSandboxAccounts(prev => ({
       ...prev,
       pen_self: { ...(prev.pen_self || {}), contrib: grossPensionAnnual },
@@ -1302,6 +1335,7 @@ export default function App() {
   };
 
   const handleApplyOptimizerToPlan = (grossPensionAnnual, netIsaAnnual) => {
+    setSandboxCustomized(false);
     setPlan(prev => ({
       ...prev,
       accounts: prev.accounts.map(acc => {
@@ -1694,6 +1728,7 @@ export default function App() {
           if (!parsed.demographics.planningMode) parsed.demographics.planningMode = 'couple';
           if (!parsed.spending) parsed.spending = BLANK_PLAN.spending;
           if (!parsed.spending.decumulationPolicy) parsed.spending.decumulationPolicy = 'Bracket Fill';
+          setSandboxCustomized(false);
           setPlan(parsed);
         } catch (err) {
           alert("Invalid JSON configuration file.");
@@ -1704,6 +1739,7 @@ export default function App() {
 
   const handleResetDefaults = () => {
     if (confirm("Reset all inputs back to blank?")) {
+      setSandboxCustomized(false);
       setPlan(BLANK_PLAN);
       localStorage.removeItem(STORAGE_KEY);
       setSimResult(null);
@@ -2314,7 +2350,7 @@ export default function App() {
                       }}
                       className="text-[11px] text-rose-600 hover:text-rose-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer mt-0.5"
                     >
-                      <HelpCircle className="w-3 h-3" />
+                      <HelpCircle className="w-3.5 h-3.5" />
                       How costs are liquidated from your portfolio wrappers &rarr;
                     </button>
                   </div>
@@ -2919,14 +2955,35 @@ export default function App() {
 
             {/* CONTRIBUTION & ESCALATION SANDBOX */}
             <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+              <div className="pb-3 border-b border-slate-100">
+                <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-amber-500" /> Contribution &amp; Escalation Sandbox
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Test increasing or decreasing annual contributions and escalation growth rates in real time without modifying your base plan inputs.
+                </p>
+              </div>
+
+              {/* SALARY SACRIFICE TOGGLE & WRAPPER OPTIMIZER */}
+              <SalarySacrificeOptimizer
+                plan={plan}
+                onApplyToSandbox={handleApplyOptimizerToSandbox}
+                onApplyToPlan={handleApplyOptimizerToPlan}
+                onNavigateDocs={() => {
+                  setActiveTab('docs');
+                  setTimeout(() => scrollToDocSection('doc-salary-sacrifice'), 80);
+                }}
+              />
+
+              {/* RESET SANDBOX & APPLY ACTION BAR (Directly below Optimizer Box) */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 pb-3 border-y border-slate-100">
                 <div>
-                  <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                    <Sparkles className="w-4 h-4 text-amber-500" /> Contribution &amp; Escalation Sandbox
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Test increasing or decreasing annual contributions and escalation growth rates in real time without modifying your base plan inputs.
-                  </p>
+                  <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
+                    Wrapper Sandbox Controls
+                  </h4>
+                  <span className="text-[11px] text-slate-500">
+                    Adjust individual wrappers below or reset back to your baseline plan inputs.
+                  </span>
                 </div>
 
                 <div className="flex items-center gap-2">
@@ -3022,17 +3079,6 @@ export default function App() {
                   </div>
                 </div>
               )}
-
-              {/* SALARY SACRIFICE TOGGLE & WRAPPER OPTIMIZER */}
-              <SalarySacrificeOptimizer
-                plan={plan}
-                onApplyToSandbox={handleApplyOptimizerToSandbox}
-                onApplyToPlan={handleApplyOptimizerToPlan}
-                onNavigateDocs={() => {
-                  setActiveTab('docs');
-                  setTimeout(() => scrollToDocSection('doc-salary-sacrifice'), 80);
-                }}
-              />
 
               {/* Interactive Wrapper Control Grid */}
               <div className="overflow-x-auto border border-slate-200 rounded-xl">
@@ -3149,7 +3195,7 @@ export default function App() {
               </p>
             </div>
 
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="bg-white border border-slate-200/90 rounded-2xl p-5 shadow-xs space-y-4">
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                 <div>
                   <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Select Historical Scenario or Start Year</h3>
