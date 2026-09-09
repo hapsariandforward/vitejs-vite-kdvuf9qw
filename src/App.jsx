@@ -2039,6 +2039,22 @@ export default function App() {
                   <label className="text-slate-600 font-semibold block mb-1">{isCouple ? 'Joint Net Living Spend (£/yr)' : 'Net Living Spend (£/yr)'}</label>
                   <input type="number" step="1000" placeholder="e.g. 30000" onFocus={handleFocus} value={plan.spending.targetSpend} onChange={(e) => updateSpending('targetSpend', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
                 </div>
+
+                <div className="sm:col-span-2">
+                  <label className="text-slate-600 font-semibold block mb-1">Minimum pot size at 100 (£)</label>
+                  <input
+                    type="number"
+                    step="5000"
+                    placeholder="0"
+                    onFocus={handleFocus}
+                    value={plan.config.solvencyFloor}
+                    onChange={(e) => updateConfig('solvencyFloor', e.target.value)}
+                    className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-amber-700 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  />
+                  <span className="text-[10px] text-slate-400 mt-1 block">
+                    Fill in if you want to leave a minimum amount of money in your will or inheritance.
+                  </span>
+                </div>
               </div>
 
               {/* Spending Tapers */}
@@ -2457,7 +2473,7 @@ export default function App() {
               </h2>
               <p className="text-xs text-slate-500">Economic and regulatory tax settings used throughout the projection engine.</p>
 
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-xs pt-3">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs pt-3">
                 <div>
                   <label className="text-slate-600 font-semibold block mb-1">Valuation Date (Today)</label>
                   <input
@@ -2479,19 +2495,6 @@ export default function App() {
                 <div>
                   <label className="text-slate-600 font-semibold block mb-1">State Pension Start Age</label>
                   <input type="number" placeholder="0" onFocus={handleFocus} value={plan.demographics.statePensionAge} onChange={(e) => updateDemographics('statePensionAge', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-                </div>
-                <div>
-                  <label className="text-slate-600 font-semibold block mb-1">Solvency Floor (£ at Age 100)</label>
-                  <input
-                    type="number"
-                    step="5000"
-                    placeholder="0"
-                    onFocus={handleFocus}
-                    value={plan.config.solvencyFloor}
-                    onChange={(e) => updateConfig('solvencyFloor', e.target.value)}
-                    className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-amber-700 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                  <span className="text-[10px] text-slate-400 mt-1 block">Minimum required capital at age 100 to pass a trial.</span>
                 </div>
               </div>
             </div>
