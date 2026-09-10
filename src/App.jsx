@@ -114,6 +114,11 @@ const DEFAULT_CONFIG = {
   pensionAnnualAllowance: 60000,
   pensionNoEarningsLimit: 3600,      // gross pension contribution allowed with no relevant UK earnings
   mpaaLimit: 10000,                  // money purchase annual allowance once a pension is flexibly accessed
+  // Tapered annual allowance for high earners. HMRC tapers on *adjusted* income (net income plus employer
+  // contributions); the model only knows earnings, so earnings stand in for it — see the documentation tab.
+  pensionTaperThreshold: 260000,     // adjusted income above which the annual allowance starts to taper
+  pensionTaperRate: 50,              // % of income above the threshold removed from the allowance (£1 per £2)
+  pensionTaperFloor: 10000,          // the allowance cannot taper below this
   // Capital gains tax on the GIA (realisation-based; gains are wiped on death so nothing is charged at the terminal age)
   cgtEnabled: true,
   cgtAnnualExempt: 3000,
@@ -280,6 +285,13 @@ function taxParams(cfgIn) {
   const pensionAllowance = Math.max(0, num(cfg.pensionAnnualAllowance, DEFAULT_CONFIG.pensionAnnualAllowance));
   const pensionNoEarningsLimit = clamp(num(cfg.pensionNoEarningsLimit, DEFAULT_CONFIG.pensionNoEarningsLimit), 0, pensionAllowance);
   const mpaaLimit = clamp(num(cfg.mpaaLimit, DEFAULT_CONFIG.mpaaLimit), 0, pensionAllowance);
+  const aaTaperThr = Math.max(0, num(cfg.pensionTaperThreshold, DEFAULT_CONFIG.pensionTaperThreshold));
+  const aaTaperRate = clamp(num(cfg.pensionTaperRate, DEFAULT_CONFIG.pensionTaperRate), 0, 100) / 100;
+  const aaTaperFloor = clamp(num(cfg.pensionTaperFloor, DEFAULT_CONFIG.pensionTaperFloor), 0, pensionAllowance);
+  // annual allowance at a given adjusted income (earnings stand in for adjusted income in this model)
+  const aaAt = (income) => (aaTaperRate > 0 && income > aaTaperThr)
+    ? Math.max(aaTaperFloor, pensionAllowance - (income - aaTaperThr) * aaTaperRate)
+    : pensionAllowance;
   const cgtEnabled = cfg.cgtEnabled === undefined ? DEFAULT_CONFIG.cgtEnabled : !!cfg.cgtEnabled;
   const cgtAnnualExempt = Math.max(0, num(cfg.cgtAnnualExempt, DEFAULT_CONFIG.cgtAnnualExempt));
   const cgtBasicRate = clamp(num(cfg.cgtBasicRate, DEFAULT_CONFIG.cgtBasicRate), 0, 99) / 100;
@@ -289,7 +301,7 @@ function taxParams(cfgIn) {
   const basicWidth = Math.max(0, basicLimit - pa);                 // basic band measured in taxable income
   const higherTop = Math.max(basicWidth, higherLimit - paAt(higherLimit)); // higher band upper limit in taxable income
   const taperEnd = taperRate > 0 ? thr + pa / taperRate : Infinity;
-  return { __isParams: true, pa, thr, taperRate, basicLimit, higherLimit, basicRate, higherRate, addRate, nicPT, nicUEL, nicMain, nicUpper, erNic, erPass, pclsProp, lsa, isaAllowance, pensionAllowance, pensionNoEarningsLimit, mpaaLimit, cgtEnabled, cgtAnnualExempt, cgtBasicRate, cgtHigherRate, paAt, basicWidth, higherTop, taperEnd };
+  return { __isParams: true, pa, thr, taperRate, basicLimit, higherLimit, basicRate, higherRate, addRate, nicPT, nicUEL, nicMain, nicUpper, erNic, erPass, pclsProp, lsa, isaAllowance, pensionAllowance, pensionNoEarningsLimit, mpaaLimit, aaTaperThr, aaTaperRate, aaTaperFloor, aaAt, cgtEnabled, cgtAnnualExempt, cgtBasicRate, cgtHigherRate, paAt, basicWidth, higherTop, taperEnd };
 }
 
 function incomeTax(gross, cfg) {
@@ -552,7 +564,8 @@ function buildContext(rawPlan) {
   }));
   owners.forEach(o => {
     const pen = acc[o.ids.pen]; const isa = acc[o.ids.isa];
-    if (pen && pen.contrib > P.pensionAllowance) warnings.push(`${o.label}: pension contribution £${Math.round(pen.contrib).toLocaleString()} exceeds the annual allowance £${P.pensionAllowance.toLocaleString()}.`);
+    const ownerAA = P.aaAt(o.salary);
+    if (pen && pen.contrib > ownerAA) warnings.push(`${o.label}: pension contribution £${Math.round(pen.contrib).toLocaleString()} exceeds the annual allowance £${Math.round(ownerAA).toLocaleString()}${ownerAA < P.pensionAllowance ? ` (tapered from £${P.pensionAllowance.toLocaleString()} because earnings exceed £${P.aaTaperThr.toLocaleString()})` : ''}.`);
     if (isa && isa.contrib > P.isaAllowance) warnings.push(`${o.label}: ISA contribution £${Math.round(isa.contrib).toLocaleString()} exceeds the ISA allowance £${P.isaAllowance.toLocaleString()}.`);
     if (o.salary > 0 && pen && pen.contrib > o.salary) warnings.push(`${o.label}: pension contribution exceeds salary.`);
     const gia = acc[o.ids.other];
@@ -1230,7 +1243,9 @@ function carryForwardAtYear(ctx, o, t) {
     const j = t - k;
     if (j < 0) { total += o.cfBroughtForward / 3; continue; }
     const contributed = ((o.age0 + j) < o.retireAge && a) ? contribAtYear(a, j) : 0;
-    total += Math.max(0, P.pensionAllowance - contributed);
+    // a year spent above the taper threshold only ever banked its tapered allowance, so a consistently
+    // high earner must not carry forward the headline figure
+    total += Math.max(0, P.aaAt(relevantEarningsAtYear(ctx, o, j)) - contributed);
   }
   return total;
 }
@@ -1250,7 +1265,8 @@ function wrapperHeadroomAtYear(ctx, ownerKey, category, t) {
   const earnings = relevantEarningsAtYear(ctx, o, t);
   // carry forward is unavailable against the MPAA, and never lifts the relevant-earnings limit
   const mpaa = mpaaAppliesAtYear(P, o, t);
-  const allowance = mpaa ? P.mpaaLimit : P.pensionAllowance + carryForwardAtYear(ctx, o, t);
+  // high earners have a tapered annual allowance; carry forward still stacks on the tapered figure
+  const allowance = mpaa ? P.mpaaLimit : P.aaAt(earnings) + carryForwardAtYear(ctx, o, t);
   // a blank salary while still working means "earnings unknown" — leave the allowance unconstrained
   const cap = (!retired && o.salary <= 0 && earnings <= 0)
     ? allowance
@@ -1289,7 +1305,7 @@ function allocateBudget(ctx, netBudget, isaShare, { isaMin = 0, balance = 'propo
   const penNetUsed = owners.map(() => 0);
   const passFactor = 1 + P.erNic * P.erPass;
   const capOf = (o) => Math.min(
-    mpaaAppliesAtYear(P, o, 0) ? P.mpaaLimit : P.pensionAllowance,
+    mpaaAppliesAtYear(P, o, 0) ? P.mpaaLimit : P.aaAt(o.salary),
     o.salary > 0 ? o.salary * passFactor : P.pensionAllowance
   );
   let penNetRemaining = penNet;
@@ -1549,7 +1565,7 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
       const spare = Math.max(0, liquidToday - emergencyFloor);
       const o = owners[0];
       const isaSelfBal = acc[o.ids.isa] ? acc[o.ids.isa].balance : 0;
-      const aaRoom = Math.max(0, Math.min(P.pensionAllowance, o.salary > 0 ? o.salary : P.pensionAllowance) - alloc.penByOwner[0]);
+      const aaRoom = Math.max(0, Math.min(P.aaAt(o.salary), o.salary > 0 ? o.salary : P.pensionAllowance) - alloc.penByOwner[0]);
       const gross = Math.min(aaRoom, spare / (1 - P.basicRate), isaSelfBal / (1 - P.basicRate));
       if (gross > 250) {
         const net = gross * (1 - P.basicRate);
@@ -2998,7 +3014,7 @@ export default function App() {
                   ['basicTaxRate', 'Basic Rate (%)'], ['higherBandLimit', 'Additional Rate Starts At (£ income)'], ['higherTaxRate', 'Higher Rate (%)'], ['additionalTaxRate', 'Additional Rate (%)'],
                   ['nicPrimaryThreshold', 'NIC Primary Threshold (£)'], ['nicUpperEarningsLimit', 'NIC Upper Earnings Limit (£)'], ['nicMainRate', 'NIC Main Rate (%)'], ['nicUpperRate', 'NIC Upper Rate (%)'],
                   ['employerNicRate', 'Employer NIC Rate (%)'], ['pclsProportion', 'PCLS Tax-Free (%)'], ['pclsMaxCap', 'Lump Sum Allowance (£ LSA)'],
-                  ['isaAnnualAllowance', 'ISA Allowance (£/person/yr)'], ['pensionAnnualAllowance', 'Pension Annual Allowance (£/person/yr)'], ['pensionNoEarningsLimit', 'Pension Limit With No Earnings (£/person/yr)'], ['mpaaLimit', 'Money Purchase Annual Allowance (£/person/yr)'], ['cgtAnnualExempt', 'CGT Annual Exempt Amount (£/person/yr)'], ['cgtBasicRate', 'CGT Rate — Basic Band (%)'], ['cgtHigherRate', 'CGT Rate — Higher/Additional Band (%)']
+                  ['isaAnnualAllowance', 'ISA Allowance (£/person/yr)'], ['pensionAnnualAllowance', 'Pension Annual Allowance (£/person/yr)'], ['pensionNoEarningsLimit', 'Pension Limit With No Earnings (£/person/yr)'], ['mpaaLimit', 'Money Purchase Annual Allowance (£/person/yr)'], ['pensionTaperThreshold', 'Annual Allowance Taper Threshold (£ earnings)'], ['pensionTaperRate', 'Annual Allowance Taper Rate (%)'], ['pensionTaperFloor', 'Tapered Annual Allowance Floor (£)'], ['cgtAnnualExempt', 'CGT Annual Exempt Amount (£/person/yr)'], ['cgtBasicRate', 'CGT Rate — Basic Band (%)'], ['cgtHigherRate', 'CGT Rate — Higher/Additional Band (%)']
                 ].map(([field, label]) => (
                   <div key={field}><span className="text-slate-600 font-sans font-semibold block mb-1">{label}</span><input type="number" min="0" placeholder={String(E.DEFAULT_CONFIG[field])} onFocus={handleFocus} value={plan?.config?.[field] ?? ''} onChange={(e) => updateConfig(field, e.target.value)} className={smallInputCls} /></div>
                 ))}
@@ -3367,7 +3383,7 @@ export default function App() {
               <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
                 <li><strong>Day-one leverage:</strong> £1,000 of take-home becomes about £{Math.round(1000 / (1 - (P.higherRate + P.nicUpper))).toLocaleString()} inside a pension for a higher-rate taxpayer, versus £1,000 in an ISA. Employers sometimes add part of their own {Math.round(P.erNic * 100)}% NIC saving — set the pass-through in Config.</li>
                 <li><strong>Exit tax:</strong> with {Math.round(P.pclsProp * 100)}% tax-free and the rest at the basic rate, the effective exit rate is about {Math.round((1 - P.pclsProp) * P.basicRate * 100)}%, so the pension keeps a large advantage unless withdrawals are pushed into higher rates — which is what Bracket-Smoothed Sizing guards against.</li>
-                <li><strong>Constraints modelled:</strong> annual allowance £{P.pensionAllowance.toLocaleString()}, sacrifice limited to salary. Not modelled: the tapered annual allowance above £260k adjusted income, carry-forward, the National Minimum Wage floor, and the Lifetime ISA (worth considering below age 40).</li>
+                <li><strong>Constraints modelled:</strong> annual allowance £{P.pensionAllowance.toLocaleString()}, tapered to a floor of £{P.aaTaperFloor.toLocaleString()} once earnings pass £{P.aaTaperThr.toLocaleString()}, three-year carry-forward, and sacrifice limited to salary. Not modelled: the National Minimum Wage floor and the Lifetime ISA (worth considering below age 40). The taper is driven by <em>earnings</em> here, whereas HMRC uses adjusted income (which adds employer contributions), so it is approximate for anyone near the threshold.</li>
               </ul>
             </div>
 
