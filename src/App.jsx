@@ -1694,7 +1694,12 @@ function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
   const pool = eligible.length ? eligible : cands.filter(c => c.stats.preNmpaFailRate <= minPre + tol);
   const best = Math.max(...pool.map(c => c.stats.successRate));
   const top = pool.filter(c => c.stats.successRate >= best - tol);
-  top.sort((a, b) => (b.stats.p10Terminal - a.stats.p10Terminal) || (b.stats.medianTerminal - a.stats.medianTerminal));
+  // Break near-ties on the pot left AFTER pension death tax. With no death tax set the net and gross
+  // figures are identical, so this is inert; where one is set it is the only way choices that differ
+  // solely in what they leave behind — allowance harvesting above all — are visible to the ranking.
+  const p10 = (c) => (c.stats.p10TerminalNet ?? c.stats.p10Terminal);
+  const median = (c) => (c.stats.medianTerminalNet ?? c.stats.medianTerminal);
+  top.sort((a, b) => (p10(b) - p10(a)) || (median(b) - median(a)));
   return top[0];
 }
 
@@ -1886,7 +1891,7 @@ function summarizeStrategyChange(res, baselinePlayer, { isCouple = false, meta =
   return lines;
 }
 
-function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, onNavigateDocs }) {
+function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, onApplyStrategyToPlan, onNavigateDocs }) {
   const P = ctx.P;
   const isCouple = ctx.isCouple;
   const [scope, setScope] = useState('contributions');
@@ -1897,6 +1902,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
   const [results, setResults] = useState(null);
   const [progress, setProgress] = useState(null);
   const [isEvaluating, setIsEvaluating] = useState(false);
+  const [confirmApplyId, setConfirmApplyId] = useState(null);
   const cancelRef = useRef(false);
 
   const preview = useMemo(() => {
@@ -2071,7 +2077,16 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
                     )}
                   </div>
                   {res.id !== 'baseline' && (
-                    <button type="button" onClick={() => onApplyStrategyToSandbox(res)} className="w-full py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold transition-colors cursor-pointer">Apply to Sandbox</button>
+                    <div className="space-y-1.5">
+                      <button type="button" onClick={() => onApplyStrategyToSandbox(res)} className="w-full py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold transition-colors cursor-pointer">Apply to Sandbox</button>
+                      {/* overwriting entered inputs is destructive, so it takes a second deliberate click */}
+                      <button type="button"
+                        onClick={() => { if (confirmApplyId === res.id) { onApplyStrategyToPlan(res); setConfirmApplyId(null); } else setConfirmApplyId(res.id); }}
+                        onBlur={() => setConfirmApplyId(null)}
+                        className={`w-full py-1.5 rounded-xl text-xs font-bold transition-colors cursor-pointer border ${confirmApplyId === res.id ? 'bg-amber-100 hover:bg-amber-200 text-amber-900 border-amber-300' : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'}`}>
+                        {confirmApplyId === res.id ? 'Confirm — overwrite Plan Inputs?' : 'Apply to Plan Inputs'}
+                      </button>
+                    </div>
                   )}
                 </div>
               );
@@ -2363,6 +2378,27 @@ export default function App() {
     setSandboxAccounts(fresh);
     setActiveTab('trajectory');
     flash(`"${strategy.name}" applied to Sandbox & Trajectory chart`, 3500);
+  };
+
+  // Writes the strategy straight into the plan rather than the sandbox. Contributions and escalation are
+  // replaced wholesale — the escalation is the normalised rate, not the one originally entered, so copying
+  // only the amounts would leave the plan costing a different total from the strategy that was scored.
+  const handleApplyStrategyToPlan = (strategy) => {
+    if (!strategy?.planState) return;
+    setPlan(prev => ({
+      ...prev,
+      accounts: (prev.accounts || []).map(a => {
+        const next = (strategy.planState.accounts || []).find(x => x.id === a.id);
+        if (!next) return a;
+        const out = { ...a, contrib: E.num(next.contrib, 0), growth: E.num(next.growth, 0) };
+        // a balance only moves when the strategy actually shifts capital (Bed & SIPP)
+        if (E.num(next.balance, 0) !== E.num(a.balance, 0)) out.balance = E.num(next.balance, 0);
+        if (Array.isArray(next.contribByYear)) out.contribByYear = next.contribByYear; else delete out.contribByYear;
+        return out;
+      })
+    }));
+    setActiveTab('inputs');
+    flash(`"${strategy.name}" written into Plan Inputs — save a scenario first if you want the old figures back`, 6000);
   };
 
   // ------------------------------------------------------------ import / export / reset
@@ -3266,7 +3302,7 @@ export default function App() {
               </div>
             )}
 
-            <WrapperStrategyTournament plan={plan} ctx={ctx} seed={mcSeed} onApplyStrategyToSandbox={handleApplyStrategyToSandbox} onNavigateDocs={() => goToDoc('doc-tournament')} />
+            <WrapperStrategyTournament plan={plan} ctx={ctx} seed={mcSeed} onApplyStrategyToSandbox={handleApplyStrategyToSandbox} onApplyStrategyToPlan={handleApplyStrategyToPlan} onNavigateDocs={() => goToDoc('doc-tournament')} />
           </div>
         )}
 
