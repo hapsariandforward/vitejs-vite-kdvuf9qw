@@ -1911,6 +1911,10 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
   }, [plan, emergencyFloor, scope, budgetOverride, balance]);
   const meta = preview?.meta;
   const salaryMissing = ctx.owners.filter(o => o.salary <= 0).map(o => o.label);
+  // balancing steers new money to the smaller pension, which throws away relief when that owner sits in
+  // a lower band — measured at ~£45k of relief lost against ~£26k of retirement tax saved
+  const reliefBandsDiffer = isCouple && ctx.owners.length > 1
+    && (ctx.owners[0].salary > P.basicLimit) !== (ctx.owners[1].salary > P.basicLimit);
 
   const handleRun = async () => {
     if (!preview) return;
@@ -2009,6 +2013,11 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
             <option value="proportional">Keep current Myself/Partner ratio</option>
             <option value="balanced">Balance pensions between partners</option>
           </select>
+          {isCouple && (
+            reliefBandsDiffer
+              ? <span className="text-[10px] text-amber-700 mt-1 block">One of you gets relief at the higher rate and the other at the basic rate. Balancing steers money to the lower rate, and the relief given up each year usually outweighs the retirement tax it saves — expect it to score worse here.</span>
+              : <span className="text-[10px] text-slate-500 mt-1 block">Balancing puts both personal allowances to work in retirement. It pays when you both get relief at the same rate; it costs you when one of you is a higher-rate taxpayer and the other is not.</span>
+          )}
         </div>
       </div>
 
