@@ -73,7 +73,7 @@ const DEFAULT_RISK_PROFILES = {
 const OWNERS = ['self', 'part'];
 const OWNER_LABEL = { self: 'Myself', part: 'Partner' };
 const CATEGORIES = ['pen', 'isa', 'other', 'cash'];
-const CATEGORY_LABEL = { pen: 'Pensions', isa: 'S&S ISAs', other: 'Other Investments', cash: 'Cash Savings' };
+const CATEGORY_LABEL = { pen: 'Pensions', isa: 'S&S ISAs', other: 'Other Investments (e.g. GIA)', cash: 'Cash Savings' };
 const accountId = (cat, owner) => `${cat}_${owner}`;
 
 // Income stream types. `taxable` drives income tax; `relevantEarnings` drives the pension annual-allowance
@@ -113,6 +113,11 @@ const DEFAULT_CONFIG = {
   isaAnnualAllowance: 20000,
   pensionAnnualAllowance: 60000,
   pensionNoEarningsLimit: 3600,      // gross pension contribution allowed with no relevant UK earnings
+  // Capital gains tax on the GIA (realisation-based; gains are wiped on death so nothing is charged at the terminal age)
+  cgtEnabled: true,
+  cgtAnnualExempt: 3000,
+  cgtBasicRate: 18,
+  cgtHigherRate: 24,
   // Behavioural / modelling assumptions
   cashBufferMonths: 6,               // months of spending kept in cash before surplus income is swept to ISA
   harvestPersonalAllowance: true,    // in retirement draw pension to fill unused 0% allowance and move it to ISA
@@ -124,11 +129,11 @@ const DEFAULT_CONFIG = {
 const defaultAccounts = () => [
   { id: 'pen_self', owner: 'Myself', category: 'Pensions', balance: '', contrib: '', growth: '', risk: 'High Risk' },
   { id: 'isa_self', owner: 'Myself', category: 'S&S ISAs', balance: '', contrib: '', growth: '', risk: 'High Risk' },
-  { id: 'other_self', owner: 'Myself', category: 'Other Investments', balance: '', contrib: '', growth: '', risk: 'Low Risk' },
+  { id: 'other_self', owner: 'Myself', category: 'Other Investments (e.g. GIA)', balance: '', contrib: '', growth: '', risk: 'Low Risk', unrealisedGain: '' },
   { id: 'cash_self', owner: 'Myself', category: 'Cash Savings', balance: '', contrib: '', growth: '', risk: 'Low Risk' },
   { id: 'pen_part', owner: 'Partner', category: 'Pensions', balance: '', contrib: '', growth: '', risk: 'High Risk' },
   { id: 'isa_part', owner: 'Partner', category: 'S&S ISAs', balance: '', contrib: '', growth: '', risk: 'High Risk' },
-  { id: 'other_part', owner: 'Partner', category: 'Other Investments', balance: '', contrib: '', growth: '', risk: 'Low Risk' },
+  { id: 'other_part', owner: 'Partner', category: 'Other Investments (e.g. GIA)', balance: '', contrib: '', growth: '', risk: 'Low Risk', unrealisedGain: '' },
   { id: 'cash_part', owner: 'Partner', category: 'Cash Savings', balance: '', contrib: '', growth: '', risk: 'Low Risk' }
 ];
 
@@ -139,6 +144,7 @@ const BLANK_PLAN = Object.freeze({
     currentAgeSelf: '', currentAgePart: '',
     retireAgeSelf: '', retireAgePart: '',
     salarySelf: '', salaryPart: '',
+    cgtGainsUsedSelf: '', cgtGainsUsedPart: '',
     statePensionAge: 68, privatePensionAge: 58,
     statePensionSelf: '', statePensionPart: '',
     terminalAge: 100
@@ -230,7 +236,8 @@ function normalizePlan(raw) {
     const found = rawAccounts.find(a => a.id === def.id);
     if (!found) return def;
     const merged = { ...def, ...found, id: def.id, owner: def.owner, category: def.category };
-    ['balance', 'contrib', 'growth'].forEach(k => { const v = merged[k]; if (v === null || v === undefined || typeof v === 'object' || typeof v === 'boolean') merged[k] = ''; });
+    ['balance', 'contrib', 'growth', 'unrealisedGain'].forEach(k => { const v = merged[k]; if (v === null || v === undefined || typeof v === 'object' || typeof v === 'boolean') merged[k] = ''; });
+    if (!def.id.startsWith('other_')) delete merged.unrealisedGain; // only the GIA carries a cost basis
     if (typeof merged.risk !== 'string') merged.risk = def.risk;
     if (Array.isArray(found.contribByYear)) merged.contribByYear = found.contribByYear.map(v => num(v, 0));
     else delete merged.contribByYear;
@@ -268,12 +275,16 @@ function taxParams(cfgIn) {
   const isaAllowance = Math.max(0, num(cfg.isaAnnualAllowance, DEFAULT_CONFIG.isaAnnualAllowance));
   const pensionAllowance = Math.max(0, num(cfg.pensionAnnualAllowance, DEFAULT_CONFIG.pensionAnnualAllowance));
   const pensionNoEarningsLimit = clamp(num(cfg.pensionNoEarningsLimit, DEFAULT_CONFIG.pensionNoEarningsLimit), 0, pensionAllowance);
+  const cgtEnabled = cfg.cgtEnabled === undefined ? DEFAULT_CONFIG.cgtEnabled : !!cfg.cgtEnabled;
+  const cgtAnnualExempt = Math.max(0, num(cfg.cgtAnnualExempt, DEFAULT_CONFIG.cgtAnnualExempt));
+  const cgtBasicRate = clamp(num(cfg.cgtBasicRate, DEFAULT_CONFIG.cgtBasicRate), 0, 99) / 100;
+  const cgtHigherRate = clamp(num(cfg.cgtHigherRate, DEFAULT_CONFIG.cgtHigherRate), 0, 99) / 100;
   // allowance remaining at a given income
   const paAt = (income) => taperRate > 0 && income > thr ? Math.max(0, pa - (income - thr) * taperRate) : pa;
   const basicWidth = Math.max(0, basicLimit - pa);                 // basic band measured in taxable income
   const higherTop = Math.max(basicWidth, higherLimit - paAt(higherLimit)); // higher band upper limit in taxable income
   const taperEnd = taperRate > 0 ? thr + pa / taperRate : Infinity;
-  return { __isParams: true, pa, thr, taperRate, basicLimit, higherLimit, basicRate, higherRate, addRate, nicPT, nicUEL, nicMain, nicUpper, erNic, erPass, pclsProp, lsa, isaAllowance, pensionAllowance, pensionNoEarningsLimit, paAt, basicWidth, higherTop, taperEnd };
+  return { __isParams: true, pa, thr, taperRate, basicLimit, higherLimit, basicRate, higherRate, addRate, nicPT, nicUEL, nicMain, nicUpper, erNic, erPass, pclsProp, lsa, isaAllowance, pensionAllowance, pensionNoEarningsLimit, cgtEnabled, cgtAnnualExempt, cgtBasicRate, cgtHigherRate, paAt, basicWidth, higherTop, taperEnd };
 }
 
 function incomeTax(gross, cfg) {
@@ -505,6 +516,8 @@ function buildContext(rawPlan) {
     return {
       id: a.id, cat, owner, ownerLabel: a.owner,
       balance: Math.max(0, num(a.balance, 0)),
+      // embedded gain in today's GIA balance; blank means the balance is treated as all cost
+      unrealisedGain: clamp(num(a.unrealisedGain, 0), 0, Math.max(0, num(a.balance, 0))),
       contrib: Math.max(0, num(a.contrib, 0)),
       growth: clamp(num(a.growth, 0), -100, 100) / 100,
       contribByYear: Array.isArray(a.contribByYear) ? a.contribByYear.map(v => Math.max(0, num(v, 0))) : null,
@@ -524,6 +537,7 @@ function buildContext(rawPlan) {
     age0: o === 'self' ? ageSelf0 : agePart0,
     retireAge: o === 'self' ? retireSelf : retirePart,
     salary: Math.max(0, num(o === 'self' ? d.salarySelf : d.salaryPart, 0)),
+    cgtGainsUsed: Math.max(0, num(o === 'self' ? d.cgtGainsUsedSelf : d.cgtGainsUsedPart, 0)),
     statePension: Math.max(0, num(o === 'self' ? d.statePensionSelf : d.statePensionPart, 0)),
     ids: { pen: accountId('pen', o), isa: accountId('isa', o), other: accountId('other', o), cash: accountId('cash', o) }
   }));
@@ -672,7 +686,23 @@ function spendTargetAtAge(ctx, ageSelf) {
 const freshState = (ctx) => {
   const pots = {};
   ctx.accounts.forEach(a => { pots[a.id] = a.balance; });
-  return { pots, cumPcls: { self: 0, part: 0 }, lumpSumTaken: { self: false, part: false } };
+  // GIA cost basis is path-dependent (it falls as units are sold), so it lives in per-trial state
+  const giaBasis = { self: 0, part: 0 };
+  ctx.accounts.forEach(a => { if (a.cat === 'other') giaBasis[a.owner] = Math.max(0, a.balance - a.unrealisedGain); });
+  // gains realised while settling a CGT bill are taxed the following year, so they carry forward
+  return { pots, giaBasis, cgtCarry: { self: 0, part: 0 }, cumPcls: { self: 0, part: 0 }, lumpSumTaken: { self: false, part: false } };
+};
+
+// Money paid into the GIA is added at cost, so it creates no gain.
+const giaAddBasis = (state, ownerKey, amount) => { if (amount > 0) state.giaBasis[ownerKey] += amount; };
+
+// A disposal realises gain pro-rata against the whole holding and reduces basis by the cost portion.
+const giaDispose = (state, balanceBefore, ownerKey, amount) => {
+  if (amount <= 0 || balanceBefore <= 0) return 0;
+  const basis = state.giaBasis[ownerKey] || 0;
+  const gain = amount * (Math.max(0, balanceBefore - basis) / balanceBefore);
+  state.giaBasis[ownerKey] = Math.max(0, basis - (amount - gain));
+  return gain;
 };
 
 /*
@@ -696,29 +726,54 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
   const anyAccess = owners.some(o => access[o.key]);
   const anyRetired = owners.some(o => !working[o.key]);
 
+  // Gains realised during this tax year, per owner (GIA disposals only), opening with anything
+  // carried over from settling last year's bill. Charged at year end.
+  const realisedGains = { self: state.cgtCarry.self, part: state.cgtCarry.part };
+  state.cgtCarry = { self: 0, part: 0 };
+  const cgtOn = P.cgtEnabled;
+  const ownerOfId = (id) => (String(id).endsWith('_part') ? 'part' : 'self');
+  // Sell `amount` from an owner's GIA, booking the pro-rata gain. Returns what was actually sold.
+  const sellGia = (id, amount) => {
+    const before = pots[id] || 0;
+    const sold = Math.min(before, Math.max(0, amount));
+    if (sold <= 0) return 0;
+    pots[id] = before - sold;
+    if (cgtOn) realisedGains[ownerOfId(id)] += giaDispose(state, before, ownerOfId(id), sold);
+    return sold;
+  };
+
   // 0. one-off deposit source-pot deductions (full D, this year only; internal-source deposits)
   let oneOffDeductionShortfall = 0;
   const deductions = ctx.oneOffDeductions.get(year);
   if (deductions) deductions.forEach(x => {
     if (pots[x.id] === undefined) return;
-    const avail = pots[x.id];
-    const take = Math.min(avail, x.amount);
-    pots[x.id] = avail - take;
+    let take;
+    if (x.id.startsWith('other_')) {
+      take = sellGia(x.id, x.amount); // funding a deposit out of the GIA is a disposal
+    } else {
+      take = Math.min(pots[x.id], x.amount);
+      pots[x.id] -= take;
+    }
     oneOffDeductionShortfall += Math.max(0, x.amount - take);
   });
 
   // 1. one-off deposits (dated: not pro-rated) — includes staged deposits' year-0 immediate tranche + parked surplus
   const deposits = ctx.oneOffContribs.get(year);
-  if (deposits) deposits.forEach(x => { if (pots[x.id] !== undefined) pots[x.id] += x.amount; });
+  if (deposits) deposits.forEach(x => {
+    if (pots[x.id] === undefined) return;
+    pots[x.id] += x.amount;
+    if (cgtOn && x.id.startsWith('other_')) giaAddBasis(state, ownerOfId(x.id), x.amount);
+  });
 
   // 1.5 staged multi-year drip transfers (t>=1): drain GIA into the (possibly redirected) staged target,
   // capped at whatever remains in GIA — this naturally handles a market-crash-depleted GIA.
+  // Moving out of the GIA is a real disposal (Bed & ISA), so it realises gain pro-rata.
   const drips = ctx.stagedTransfers.get(year);
   if (drips) drips.forEach(x => {
-    const avail = pots[x.fromId] || 0;
-    const move = Math.min(avail, x.amount);
-    pots[x.fromId] = avail - move;
+    const move = sellGia(x.fromId, x.amount);
+    if (move <= 0) return;
     pots[x.toId] = (pots[x.toId] || 0) + move;
+    if (cgtOn && x.toId.startsWith('other_')) giaAddBasis(state, ownerOfId(x.toId), move);
   });
 
   // 2. regular contributions while the owner works (year 0 pro-rated)
@@ -729,6 +784,7 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
     const amt = contribAtYear(a, t);
     if (amt > 0) {
       pots[a.id] += amt * frac;
+      if (cgtOn && a.cat === 'other') giaAddBasis(state, a.owner, amt * frac);
       contribThisYear[a.owner] += amt * frac;
       if (a.cat === 'isa') isaContribThisYear[a.owner] += amt * frac;
     }
@@ -805,6 +861,8 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
   };
   const drawPot = (id, need) => {
     if (need <= 0) return 0;
+    // GIA draws are disposals, so they book a gain and reduce the cost basis
+    if (id.startsWith('other_')) return sellGia(id, need);
     const pull = Math.min(pots[id] || 0, need);
     if (pull <= 0) return 0;
     pots[id] -= pull;
@@ -889,7 +947,34 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
     });
   }
 
-  const unmetDemand = owners.reduce((s, o) => s + Math.max(0, demand[o.key]), 0) + unmetCost + oneOffDeductionShortfall;
+  // 7c. capital gains tax on the year's GIA disposals. Gains stack on top of income for the band split.
+  // The bill is settled from cash -> GIA -> ISA -> accessible pension, mirroring one-off costs. A sale made
+  // to pay the bill books its own gain, which falls into next year's tally (CGT is due the following January).
+  let cgtPaid = 0;
+  let unmetCgt = 0;
+  if (cgtOn) {
+    owners.forEach(o => {
+      const exempt = Math.max(0, P.cgtAnnualExempt - (t === 0 ? o.cgtGainsUsed : 0));
+      const taxableGain = Math.max(0, realisedGains[o.key] - exempt);
+      if (taxableGain <= 0) return;
+      const basicRoom = Math.max(0, P.paAt(taxable[o.key]) + P.basicWidth - taxable[o.key]);
+      const atBasic = Math.min(taxableGain, basicRoom);
+      const bill = atBasic * P.cgtBasicRate + (taxableGain - atBasic) * P.cgtHigherRate;
+      if (bill <= 0) return;
+      cgtPaid += bill;
+      const gainsBeforeSettling = realisedGains[o.key];
+      let rem = bill;
+      for (const cat of ['cash', 'other', 'isa']) { if (rem > 0) rem -= drawPot(o.ids[cat], rem); }
+      for (const x of owners) { if (rem > 0) rem -= drawPot(x.ids.cash, rem); }
+      if (rem > 0) rem -= drawPension(o.key, rem);
+      unmetCgt += Math.max(0, rem);
+      // selling to pay the bill realises further gain — defer it to next year rather than recursing
+      state.cgtCarry[o.key] += realisedGains[o.key] - gainsBeforeSettling;
+      realisedGains[o.key] = gainsBeforeSettling;
+    });
+  }
+
+  const unmetDemand = owners.reduce((s, o) => s + Math.max(0, demand[o.key]), 0) + unmetCost + oneOffDeductionShortfall + unmetCgt;
   const lockedPensionWealth = owners.reduce((s, o) => s + (access[o.key] ? 0 : (pots[o.ids.pen] || 0)), 0);
   const preNmpaInsolvent = unmetDemand > 1 && (!anyAccess || lockedPensionWealth > 0);
 
@@ -926,7 +1011,8 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
     pots: { ...pots },
     pensions: byCat.pen, isas: byCat.isa, other: byCat.other, cash: byCat.cash,
     preNmpaLiquid: byCat.isa + byCat.other + byCat.cash,
-    drawdownPensions, harvested, taxPaid,
+    drawdownPensions, harvested, taxPaid, cgtPaid,
+    realisedGains: realisedGains.self + realisedGains.part,
     preNmpaInsolvent, unmetDemand
   };
 }
@@ -965,7 +1051,7 @@ function evaluateRows(ctx, rows) {
     terminalPension: Math.max(0, terminal.pensions),
     terminalPotNet: Math.max(0, terminal.totalCombined - terminal.pensions * ctx.pensionDeathTaxRate),
     minPot: Math.min(...rows.map(r => r.totalCombined)),
-    lifetimeTax: rows.reduce((s, r) => s + r.taxPaid, 0)
+    lifetimeTax: rows.reduce((s, r) => s + r.taxPaid + (r.cgtPaid || 0), 0)
   };
 }
 
@@ -976,7 +1062,7 @@ function runTrial(ctx, zs, spendOverride = null) {
   let terminalRow = null;
   for (let t = 0; t <= ctx.totalYears; t++) {
     const row = stepYear(ctx, state, t, { z: zs[t] }, spendOverride);
-    lifetimeTax += row.taxPaid;
+    lifetimeTax += row.taxPaid + (row.cgtPaid || 0);
     if (row.totalCombined < minPot) minPot = row.totalCombined;
     if (!failed && (row.unmetDemand > FAIL_TOLERANCE || row.preNmpaInsolvent)) {
       failed = true; failAge = row.ageSelf; preNmpaFailed = row.preNmpaInsolvent || !ctx.owners.some(o => (o.key === 'self' ? row.ageSelf : row.agePart) >= ctx.nmpa);
@@ -1931,8 +2017,8 @@ export default function App() {
   };
   const handleExportCSV = () => {
     if (!timelineData.length) return;
-    const headers = ['Year', 'Age (Myself)', 'Age (Partner)', 'Working (Myself)', 'Working (Partner)', 'Target Spend (£)', 'Net Guaranteed Income (£)', 'Working Partner Take-home (£)', 'State Pension (Myself £)', 'State Pension (Partner £)', 'Net Drawdown Demand (£)', 'Pension Withdrawals Gross (£)', 'PA Harvested (£)', 'Income Tax (£)', 'Pensions (£)', 'ISAs (£)', 'Other Investments (£)', 'Cash Savings (£)', 'Total Combined Pot (£)', 'Pre-access Liquid (£)', 'Unmet (£)', 'Status'];
-    const rows = timelineData.map(r => [r.year, r.ageSelf, isCouple ? r.agePart : 'N/A', r.workingSelf ? 'Yes' : 'No', isCouple ? (r.workingPart ? 'Yes' : 'No') : 'N/A', r.targetSpend.toFixed(0), r.netGuaranteed.toFixed(0), r.workingTakeHome.toFixed(0), r.spSelf.toFixed(0), isCouple ? r.spPart.toFixed(0) : '0', r.netDrawdown.toFixed(0), r.drawdownPensions.toFixed(0), r.harvested.toFixed(0), r.taxPaid.toFixed(0), r.pensions.toFixed(0), r.isas.toFixed(0), r.other.toFixed(0), r.cash.toFixed(0), r.totalCombined.toFixed(0), r.preNmpaLiquid.toFixed(0), r.unmetDemand.toFixed(0), r.preNmpaInsolvent ? 'Pre-access gap' : r.unmetDemand > E.FAIL_TOLERANCE ? 'Shortfall' : 'Solvent']);
+    const headers = ['Year', 'Age (Myself)', 'Age (Partner)', 'Working (Myself)', 'Working (Partner)', 'Target Spend (£)', 'Net Guaranteed Income (£)', 'Working Partner Take-home (£)', 'State Pension (Myself £)', 'State Pension (Partner £)', 'Net Drawdown Demand (£)', 'Pension Withdrawals Gross (£)', 'PA Harvested (£)', 'Income Tax (£)', 'CGT (£)', 'Realised Gains (£)', 'Pensions (£)', 'ISAs (£)', 'Other Investments (£)', 'Cash Savings (£)', 'Total Combined Pot (£)', 'Pre-access Liquid (£)', 'Unmet (£)', 'Status'];
+    const rows = timelineData.map(r => [r.year, r.ageSelf, isCouple ? r.agePart : 'N/A', r.workingSelf ? 'Yes' : 'No', isCouple ? (r.workingPart ? 'Yes' : 'No') : 'N/A', r.targetSpend.toFixed(0), r.netGuaranteed.toFixed(0), r.workingTakeHome.toFixed(0), r.spSelf.toFixed(0), isCouple ? r.spPart.toFixed(0) : '0', r.netDrawdown.toFixed(0), r.drawdownPensions.toFixed(0), r.harvested.toFixed(0), r.taxPaid.toFixed(0), (r.cgtPaid || 0).toFixed(0), (r.realisedGains || 0).toFixed(0), r.pensions.toFixed(0), r.isas.toFixed(0), r.other.toFixed(0), r.cash.toFixed(0), r.totalCombined.toFixed(0), r.preNmpaLiquid.toFixed(0), r.unmetDemand.toFixed(0), r.preNmpaInsolvent ? 'Pre-access gap' : r.unmetDemand > E.FAIL_TOLERANCE ? 'Shortfall' : 'Solvent']);
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
     const link = document.createElement('a'); link.setAttribute('href', encodeURI(csvContent)); link.setAttribute('download', `retirement_audit_${new Date().toISOString().slice(0, 10)}.csv`);
     document.body.appendChild(link); link.click(); link.remove();
@@ -2081,6 +2167,8 @@ export default function App() {
                 {isCouple && <div><label className="text-slate-600 font-semibold block mb-1">Retirement Age (Partner)</label><input type="number" min="0" max="120" placeholder="e.g. 60" onFocus={handleFocus} value={plan?.demographics?.retireAgePart ?? ''} onChange={(e) => updateDemographics('retireAgePart', e.target.value)} className={inputCls} /></div>}
                 <div><label className="text-slate-600 font-semibold block mb-1">Gross Salary (Myself £/yr)</label><input type="number" min="0" step="1000" placeholder="for tax relief & bridging" onFocus={handleFocus} value={plan?.demographics?.salarySelf ?? ''} onChange={(e) => updateDemographics('salarySelf', e.target.value)} className={inputCls} /></div>
                 {isCouple && <div><label className="text-slate-600 font-semibold block mb-1">Gross Salary (Partner £/yr)</label><input type="number" min="0" step="1000" placeholder="for tax relief & bridging" onFocus={handleFocus} value={plan?.demographics?.salaryPart ?? ''} onChange={(e) => updateDemographics('salaryPart', e.target.value)} className={inputCls} /></div>}
+                {P.cgtEnabled && <div><label className="text-slate-600 font-semibold block mb-1">Capital gains already used (Myself £)</label><input type="number" min="0" step="500" placeholder="blank = full allowance" onFocus={handleFocus} value={plan?.demographics?.cgtGainsUsedSelf ?? ''} onChange={(e) => updateDemographics('cgtGainsUsedSelf', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Gains already realised in the current tax year — reduces this year's {formatGBP(P.cgtAnnualExempt)} exemption only.</span></div>}
+                {P.cgtEnabled && isCouple && <div><label className="text-slate-600 font-semibold block mb-1">Capital gains already used (Partner £)</label><input type="number" min="0" step="500" placeholder="blank = full allowance" onFocus={handleFocus} value={plan?.demographics?.cgtGainsUsedPart ?? ''} onChange={(e) => updateDemographics('cgtGainsUsedPart', e.target.value)} className={inputCls} /></div>}
                 <div><label className="text-slate-600 font-semibold block mb-1">Expected State Pension (Myself £/yr)</label><input type="number" min="0" step="250" placeholder="e.g. 11500" onFocus={handleFocus} value={plan?.demographics?.statePensionSelf ?? ''} onChange={(e) => updateDemographics('statePensionSelf', e.target.value)} className={inputCls} /></div>
                 {isCouple && <div><label className="text-slate-600 font-semibold block mb-1">Expected State Pension (Partner £/yr)</label><input type="number" min="0" step="250" placeholder="e.g. 11500" onFocus={handleFocus} value={plan?.demographics?.statePensionPart ?? ''} onChange={(e) => updateDemographics('statePensionPart', e.target.value)} className={inputCls} /></div>}
                 <div className="sm:col-span-2">
@@ -2120,7 +2208,7 @@ export default function App() {
               <table className="w-full text-left text-xs border-collapse">
                 <thead>
                   <tr className="border-b border-slate-200 text-slate-500 font-semibold">
-                    <th className="pb-2">Account Wrapper</th>{isCouple && <th className="pb-2">Owner</th>}<th className="pb-2">Balance Today (£)</th><th className="pb-2">Annual Contribution (£)</th><th className="pb-2">Contrib Growth (%/yr)</th><th className="pb-2">Asset Allocation (Risk Tier)</th>
+                    <th className="pb-2">Account Wrapper</th>{isCouple && <th className="pb-2">Owner</th>}<th className="pb-2">Balance Today (£)</th>{P.cgtEnabled && <th className="pb-2" title="Embedded gain inside today's GIA balance, used as the CGT cost basis">of which Unrealised Gain (£)</th>}<th className="pb-2">Annual Contribution (£)</th><th className="pb-2">Contrib Growth (%/yr)</th><th className="pb-2">Asset Allocation (Risk Tier)</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 font-mono">
@@ -2131,6 +2219,9 @@ export default function App() {
                         <td className="py-2.5 font-sans font-bold text-slate-800">{acc.category}{Array.isArray(acc.contribByYear) && <span className="ml-2 px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[10px] font-normal">phased schedule</span>}</td>
                         {isCouple && <td className="py-2.5 font-sans text-slate-500">{acc.owner}</td>}
                         <td className="py-2.5"><input type="number" min="0" step="500" placeholder="0" onFocus={handleFocus} value={acc.balance} onChange={(e) => updateAccountField(acc.id, 'balance', e.target.value)} className="w-32 p-1.5 bg-slate-50 border border-slate-300 rounded font-bold text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" /></td>
+                        {P.cgtEnabled && <td className="py-2.5">{acc.id.startsWith('other_')
+                          ? <input type="number" min="0" step="500" placeholder="0" onFocus={handleFocus} value={acc.unrealisedGain ?? ''} onChange={(e) => updateAccountField(acc.id, 'unrealisedGain', e.target.value)} title="Blank means the balance is treated as all cost, so only future growth is taxed" className="w-32 p-1.5 bg-slate-50 border border-slate-300 rounded text-slate-800 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" />
+                          : <span className="text-slate-300">&mdash;</span>}</td>}
                         <td className="py-2.5"><input type="number" min="0" step="250" placeholder="0" onFocus={handleFocus} value={acc.contrib} onChange={(e) => { updateAccountField(acc.id, 'contrib', e.target.value); if (acc.contribByYear) setPlan(prev => ({ ...prev, accounts: prev.accounts.map(a => a.id === acc.id ? { ...a, contribByYear: undefined } : a) })); }} className={`w-28 p-1.5 bg-slate-50 border rounded text-slate-800 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none ${over ? 'border-rose-400 text-rose-700' : 'border-slate-300'}`} title={over ? 'Exceeds the annual allowance set in Config' : ''} /></td>
                         <td className="py-2.5"><input type="number" step="0.5" placeholder="0" onFocus={handleFocus} value={acc.growth} onChange={(e) => updateAccountField(acc.id, 'growth', e.target.value)} className="w-20 p-1.5 bg-slate-50 border border-slate-300 rounded text-slate-800 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" /></td>
                         <td className="py-2.5">
@@ -2334,6 +2425,15 @@ export default function App() {
                   </label>
                   <span className="text-[10px] text-slate-400 mt-1 block">Applies to the two bracket-fill policies once retired and past the access age.</span>
                 </div>
+                <div>
+                  <label className="text-slate-600 font-semibold block mb-1">Capital gains tax on the GIA</label>
+                  <label className="flex items-center gap-2 p-2 bg-slate-50 border border-slate-300 rounded-lg cursor-pointer">
+                    <input type="checkbox" checked={!!plan?.config?.cgtEnabled} onChange={(e) => updateConfig('cgtEnabled', e.target.checked)} className="accent-blue-600" />
+                    <span className="text-slate-700 font-semibold">Tax gains realised when Other Investments are sold, using the cost basis of each holding.</span>
+                  </label>
+                  <span className="text-[10px] text-slate-400 mt-1 block">Off treats the GIA as tax-free. Gains are wiped on death, so nothing is charged at the terminal age.</span>
+                  <button type="button" onClick={() => goToDoc('doc-cgt')} className="text-[11px] text-blue-600 hover:text-blue-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer mt-1"><HelpCircle className="w-3.5 h-3.5" /> How capital gains are tracked &amp; taxed &rarr;</button>
+                </div>
               </div>
             </div>
 
@@ -2387,7 +2487,7 @@ export default function App() {
                   ['basicTaxRate', 'Basic Rate (%)'], ['higherBandLimit', 'Additional Rate Starts At (£ income)'], ['higherTaxRate', 'Higher Rate (%)'], ['additionalTaxRate', 'Additional Rate (%)'],
                   ['nicPrimaryThreshold', 'NIC Primary Threshold (£)'], ['nicUpperEarningsLimit', 'NIC Upper Earnings Limit (£)'], ['nicMainRate', 'NIC Main Rate (%)'], ['nicUpperRate', 'NIC Upper Rate (%)'],
                   ['employerNicRate', 'Employer NIC Rate (%)'], ['employerNicPassThrough', 'Employer NIC Passed to Pension (%)'], ['pclsProportion', 'PCLS Tax-Free (%)'], ['pclsMaxCap', 'Lump Sum Allowance (£ LSA)'],
-                  ['isaAnnualAllowance', 'ISA Allowance (£/person/yr)'], ['pensionAnnualAllowance', 'Pension Annual Allowance (£/person/yr)'], ['pensionNoEarningsLimit', 'Pension Limit With No Earnings (£/person/yr)']
+                  ['isaAnnualAllowance', 'ISA Allowance (£/person/yr)'], ['pensionAnnualAllowance', 'Pension Annual Allowance (£/person/yr)'], ['pensionNoEarningsLimit', 'Pension Limit With No Earnings (£/person/yr)'], ['cgtAnnualExempt', 'CGT Annual Exempt Amount (£/person/yr)'], ['cgtBasicRate', 'CGT Rate — Basic Band (%)'], ['cgtHigherRate', 'CGT Rate — Higher/Additional Band (%)']
                 ].map(([field, label]) => (
                   <div key={field}><span className="text-slate-600 font-sans font-semibold block mb-1">{label}</span><input type="number" min="0" placeholder={String(E.DEFAULT_CONFIG[field])} onFocus={handleFocus} value={plan?.config?.[field] ?? ''} onChange={(e) => updateConfig(field, e.target.value)} className={smallInputCls} /></div>
                 ))}
@@ -2405,7 +2505,7 @@ export default function App() {
               <p className="leading-relaxed"><strong>What it does:</strong> Models compound wealth paths and tax-wrapper decumulation using steady real rates of return (Expected baseline, Lucky 90th percentile, Unlucky 10th percentile). Use the Sandbox below to test contributions and salary sacrifice ratios.</p>
               <p className="text-slate-500 text-[11px] leading-relaxed"><strong>Why these figures differ from Monte Carlo:</strong> this trajectory assumes smooth, constant returns without volatility or sequence-of-returns shocks. The Monte Carlo median is centred on the same expected rate, so the gap between the two is the cost of volatility.</p>
               <p className={`text-[11px] font-semibold ${deterministicVerdict.survived ? 'text-emerald-700' : 'text-rose-700'}`}>
-                {deterministicVerdict.survived ? `Expected path survives to ${terminalAge}` : `Expected path fails at age ${deterministicVerdict.failAge} (${deterministicVerdict.failReason === 'pre-access' ? 'pre-access bridge exhausted' : deterministicVerdict.failReason === 'floor' ? 'below the bequest floor' : 'spending shortfall'})`} — lifetime income tax {formatGBP(deterministicVerdict.lifetimeTax)}.
+                {deterministicVerdict.survived ? `Expected path survives to ${terminalAge}` : `Expected path fails at age ${deterministicVerdict.failAge} (${deterministicVerdict.failReason === 'pre-access' ? 'pre-access bridge exhausted' : deterministicVerdict.failReason === 'floor' ? 'below the bequest floor' : 'spending shortfall'})`} — lifetime tax {formatGBP(deterministicVerdict.lifetimeTax)}{P.cgtEnabled ? ' (income tax + CGT)' : ''}.
               </p>
             </div>
 
@@ -2691,7 +2791,7 @@ export default function App() {
             </div>
             <div className="overflow-x-auto border border-slate-200 rounded-xl">
               <table className="w-full text-left text-xs border-collapse">
-                <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans"><tr><th className="p-2.5">Year</th><th className="p-2.5">Age (M)</th>{isCouple && <th className="p-2.5">Age (P)</th>}<th className="p-2.5">Spend Target</th><th className="p-2.5">Guaranteed + Take-home (net)</th><th className="p-2.5">Net Drawdown</th><th className="p-2.5">Pension Draw (gross)</th><th className="p-2.5">Tax</th><th className="p-2.5">Pensions</th><th className="p-2.5">ISAs</th><th className="p-2.5">Other Inv</th><th className="p-2.5">Cash</th><th className="p-2.5">Total Combined</th><th className="p-2.5">Pre-access Liquid</th><th className="p-2.5 text-right">Status</th></tr></thead>
+                <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans"><tr><th className="p-2.5">Year</th><th className="p-2.5">Age (M)</th>{isCouple && <th className="p-2.5">Age (P)</th>}<th className="p-2.5">Spend Target</th><th className="p-2.5">Guaranteed + Take-home (net)</th><th className="p-2.5">Net Drawdown</th><th className="p-2.5">Pension Draw (gross)</th><th className="p-2.5">Tax</th>{P.cgtEnabled && <th className="p-2.5">CGT</th>}<th className="p-2.5">Pensions</th><th className="p-2.5">ISAs</th><th className="p-2.5">Other Inv</th><th className="p-2.5">Cash</th><th className="p-2.5">Total Combined</th><th className="p-2.5">Pre-access Liquid</th><th className="p-2.5 text-right">Status</th></tr></thead>
                 <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
                   {timelineData.map(r => (
                     <tr key={r.year} className="hover:bg-slate-50/80 transition-colors">
@@ -2701,6 +2801,7 @@ export default function App() {
                       <td className="p-2 text-rose-600 font-medium">{formatGBP(r.netDrawdown)}</td>
                       <td className="p-2 text-sky-700">{formatGBP(r.drawdownPensions)}{r.harvested > 0 && <span className="text-[9px] text-slate-400 block">incl. {formatGBP(r.harvested)} harvested</span>}</td>
                       <td className="p-2 text-slate-600">{formatGBP(r.taxPaid)}</td>
+                      {P.cgtEnabled && <td className="p-2 text-amber-700">{formatGBP(r.cgtPaid || 0)}{r.realisedGains > 0 && <span className="text-[9px] text-slate-400 block">on {formatGBP(r.realisedGains)} gains</span>}</td>}
                       <td className="p-2 text-sky-700">{formatGBP(r.pensions)}</td><td className="p-2 text-teal-700">{formatGBP(r.isas)}</td><td className="p-2 text-amber-700">{formatGBP(r.other)}</td><td className="p-2 text-slate-700">{formatGBP(r.cash)}</td>
                       <td className="p-2 font-bold text-blue-700">{formatGBP(r.totalCombined)}</td><td className="p-2 text-slate-600">{formatGBP(r.preNmpaLiquid)}</td>
                       <td className="p-2 text-right">{r.preNmpaInsolvent ? <span className="px-2 py-0.5 bg-rose-100 text-rose-800 rounded font-sans text-[10px] font-bold">Pre-access Gap</span> : r.unmetDemand > E.FAIL_TOLERANCE ? <span className="px-2 py-0.5 bg-rose-100 text-rose-800 rounded font-sans text-[10px] font-bold">Shortfall {formatGBP(r.unmetDemand)}</span> : <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded font-sans text-[10px] font-bold">Solvent</span>}</td>
@@ -2788,12 +2889,33 @@ export default function App() {
               <p className="text-xs text-slate-600 leading-relaxed">Rather than silently breaching the allowance, the deposit is staged across several tax years:</p>
               <ol className="list-decimal pl-5 text-xs text-slate-600 space-y-1">
                 <li>As much as fits the current year's allowance goes straight into the target wrapper.</li>
-                <li>The surplus is parked in <strong>Other Investments (GIA)</strong>, where it stays invested and grows at that account's risk tier.</li>
+                <li>The surplus is parked in <strong>Other Investments (GIA)</strong>, where it stays invested and grows at that account's risk tier. Once it has grown, moving it out is a disposal, so with CGT switched on each transfer year realises a proportional gain.</li>
                 <li>At the start of each following tax year, as much as that year's allowance permits is moved from the GIA into the target wrapper, repeating until nothing is left. You can redirect where the staged money ends up from the row's settings icon.</li>
               </ol>
               <p className="text-xs text-slate-600 leading-relaxed">Where several deposits compete for the same person's allowance in the same year, they are resolved in date order, so one allowance is never counted twice. If a market fall shrinks the parked money, that year's transfer is capped at whatever the GIA actually holds. Anything still parked at the end of the plan stays in Other Investments and is flagged as a warning.</p>
 
               <p className="text-xs text-slate-500 leading-relaxed"><strong>Assumption:</strong> allowances are held fixed in real terms at the figures in Config ({formatGBP(P.isaAllowance)} ISA, {formatGBP(P.pensionAllowance)} pension, {formatGBP(P.pensionNoEarningsLimit)} with no earnings). Any future increase in these limits is <strong>not</strong> modelled, so a long staging schedule is a cautious estimate — if allowances do rise, the money would move across in fewer years than shown. You can edit the figures in Config to test a different assumption.</p>
+            </div>
+
+            <div id="doc-cgt" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Wallet className="w-4 h-4 text-blue-600" /> Capital Gains Tax on Other Investments (GIA)</h2>
+              <p className="text-xs text-slate-600 leading-relaxed">Pensions and ISAs shelter growth, but a general investment account does not. When CGT is switched on in Config, the engine tracks the <strong>cost basis</strong> of each person's GIA and charges tax on gains as they are realised.</p>
+
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Growth is not taxed until you sell</h3>
+              <p className="text-xs text-slate-600 leading-relaxed">Holding costs nothing. Money paid in is added at cost; growth raises the value without raising the cost, so the unrealised gain builds up untaxed. Tax is only triggered by a disposal — funding your spending, paying a one-off cost, or moving money out under a staged deposit. Each disposal is treated as selling a slice of the whole holding, so the gain is the same proportion of the sale as the unrealised gain is of the pot.</p>
+              <p className="text-xs text-slate-600 leading-relaxed">Example: a {formatGBP(100000)} GIA holding {formatGBP(40000)} of gain is 40% gain. Selling {formatGBP(10000)} realises {formatGBP(4000)}; the remaining {formatGBP(3000)} exemption leaves {formatGBP(1000)} taxable, so the bill is {formatGBP(180)} at the basic rate.</p>
+
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Rates and allowances</h3>
+              <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
+                <li>Each person has a {formatGBP(P.cgtAnnualExempt)} annual exempt amount. If you have already realised gains this tax year, enter them in Plan Inputs so the current year's exemption is reduced; leaving it blank assumes the full allowance is available.</li>
+                <li>Gains stack on top of that year's income: the part falling in your remaining basic-rate band is taxed at {Math.round(P.cgtBasicRate * 100)}%, anything above at {Math.round(P.cgtHigherRate * 100)}%.</li>
+                <li>The bill is settled from cash, then the GIA, then ISAs, then an accessible pension — the same order used for one-off costs. Selling to pay the bill realises a little more gain, which is carried into the next year, mirroring the fact that CGT is due the January after the tax year.</li>
+              </ul>
+
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Setting your opening position</h3>
+              <p className="text-xs text-slate-600 leading-relaxed">The "of which unrealised gain" figure on the GIA row tells the engine how much of today's balance is profit. Left blank, the balance is treated as entirely cost, so only future growth is ever taxed — a deliberately cautious default. If you hold long-standing investments with a large embedded gain, enter it, or the model will understate your tax.</p>
+
+              <p className="text-xs text-slate-500 leading-relaxed"><strong>Deliberate omissions:</strong> gains are wiped by the uplift on death, so nothing is charged on whatever remains at the terminal age — a real reason to spend other wrappers first. Dividends and interest inside the GIA are not modelled separately, share pooling and the 30-day rule are ignored, and the exempt amount and rates are held flat in real terms at the Config figures.</p>
             </div>
 
             <div id="doc-one-offs" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
