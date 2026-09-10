@@ -957,7 +957,10 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
       const exempt = Math.max(0, P.cgtAnnualExempt - (t === 0 ? o.cgtGainsUsed : 0));
       const taxableGain = Math.max(0, realisedGains[o.key] - exempt);
       if (taxableGain <= 0) return;
-      const basicRoom = Math.max(0, P.paAt(taxable[o.key]) + P.basicWidth - taxable[o.key]);
+      // Unused personal allowance cannot be set against capital gains, so the band available to gains is
+      // the basic-rate width less TAXABLE income (income after PA) — never the full gross-income headroom.
+      const taxableIncome = Math.max(0, taxable[o.key] - P.paAt(taxable[o.key]));
+      const basicRoom = Math.max(0, P.basicWidth - taxableIncome);
       const atBasic = Math.min(taxableGain, basicRoom);
       const bill = atBasic * P.cgtBasicRate + (taxableGain - atBasic) * P.cgtHigherRate;
       if (bill <= 0) return;
