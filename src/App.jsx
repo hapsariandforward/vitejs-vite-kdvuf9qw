@@ -1421,128 +1421,6 @@ function WarningsBanner({ warnings }) {
   );
 }
 
-// ---------------------------------------------------------------- Salary sacrifice vs ISA ratio optimizer
-function SalarySacrificeOptimizer({ plan, ctx, onSalaryChange, onApplyToSandbox, onApplyToPlan, onNavigateDocs }) {
-  const P = ctx.P;
-  const salary = E.num(plan?.demographics?.salarySelf, 0);
-  const accounts = plan?.accounts || [];
-  const currentPen = E.num(accounts.find(a => a.id === 'pen_self')?.contrib, 0);
-  const currentIsa = E.num(accounts.find(a => a.id === 'isa_self')?.contrib, 0);
-  const totalExistingInvested = currentPen + currentIsa;
-  const penAccount = ctx.acc.pen_self;
-  const realRate = penAccount ? penAccount.real : 0.04;
-
-  const currentNetCostOfPension = E.netCostOfPensionContrib(currentPen, salary, P);
-  const currentTotalTakeHomeCost = currentIsa + currentNetCostOfPension;
-  const baselineRatio = currentTotalTakeHomeCost > 0 ? Math.round((currentNetCostOfPension / currentTotalTakeHomeCost) * 100) : 50;
-  const [pensionPercent, setPensionPercent] = useState(baselineRatio);
-  const [touched, setTouched] = useState(false);
-  useEffect(() => { if (!touched) setPensionPercent(baselineRatio); }, [baselineRatio, touched]);
-
-  let newPensionContrib = currentPen, newIsaContrib = currentIsa;
-  const selfOwner = ctx.owners[0];
-  const penCap = Math.min(P.pensionAllowance, salary > 0 ? salary * (1 + P.erNic * P.erPass) : P.pensionAllowance);
-  if (currentTotalTakeHomeCost > 0) {
-    const targetNetPension = currentTotalTakeHomeCost * (pensionPercent / 100);
-    newPensionContrib = Math.max(0, E.grossUpNet(targetNetPension, salary, P, penCap));
-    const netUsed = E.netCostOfPensionContrib(newPensionContrib, salary, P);
-    newIsaContrib = Math.max(0, currentTotalTakeHomeCost - netUsed);
-  }
-  const relief = E.calculateMarginalRelief(salary, newPensionContrib / (1 + P.erNic * P.erPass), P);
-  const newTotalNominal = newPensionContrib + newIsaContrib;
-  const dayOneDelta = newTotalNominal - totalExistingInvested;
-  const dayOnePercentBoost = totalExistingInvested > 0 ? (dayOneDelta / totalExistingInvested) * 100 : 0;
-  // exit factor derived from config: 25% tax-free, remainder at the basic rate
-  const exitFactorBasic = 1 - (1 - P.pclsProp) * P.basicRate;
-  const exitFactorHigher = 1 - (1 - P.pclsProp) * P.higherRate;
-  const multiple = (exit) => currentTotalTakeHomeCost > 0 ? (newIsaContrib + newPensionContrib * exit) / currentTotalTakeHomeCost : 1;
-  const grossUpFactor = currentTotalTakeHomeCost > 0 && newPensionContrib > 0 ? newPensionContrib / Math.max(1, E.netCostOfPensionContrib(newPensionContrib, salary, P)) : 1 / (1 - (P.higherRate + P.nicUpper));
-  const breakevenExitTax = Math.max(0, 1 - 1 / grossUpFactor) * 100;
-  const isaOverAllowance = newIsaContrib > P.isaAllowance + 0.5;
-  const nmpa = ctx.nmpa;
-
-  return (
-    <div className="p-4 sm:p-5 bg-gradient-to-br from-indigo-50/90 via-blue-50/50 to-slate-50 border border-indigo-100 rounded-2xl shadow-xs space-y-4">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-indigo-100/70">
-        <div className="flex items-center gap-2">
-          <div className="p-1.5 bg-indigo-600 text-white rounded-lg"><Zap className="w-4 h-4 fill-amber-300 text-amber-300" /></div>
-          <div>
-            <h4 className="text-xs font-bold text-indigo-950 uppercase tracking-wider">Salary Sacrifice &amp; Wrapper Optimizer (Myself)</h4>
-            <span className="text-[11px] text-slate-500">Rebalance your existing investment budget between S&amp;S ISA and pre-tax pension salary sacrifice at the same take-home cost.</span>
-          </div>
-        </div>
-        <button type="button" onClick={onNavigateDocs} className="text-xs text-indigo-600 hover:text-indigo-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer self-start sm:self-auto">
-          <HelpCircle className="w-3.5 h-3.5" /> How pre-tax salary sacrifice works &rarr;
-        </button>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-sans items-start">
-        <div>
-          <label className="text-slate-700 font-semibold block mb-1">Gross Annual Salary — Myself (£)</label>
-          <input type="number" min="0" placeholder={`blank = assume ${Math.round((P.higherRate + P.nicUpper) * 100)}% relief`} value={plan?.demographics?.salarySelf ?? ''} onChange={(e) => onSalaryChange(e.target.value)}
-            className="w-full p-2 bg-white border border-slate-300 rounded-xl font-mono text-slate-900 font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
-          <p className="text-[11px] text-slate-500 mt-1 leading-normal">
-            Saved with the plan (Plan Inputs → Demographics). Marginal relief at this salary: <strong className="text-indigo-700 font-mono">{relief.reliefRate.toFixed(1)}%</strong>
-            {relief.assumed ? ' (assumed — enter a salary for an exact figure)' : ''}{relief.capped ? ' — sacrifice capped at salary' : ''}.
-            {P.erPass > 0 ? ` Employer NIC pass-through ${Math.round(P.erPass * 100)}% included.` : ''}
-          </p>
-        </div>
-        <div className="bg-white/80 p-3.5 rounded-xl border border-indigo-100 space-y-2">
-          <div className="flex justify-between items-center">
-            <span className="text-slate-600 font-semibold">Allocation of take-home budget:</span>
-            <span className="text-xs font-bold text-indigo-700 font-mono">{100 - pensionPercent}% ISA / {pensionPercent}% Pension</span>
-          </div>
-          <input type="range" min="0" max="100" step="1" value={pensionPercent} onChange={(e) => { setTouched(true); setPensionPercent(Number(e.target.value)); }} className="w-full accent-indigo-600 cursor-pointer" />
-          <div className="flex justify-between text-[10px] text-slate-500 font-mono">
-            <span>100% ISA (£0 Pen)</span>
-            <button type="button" onClick={() => { setTouched(false); setPensionPercent(baselineRatio); }} className="text-indigo-600 font-bold hover:underline cursor-pointer">Base: {baselineRatio}% Pen</button>
-            <span>100% Pen (£0 ISA)</span>
-          </div>
-          <div className="pt-1 border-t border-slate-100 text-[11px] text-slate-600 flex justify-between font-mono">
-            <span>Current Total: <strong>£{Math.round(totalExistingInvested).toLocaleString()}/yr</strong></span>
-            <span className="text-indigo-700 font-bold">New Total: £{Math.round(newTotalNominal).toLocaleString()}/yr</span>
-          </div>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-1 text-xs">
-        <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
-          <span className="text-[10px] text-slate-500 uppercase font-bold block">Day-1 Capital Boost</span>
-          <span className={`text-base font-black font-mono ${dayOneDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{dayOneDelta >= 0 ? '+' : ''}£{Math.round(dayOneDelta).toLocaleString()}</span>
-          <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">{dayOnePercentBoost >= 0 ? '+' : ''}{dayOnePercentBoost.toFixed(1)}% invested for the same take-home</span>
-        </div>
-        <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
-          <span className="text-[10px] text-slate-500 uppercase font-bold block">Net wealth multiple (basic-rate exit)</span>
-          <span className="text-base font-black font-mono text-indigo-700">{multiple(exitFactorBasic).toFixed(2)}x</span>
-          <span className="text-[10px] text-slate-400 block mt-0.5">vs 100% ISA; {Math.round(P.pclsProp * 100)}% tax-free, rest at {Math.round(P.basicRate * 100)}%</span>
-        </div>
-        <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
-          <span className="text-[10px] text-slate-500 uppercase font-bold block">Net wealth multiple (higher-rate exit)</span>
-          <span className="text-base font-black font-mono text-indigo-700">{multiple(exitFactorHigher).toFixed(2)}x</span>
-          <span className="text-[10px] text-slate-400 block mt-0.5">if withdrawals are taxed at {Math.round(P.higherRate * 100)}%</span>
-        </div>
-        <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
-          <span className="text-[10px] text-slate-500 uppercase font-bold block">Break-even exit tax</span>
-          <span className="text-base font-black font-mono text-indigo-700">{breakevenExitTax.toFixed(0)}%</span>
-          <span className="text-[10px] text-slate-400 block mt-0.5">pension beats ISA below this average exit rate (same growth, locked until {nmpa})</span>
-        </div>
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-indigo-100/70">
-        <div className="text-[11px] text-slate-600">
-          Resulting Contributions: <strong className="text-teal-700 font-mono">£{Math.round(newIsaContrib).toLocaleString()}/yr ISA</strong> + <strong className="text-blue-700 font-mono">£{Math.round(newPensionContrib).toLocaleString()}/yr Pension</strong> (take-home cost: £{Math.round(currentTotalTakeHomeCost).toLocaleString()}/yr)
-          {isaOverAllowance && <span className="block text-rose-600 font-semibold">ISA amount exceeds the £{P.isaAllowance.toLocaleString()} annual allowance.</span>}
-          {newPensionContrib >= penCap - 0.5 && pensionPercent > baselineRatio && <span className="block text-amber-700 font-semibold">Pension capped at £{Math.round(penCap).toLocaleString()} (annual allowance / salary).</span>}
-        </div>
-        <div className="flex items-center gap-2">
-          <button type="button" onClick={() => onApplyToSandbox(Math.round(newPensionContrib), Math.round(newIsaContrib))} className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold border border-indigo-200 transition-all cursor-pointer">Apply to Sandbox Below</button>
-          <button type="button" onClick={() => onApplyToPlan(Math.round(newPensionContrib), Math.round(newIsaContrib))} className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-xs transition-all cursor-pointer">Apply to Plan Inputs</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ---------------------------------------------------------------- Strategy tournament
 function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, onNavigateDocs }) {
   const P = ctx.P;
@@ -1764,9 +1642,16 @@ export default function App() {
     (p?.accounts || []).forEach(a => { init[a.id] = { contrib: E.num(a.contrib, 0), growth: E.num(a.growth, 0) }; });
     return init;
   };
+  // Retirement-age overrides mirror the engine's blank-input fallback so the sandbox starts on the modelled age.
+  const sandboxRetireFromPlan = (p) => ({
+    self: E.clamp(E.num(p?.demographics?.retireAgeSelf, 60), 0, 120),
+    part: E.clamp(E.num(p?.demographics?.retireAgePart, 60), 0, 120)
+  });
   const [sandboxCustomized, setSandboxCustomized] = useState(false);
   const [sandboxAccounts, setSandboxAccounts] = useState(() => sandboxFromPlan(plan));
+  const [sandboxRetire, setSandboxRetire] = useState(() => sandboxRetireFromPlan(plan));
   useEffect(() => { if (!sandboxCustomized) setSandboxAccounts(sandboxFromPlan(plan)); }, [plan?.accounts, sandboxCustomized]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!sandboxCustomized) setSandboxRetire(sandboxRetireFromPlan(plan)); }, [plan?.demographics?.retireAgeSelf, plan?.demographics?.retireAgePart, sandboxCustomized]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { safeStorageSet(STORAGE_KEY, JSON.stringify(plan)); }, [plan]);
   useEffect(() => { safeStorageSet(SCENARIOS_STORAGE_KEY, JSON.stringify(scenarios)); }, [scenarios]);
@@ -1814,6 +1699,7 @@ export default function App() {
 
   const sandboxPlan = useMemo(() => ({
     ...plan,
+    demographics: { ...plan?.demographics, retireAgeSelf: sandboxRetire.self, retireAgePart: sandboxRetire.part },
     accounts: (plan?.accounts || []).map(acc => {
       const sb = sandboxAccounts[acc.id];
       if (!sb) return acc;
@@ -1822,35 +1708,41 @@ export default function App() {
       if (sb.contribByYear) out.contribByYear = sb.contribByYear; else delete out.contribByYear;
       return out;
     })
-  }), [plan, sandboxAccounts]);
+  }), [plan, sandboxAccounts, sandboxRetire]);
   const sandboxCtx = useMemo(() => E.buildContext(sandboxPlan), [sandboxPlan]);
-  const isSandboxModified = useMemo(() => (plan?.accounts || []).some(acc => {
+  const isRetireModified = useMemo(() => {
+    const base = sandboxRetireFromPlan(plan);
+    return base.self !== sandboxRetire.self || (isCouple && base.part !== sandboxRetire.part);
+  }, [plan?.demographics?.retireAgeSelf, plan?.demographics?.retireAgePart, sandboxRetire, isCouple]); // eslint-disable-line react-hooks/exhaustive-deps
+  const isSandboxModified = useMemo(() => isRetireModified || (plan?.accounts || []).some(acc => {
     const sb = sandboxAccounts[acc.id];
     if (!sb) return false;
     return E.num(acc.contrib, 0) !== E.num(sb.contrib, 0) || E.num(acc.growth, 0) !== E.num(sb.growth, 0) || (sb.balance !== undefined && E.num(acc.balance, 0) !== E.num(sb.balance, 0)) || !!sb.contribByYear;
-  }), [plan?.accounts, sandboxAccounts]);
+  }), [plan?.accounts, sandboxAccounts, isRetireModified]);
   const sandboxTimeline = useMemo(() => E.simulateDeterministic(sandboxCtx, 'expected'), [sandboxCtx]);
 
   const sandboxMetrics = useMemo(() => {
     if (!timelineData.length || !sandboxTimeline.length) return null;
     const baseTerminal = timelineData[timelineData.length - 1]?.totalCombined || 0;
     const sbTerminal = sandboxTimeline[sandboxTimeline.length - 1]?.totalCombined || 0;
-    const retAge = ctx.owners[0].retireAge;
-    const baseRetRow = timelineData.find(r => r.ageSelf === retAge) || timelineData[0];
-    const sbRetRow = sandboxTimeline.find(r => r.ageSelf === retAge) || sandboxTimeline[0];
-    let cumulativeExtraCapital = 0;
-    const accumYears = Math.max(0, retAge - currentAge);
-    ctx.accounts.forEach(a => {
-      const sbAcc = sandboxCtx.acc[a.id];
-      for (let t = 0; t < accumYears; t++) {
-        const baseThisYr = a.contribByYear ? (a.contribByYear[t] || 0) : a.contrib * Math.pow(1 + a.growth, t);
-        const sbThisYr = sbAcc ? (sbAcc.contribByYear ? (sbAcc.contribByYear[t] || 0) : sbAcc.contrib * Math.pow(1 + sbAcc.growth, t)) : 0;
-        cumulativeExtraCapital += (sbThisYr - baseThisYr);
-      }
-    });
+    // Each scenario is measured at its own retirement age: retiring later means a longer accumulation run.
+    const baseRetAge = ctx.owners[0].retireAge;
+    const sbRetAge = sandboxCtx.owners[0].retireAge;
+    const baseRetRow = timelineData.find(r => r.ageSelf === baseRetAge) || timelineData[0];
+    const sbRetRow = sandboxTimeline.find(r => r.ageSelf === sbRetAge) || sandboxTimeline[0];
+    // Contributions stop at each owner's own retirement age, so total them per owner rather than off a single age.
+    const totalPlannedContribs = (c) => c.accounts.reduce((sum, a) => {
+      const o = c.owners.find(x => x.key === a.owner);
+      if (!o) return sum;
+      const yrs = Math.max(0, Math.round(o.retireAge - o.age0));
+      let acct = 0;
+      for (let t = 0; t < yrs; t++) acct += E.contribAtYear(a, t);
+      return sum + acct;
+    }, 0);
+    const cumulativeExtraCapital = totalPlannedContribs(sandboxCtx) - totalPlannedContribs(ctx);
     const terminalDelta = sbTerminal - baseTerminal;
-    return { baseTerminal, sbTerminal, terminalDelta, baseRetirement: baseRetRow?.totalCombined || 0, sbRetirement: sbRetRow?.totalCombined || 0, retirementDelta: (sbRetRow?.totalCombined || 0) - (baseRetRow?.totalCombined || 0), cumulativeExtraCapital, multiplier: cumulativeExtraCapital !== 0 ? terminalDelta / cumulativeExtraCapital : 0 };
-  }, [timelineData, sandboxTimeline, ctx, sandboxCtx, currentAge]);
+    return { baseTerminal, sbTerminal, terminalDelta, baseRetAge, sbRetAge, baseRetirement: baseRetRow?.totalCombined || 0, sbRetirement: sbRetRow?.totalCombined || 0, retirementDelta: (sbRetRow?.totalCombined || 0) - (baseRetRow?.totalCombined || 0), cumulativeExtraCapital, multiplier: cumulativeExtraCapital !== 0 ? terminalDelta / cumulativeExtraCapital : 0 };
+  }, [timelineData, sandboxTimeline, ctx, sandboxCtx]);
 
   const historicalTimeline = useMemo(() => E.simulateHistorical(ctx, activeHistoricalStartYear), [ctx, activeHistoricalStartYear]);
   const historicalMetrics = useMemo(() => {
@@ -1924,7 +1816,7 @@ export default function App() {
     const selected = scenarios.find(s => s.id === id);
     if (!selected) return;
     const data = E.normalizePlan(selected.data);
-    setSandboxCustomized(false); setActiveScenarioId(id); setPlan(data); setSimResult(null); setSandboxAccounts(sandboxFromPlan(data));
+    setSandboxCustomized(false); setActiveScenarioId(id); setPlan(data); setSimResult(null); setSandboxAccounts(sandboxFromPlan(data)); setSandboxRetire(sandboxRetireFromPlan(data));
   };
   const handleDeleteScenario = (idToDelete) => {
     if (scenarios.length <= 1) { window.alert('At least one scenario must be retained.'); return; }
@@ -1938,6 +1830,7 @@ export default function App() {
     setSandboxCustomized(false);
     setPlan(prev => ({
       ...prev,
+      demographics: { ...prev.demographics, retireAgeSelf: sandboxRetire.self, ...(isCouple ? { retireAgePart: sandboxRetire.part } : {}) },
       accounts: (prev.accounts || []).map(acc => {
         const sb = sandboxAccounts[acc.id];
         if (!sb) return acc;
@@ -1949,7 +1842,15 @@ export default function App() {
     }));
     flash('Sandbox applied to plan inputs');
   };
-  const handleResetSandbox = () => { setSandboxCustomized(false); setSandboxAccounts(sandboxFromPlan(plan)); };
+  const handleResetSandbox = () => { setSandboxCustomized(false); setSandboxAccounts(sandboxFromPlan(plan)); setSandboxRetire(sandboxRetireFromPlan(plan)); };
+  const updateSandboxRetire = (key, value) => {
+    setSandboxCustomized(true);
+    setSandboxRetire(prev => ({ ...prev, [key]: E.clamp(E.num(value, prev[key]), 0, 120) }));
+  };
+  const adjustSandboxRetire = (key, delta) => {
+    setSandboxCustomized(true);
+    setSandboxRetire(prev => ({ ...prev, [key]: E.clamp(E.num(prev[key], 60) + delta, 0, 120) }));
+  };
   const updateSandboxField = (id, field, value) => {
     setSandboxCustomized(true);
     setSandboxAccounts(prev => { const cur = { ...(prev[id] || {}) }; delete cur.contribByYear; return { ...prev, [id]: { ...cur, [field]: parseInputNumber(value) } }; });
@@ -1957,16 +1858,6 @@ export default function App() {
   const adjustSandboxContrib = (id, delta) => {
     setSandboxCustomized(true);
     setSandboxAccounts(prev => { const cur = { ...(prev[id] || {}) }; delete cur.contribByYear; return { ...prev, [id]: { ...cur, contrib: Math.max(0, E.num(cur.contrib, 0) + delta) } }; });
-  };
-  const handleApplyOptimizerToSandbox = (grossPensionAnnual, netIsaAnnual) => {
-    setSandboxCustomized(true);
-    setSandboxAccounts(prev => ({ ...prev, pen_self: { ...(prev.pen_self || {}), contrib: grossPensionAnnual, contribByYear: undefined }, isa_self: { ...(prev.isa_self || {}), contrib: netIsaAnnual, contribByYear: undefined } }));
-    flash('Salary sacrifice applied to Sandbox');
-  };
-  const handleApplyOptimizerToPlan = (grossPensionAnnual, netIsaAnnual) => {
-    setSandboxCustomized(false);
-    setPlan(prev => ({ ...prev, accounts: (prev.accounts || []).map(acc => acc.id === 'pen_self' ? { ...acc, contrib: grossPensionAnnual, contribByYear: undefined } : acc.id === 'isa_self' ? { ...acc, contrib: netIsaAnnual, contribByYear: undefined } : acc) }));
-    flash('Salary sacrifice saved to Plan Inputs');
   };
   const handleApplyStrategyToSandbox = (strategy) => {
     setSandboxCustomized(true);
@@ -2543,12 +2434,44 @@ export default function App() {
                 <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Sparkles className="w-4 h-4 text-amber-500" /> Contribution &amp; Escalation Sandbox</h3>
                 <p className="text-xs text-slate-500 mt-0.5">Test contributions, escalation rates and tournament strategies without modifying your base plan inputs.</p>
               </div>
-              <SalarySacrificeOptimizer plan={plan} ctx={ctx} onSalaryChange={(v) => updateDemographics('salarySelf', v)} onApplyToSandbox={handleApplyOptimizerToSandbox} onApplyToPlan={handleApplyOptimizerToPlan} onNavigateDocs={() => goToDoc('doc-salary-sacrifice')} />
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 pb-3 border-y border-slate-100">
-                <div><h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Wrapper Sandbox Controls</h4><span className="text-[11px] text-slate-500">Adjust individual wrappers below or reset back to your baseline plan inputs.</span></div>
+                <div><h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Wrapper Sandbox Controls</h4><span className="text-[11px] text-slate-500">Adjust retirement ages and individual wrappers below, or reset back to your baseline plan inputs.</span></div>
                 <div className="flex items-center gap-2">
                   <button onClick={handleResetSandbox} disabled={!isSandboxModified} className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all border ${isSandboxModified ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300 cursor-pointer' : 'bg-slate-50 text-slate-300 border-slate-200 cursor-not-allowed'}`}><RotateCcw className="w-3.5 h-3.5" /> Reset Sandbox</button>
                   <button onClick={handleApplySandboxToPlan} disabled={!isSandboxModified} className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs ${isSandboxModified ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white cursor-pointer active:scale-95' : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'}`}><Check className="w-3.5 h-3.5" /> Apply to Plan Inputs</button>
+                </div>
+              </div>
+              <div className="p-4 bg-slate-50/80 border border-slate-200 rounded-2xl space-y-3">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <Users className="w-4 h-4 text-slate-500" />
+                  <h5 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Retirement Age</h5>
+                  <span className="text-[11px] text-slate-500">Contributions stop and drawdown begins at this age — test retiring earlier or later.</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {ctx.owners.map(o => {
+                    const base = sandboxRetireFromPlan(plan)[o.key];
+                    const val = sandboxRetire[o.key];
+                    const changed = val !== base;
+                    const yearsToGo = Math.max(0, Math.round(val - o.age0));
+                    return (
+                      <div key={o.key} className={`p-3 rounded-xl border transition-colors ${changed ? 'bg-amber-50/60 border-amber-200' : 'bg-white border-slate-200'}`}>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-xs font-bold text-slate-800 font-sans">{o.label}</span>
+                          {changed
+                            ? <span className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded font-sans text-[10px] font-bold">{base} &rarr; {val}</span>
+                            : <span className="text-slate-400 font-sans text-[10px]">Base: {base}</span>}
+                        </div>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <input type="number" min="0" max="120" step="1" value={val} onFocus={handleFocus} onChange={(e) => updateSandboxRetire(o.key, e.target.value)} className="w-20 p-1.5 bg-white border border-slate-300 rounded font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500" />
+                          {[-5, -1, 1, 5].map(d => (
+                            <button key={d} onClick={() => adjustSandboxRetire(o.key, d)} className="px-1.5 py-1 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded text-[10px] font-sans font-semibold text-slate-700 cursor-pointer">{d > 0 ? '+' : ''}{d}</button>
+                          ))}
+                          <span className="text-[10px] text-slate-400 font-sans ml-auto">{yearsToGo > 0 ? `${yearsToGo} yr${yearsToGo === 1 ? '' : 's'} to go` : 'at/past current age'}</span>
+                        </div>
+                        {val < nmpa && <div className="text-[10px] text-amber-700 font-sans mt-1.5">Retires before pension access age {nmpa} — needs {Math.round(nmpa - val)} yr bridge from ISAs/GIA/cash.</div>}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
               {sandboxMetrics && (
@@ -2561,7 +2484,7 @@ export default function App() {
                   <div className={`p-4 rounded-2xl border shadow-2xs ${sandboxMetrics.retirementDelta >= 0 ? 'bg-emerald-50/70 border-emerald-200' : 'bg-rose-50/70 border-rose-200'}`}>
                     <div className="flex items-center justify-between"><span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Retirement Pot Impact</span>{sandboxMetrics.retirementDelta >= 0 ? <ArrowUpRight className="w-4 h-4 text-emerald-600" /> : <ArrowDownRight className="w-4 h-4 text-rose-600" />}</div>
                     <div className={`text-xl font-black font-mono mt-1 ${sandboxMetrics.retirementDelta >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{sandboxMetrics.retirementDelta >= 0 ? '+' : ''}{formatGBP(sandboxMetrics.retirementDelta)}</div>
-                    <span className="text-[11px] text-slate-500 block mt-0.5 font-mono">At Age {ctx.owners[0].retireAge}</span>
+                    <span className="text-[11px] text-slate-500 block mt-0.5 font-mono">{sandboxMetrics.baseRetAge === sandboxMetrics.sbRetAge ? `At Age ${sandboxMetrics.baseRetAge}` : `Age ${sandboxMetrics.baseRetAge} → ${sandboxMetrics.sbRetAge} (each at own retirement)`}</span>
                   </div>
                   <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50/70 shadow-2xs"><span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block mb-1">Cumulative Extra Invested</span><div className="text-xl font-bold font-mono text-slate-800 mt-1">{sandboxMetrics.cumulativeExtraCapital >= 0 ? '+' : ''}{formatGBP(sandboxMetrics.cumulativeExtraCapital)}</div><span className="text-[11px] text-slate-500 block mt-0.5">Total difference in deposits to retirement</span></div>
                   <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50/70 shadow-2xs"><span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block mb-1">Wealth Compounding Multiple</span><div className="text-xl font-bold font-mono text-indigo-700 mt-1">{sandboxMetrics.cumulativeExtraCapital !== 0 ? `${sandboxMetrics.multiplier.toFixed(2)}x` : '—'}</div><span className="text-[11px] text-slate-500 block mt-0.5">Terminal change per £1 of extra deposits</span></div>
