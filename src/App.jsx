@@ -113,6 +113,7 @@ const DEFAULT_CONFIG = {
   isaAnnualAllowance: 20000,
   pensionAnnualAllowance: 60000,
   pensionNoEarningsLimit: 3600,      // gross pension contribution allowed with no relevant UK earnings
+  mpaaLimit: 10000,                  // money purchase annual allowance once a pension is flexibly accessed
   // Capital gains tax on the GIA (realisation-based; gains are wiped on death so nothing is charged at the terminal age)
   cgtEnabled: true,
   cgtAnnualExempt: 3000,
@@ -145,6 +146,7 @@ const BLANK_PLAN = Object.freeze({
     retireAgeSelf: '', retireAgePart: '',
     salarySelf: '', salaryPart: '',
     cgtGainsUsedSelf: '', cgtGainsUsedPart: '',
+    mpaaAgeSelf: '', mpaaAgePart: '',
     statePensionAge: 68, privatePensionAge: 58,
     statePensionSelf: '', statePensionPart: '',
     terminalAge: 100
@@ -275,6 +277,7 @@ function taxParams(cfgIn) {
   const isaAllowance = Math.max(0, num(cfg.isaAnnualAllowance, DEFAULT_CONFIG.isaAnnualAllowance));
   const pensionAllowance = Math.max(0, num(cfg.pensionAnnualAllowance, DEFAULT_CONFIG.pensionAnnualAllowance));
   const pensionNoEarningsLimit = clamp(num(cfg.pensionNoEarningsLimit, DEFAULT_CONFIG.pensionNoEarningsLimit), 0, pensionAllowance);
+  const mpaaLimit = clamp(num(cfg.mpaaLimit, DEFAULT_CONFIG.mpaaLimit), 0, pensionAllowance);
   const cgtEnabled = cfg.cgtEnabled === undefined ? DEFAULT_CONFIG.cgtEnabled : !!cfg.cgtEnabled;
   const cgtAnnualExempt = Math.max(0, num(cfg.cgtAnnualExempt, DEFAULT_CONFIG.cgtAnnualExempt));
   const cgtBasicRate = clamp(num(cfg.cgtBasicRate, DEFAULT_CONFIG.cgtBasicRate), 0, 99) / 100;
@@ -284,7 +287,7 @@ function taxParams(cfgIn) {
   const basicWidth = Math.max(0, basicLimit - pa);                 // basic band measured in taxable income
   const higherTop = Math.max(basicWidth, higherLimit - paAt(higherLimit)); // higher band upper limit in taxable income
   const taperEnd = taperRate > 0 ? thr + pa / taperRate : Infinity;
-  return { __isParams: true, pa, thr, taperRate, basicLimit, higherLimit, basicRate, higherRate, addRate, nicPT, nicUEL, nicMain, nicUpper, erNic, erPass, pclsProp, lsa, isaAllowance, pensionAllowance, pensionNoEarningsLimit, cgtEnabled, cgtAnnualExempt, cgtBasicRate, cgtHigherRate, paAt, basicWidth, higherTop, taperEnd };
+  return { __isParams: true, pa, thr, taperRate, basicLimit, higherLimit, basicRate, higherRate, addRate, nicPT, nicUEL, nicMain, nicUpper, erNic, erPass, pclsProp, lsa, isaAllowance, pensionAllowance, pensionNoEarningsLimit, mpaaLimit, cgtEnabled, cgtAnnualExempt, cgtBasicRate, cgtHigherRate, paAt, basicWidth, higherTop, taperEnd };
 }
 
 function incomeTax(gross, cfg) {
@@ -538,6 +541,8 @@ function buildContext(rawPlan) {
     retireAge: o === 'self' ? retireSelf : retirePart,
     salary: Math.max(0, num(o === 'self' ? d.salarySelf : d.salaryPart, 0)),
     cgtGainsUsed: Math.max(0, num(o === 'self' ? d.cgtGainsUsedSelf : d.cgtGainsUsedPart, 0)),
+    // age from which the MPAA applies; NaN when the owner has not flexibly accessed a pension
+    mpaaAge: num(o === 'self' ? d.mpaaAgeSelf : d.mpaaAgePart, NaN),
     statePension: Math.max(0, num(o === 'self' ? d.statePensionSelf : d.statePensionPart, 0)),
     ids: { pen: accountId('pen', o), isa: accountId('isa', o), other: accountId('other', o), cash: accountId('cash', o) }
   }));
@@ -546,6 +551,9 @@ function buildContext(rawPlan) {
     if (pen && pen.contrib > P.pensionAllowance) warnings.push(`${o.label}: pension contribution £${Math.round(pen.contrib).toLocaleString()} exceeds the annual allowance £${P.pensionAllowance.toLocaleString()}.`);
     if (isa && isa.contrib > P.isaAllowance) warnings.push(`${o.label}: ISA contribution £${Math.round(isa.contrib).toLocaleString()} exceeds the ISA allowance £${P.isaAllowance.toLocaleString()}.`);
     if (o.salary > 0 && pen && pen.contrib > o.salary) warnings.push(`${o.label}: pension contribution exceeds salary.`);
+    if (Number.isFinite(o.mpaaAge) && pen && pen.contrib > P.mpaaLimit && o.mpaaAge <= o.retireAge) {
+      warnings.push(`${o.label}: pension contribution £${Math.round(pen.contrib).toLocaleString()} exceeds the £${P.mpaaLimit.toLocaleString()} money purchase annual allowance that applies from age ${o.mpaaAge}.`);
+    }
     if (o.retireAge < o.age0 && o.age0 < 120) { /* already retired: fine */ }
   });
   if (isCouple) {
@@ -833,6 +841,8 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
   }
 
   let drawdownPensions = 0;
+  // taxable pension income per owner — the MPAA trigger is personal, so it cannot use the combined figure
+  const taxablePensionDrawn = { self: 0, part: 0 };
   let harvested = 0;
   const pclsHeadroom = (o) => Math.max(0, P.lsa - state.cumPcls[o]);
   const ownerByKey = {}; owners.forEach(o => { ownerByKey[o.key] = o; });
@@ -854,6 +864,7 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
     const taxFree = fully ? 0 : Math.min(gross * P.pclsProp, headroom);
     state.cumPcls[oKey] += taxFree;
     const taxablePart = gross - taxFree;
+    taxablePensionDrawn[oKey] += taxablePart;
     const before = calculateUKNetIncome(taxable[oKey], P);
     taxable[oKey] += taxablePart;
     const after = calculateUKNetIncome(taxable[oKey], P);
@@ -1014,7 +1025,7 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
     pots: { ...pots },
     pensions: byCat.pen, isas: byCat.isa, other: byCat.other, cash: byCat.cash,
     preNmpaLiquid: byCat.isa + byCat.other + byCat.cash,
-    drawdownPensions, harvested, taxPaid, cgtPaid,
+    drawdownPensions, taxablePensionSelf: taxablePensionDrawn.self, taxablePensionPart: taxablePensionDrawn.part, harvested, taxPaid, cgtPaid,
     realisedGains: realisedGains.self + realisedGains.part,
     preNmpaInsolvent, unmetDemand
   };
@@ -1172,6 +1183,13 @@ function relevantEarningsAtYear(ctx, o, t) {
     (i.owner === o.key && i.isEarnings && age >= i.startAge && age <= i.endAge) ? s + i.amount : s, salary);
 }
 
+// Money Purchase Annual Allowance. Flexibly accessing a pension (drawing taxable income, as opposed to
+// taking only tax-free cash or buying an annuity) permanently cuts the DC allowance, with no carry-forward.
+// The trigger is a real-world event, so the age is declared per owner rather than inferred.
+function mpaaAppliesAtYear(P, o, t) {
+  return P.mpaaLimit > 0 && Number.isFinite(o.mpaaAge) && (o.age0 + t) >= o.mpaaAge;
+}
+
 // Remaining annual ISA/pension headroom for `ownerKey` in year index t, net of that owner's own regular
 // (escalating) contribution to the same wrapper. Other Investments / Cash Savings have no HMRC cap.
 function wrapperHeadroomAtYear(ctx, ownerKey, category, t) {
@@ -1186,9 +1204,11 @@ function wrapperHeadroomAtYear(ctx, ownerKey, category, t) {
   if (category === 'isa') return Math.max(0, P.isaAllowance - regContrib);
   const earnings = relevantEarningsAtYear(ctx, o, t);
   // a blank salary while still working means "earnings unknown" — leave the allowance unconstrained
-  const cap = (!retired && o.salary <= 0 && earnings <= 0)
+  let cap = (!retired && o.salary <= 0 && earnings <= 0)
     ? P.pensionAllowance
     : Math.min(P.pensionAllowance, Math.max(P.pensionNoEarningsLimit, earnings));
+  // the MPAA caps the allowance itself, so it bites even when earnings are unknown
+  if (mpaaAppliesAtYear(P, o, t)) cap = Math.min(cap, P.mpaaLimit);
   return Math.max(0, cap - regContrib);
 }
 
@@ -1222,7 +1242,10 @@ function allocateBudget(ctx, netBudget, isaShare, { isaMin = 0, balance = 'propo
   const penGross = owners.map(() => 0);
   const penNetUsed = owners.map(() => 0);
   const passFactor = 1 + P.erNic * P.erPass;
-  const capOf = (o) => Math.min(P.pensionAllowance, o.salary > 0 ? o.salary * passFactor : P.pensionAllowance);
+  const capOf = (o) => Math.min(
+    mpaaAppliesAtYear(P, o, 0) ? P.mpaaLimit : P.pensionAllowance,
+    o.salary > 0 ? o.salary * passFactor : P.pensionAllowance
+  );
   let penNetRemaining = penNet;
   const order = owners.map((o, i) => i).sort((a, b) => penW[b] - penW[a]);
   // price every top-up at the owner's marginal rate given what is already going into that pension
@@ -1459,7 +1482,7 @@ function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
 }
 
 // Namespace used by the UI (mirrors the modular engine.js exports)
-const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, employeeNIC, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, relevantEarningsAtYear, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, resolveSurvivalMaximizer, buildTournament, pickBest };
+const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, employeeNIC, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, resolveSurvivalMaximizer, buildTournament, pickBest };
 export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament };
 
 
@@ -1819,6 +1842,29 @@ export default function App() {
   }, [ctx]);
   const deterministicVerdict = useMemo(() => E.evaluateRows(ctx, timelineData), [ctx, timelineData]);
 
+  // The MPAA trigger is declared by the user, but the projection knows when it actually starts drawing
+  // taxable pension income. Flag the mismatch rather than silently using an over-generous allowance.
+  const allWarnings = useMemo(() => {
+    const extra = [];
+    ctx.owners.forEach(o => {
+      // the trigger is personal: only this owner taking taxable pension income counts
+      const firstDraw = timelineData.find(r => (o.key === 'self' ? r.taxablePensionSelf : r.taxablePensionPart) > 0);
+      if (firstDraw) {
+        const ageThen = o.key === 'self' ? firstDraw.ageSelf : firstDraw.agePart;
+        const declared = o.mpaaAge;
+        if (Number.isFinite(declared) && declared <= ageThen) return;
+        // only worth flagging if the allowance still binds — i.e. money is still going into the pension
+        const stillContributing = ageThen < o.retireAge && (ctx.acc[o.ids.pen]?.contrib || 0) > 0;
+        const laterDeposit = (plan?.oneOffContributions || []).some(c =>
+          (c.owner === o.label) && c.category === E.CATEGORY_LABEL.pen && E.num(c.amount, 0) > 0 &&
+          E.num(c.year, 0) >= firstDraw.year);
+        if (!stillContributing && !laterDeposit) return;
+        extra.push(`${o.label}: the projection draws taxable pension income from age ${ageThen}, which triggers the £${P.mpaaLimit.toLocaleString()} money purchase annual allowance, but ${Number.isFinite(declared) ? `you have set it to start at ${declared}` : 'no age is set'}. Pension contributions after that point may exceed the allowance.`);
+      }
+    });
+    return extra.length ? [...ctx.warnings, ...extra] : ctx.warnings;
+  }, [ctx, timelineData, plan, P.mpaaLimit]);
+
   const sandboxPlan = useMemo(() => ({
     ...plan,
     demographics: { ...plan?.demographics, retireAgeSelf: sandboxRetire.self, retireAgePart: sandboxRetire.part },
@@ -2133,7 +2179,7 @@ export default function App() {
           </div>
         </div>
 
-        {activeTab !== 'docs' && <WarningsBanner warnings={ctx.warnings} />}
+        {activeTab !== 'docs' && <WarningsBanner warnings={allWarnings} />}
 
         {/* TAB 1: PLAN INPUTS */}
         {activeTab === 'inputs' && (
@@ -2170,6 +2216,8 @@ export default function App() {
                 {isCouple && <div><label className="text-slate-600 font-semibold block mb-1">Retirement Age (Partner)</label><input type="number" min="0" max="120" placeholder="e.g. 60" onFocus={handleFocus} value={plan?.demographics?.retireAgePart ?? ''} onChange={(e) => updateDemographics('retireAgePart', e.target.value)} className={inputCls} /></div>}
                 <div><label className="text-slate-600 font-semibold block mb-1">Gross Salary (Myself £/yr)</label><input type="number" min="0" step="1000" placeholder="for tax relief & bridging" onFocus={handleFocus} value={plan?.demographics?.salarySelf ?? ''} onChange={(e) => updateDemographics('salarySelf', e.target.value)} className={inputCls} /></div>
                 {isCouple && <div><label className="text-slate-600 font-semibold block mb-1">Gross Salary (Partner £/yr)</label><input type="number" min="0" step="1000" placeholder="for tax relief & bridging" onFocus={handleFocus} value={plan?.demographics?.salaryPart ?? ''} onChange={(e) => updateDemographics('salaryPart', e.target.value)} className={inputCls} /></div>}
+                <div><label className="text-slate-600 font-semibold block mb-1">Pension flexibly accessed from age (Myself)</label><input type="number" min="0" max="120" placeholder="blank = not accessed" onFocus={handleFocus} value={plan?.demographics?.mpaaAgeSelf ?? ''} onChange={(e) => updateDemographics('mpaaAgeSelf', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Taking taxable pension income cuts the annual allowance to {formatGBP(P.mpaaLimit)} from that age. Tax-free cash alone does not trigger it.</span></div>
+                {isCouple && <div><label className="text-slate-600 font-semibold block mb-1">Pension flexibly accessed from age (Partner)</label><input type="number" min="0" max="120" placeholder="blank = not accessed" onFocus={handleFocus} value={plan?.demographics?.mpaaAgePart ?? ''} onChange={(e) => updateDemographics('mpaaAgePart', e.target.value)} className={inputCls} /></div>}
                 {P.cgtEnabled && <div><label className="text-slate-600 font-semibold block mb-1">Capital gains already used (Myself £)</label><input type="number" min="0" step="500" placeholder="blank = full allowance" onFocus={handleFocus} value={plan?.demographics?.cgtGainsUsedSelf ?? ''} onChange={(e) => updateDemographics('cgtGainsUsedSelf', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Gains already realised in the current tax year — reduces this year's {formatGBP(P.cgtAnnualExempt)} exemption only.</span></div>}
                 {P.cgtEnabled && isCouple && <div><label className="text-slate-600 font-semibold block mb-1">Capital gains already used (Partner £)</label><input type="number" min="0" step="500" placeholder="blank = full allowance" onFocus={handleFocus} value={plan?.demographics?.cgtGainsUsedPart ?? ''} onChange={(e) => updateDemographics('cgtGainsUsedPart', e.target.value)} className={inputCls} /></div>}
                 <div><label className="text-slate-600 font-semibold block mb-1">Expected State Pension (Myself £/yr)</label><input type="number" min="0" step="250" placeholder="e.g. 11500" onFocus={handleFocus} value={plan?.demographics?.statePensionSelf ?? ''} onChange={(e) => updateDemographics('statePensionSelf', e.target.value)} className={inputCls} /></div>
@@ -2490,7 +2538,7 @@ export default function App() {
                   ['basicTaxRate', 'Basic Rate (%)'], ['higherBandLimit', 'Additional Rate Starts At (£ income)'], ['higherTaxRate', 'Higher Rate (%)'], ['additionalTaxRate', 'Additional Rate (%)'],
                   ['nicPrimaryThreshold', 'NIC Primary Threshold (£)'], ['nicUpperEarningsLimit', 'NIC Upper Earnings Limit (£)'], ['nicMainRate', 'NIC Main Rate (%)'], ['nicUpperRate', 'NIC Upper Rate (%)'],
                   ['employerNicRate', 'Employer NIC Rate (%)'], ['employerNicPassThrough', 'Employer NIC Passed to Pension (%)'], ['pclsProportion', 'PCLS Tax-Free (%)'], ['pclsMaxCap', 'Lump Sum Allowance (£ LSA)'],
-                  ['isaAnnualAllowance', 'ISA Allowance (£/person/yr)'], ['pensionAnnualAllowance', 'Pension Annual Allowance (£/person/yr)'], ['pensionNoEarningsLimit', 'Pension Limit With No Earnings (£/person/yr)'], ['cgtAnnualExempt', 'CGT Annual Exempt Amount (£/person/yr)'], ['cgtBasicRate', 'CGT Rate — Basic Band (%)'], ['cgtHigherRate', 'CGT Rate — Higher/Additional Band (%)']
+                  ['isaAnnualAllowance', 'ISA Allowance (£/person/yr)'], ['pensionAnnualAllowance', 'Pension Annual Allowance (£/person/yr)'], ['pensionNoEarningsLimit', 'Pension Limit With No Earnings (£/person/yr)'], ['mpaaLimit', 'Money Purchase Annual Allowance (£/person/yr)'], ['cgtAnnualExempt', 'CGT Annual Exempt Amount (£/person/yr)'], ['cgtBasicRate', 'CGT Rate — Basic Band (%)'], ['cgtHigherRate', 'CGT Rate — Higher/Additional Band (%)']
                 ].map(([field, label]) => (
                   <div key={field}><span className="text-slate-600 font-sans font-semibold block mb-1">{label}</span><input type="number" min="0" placeholder={String(E.DEFAULT_CONFIG[field])} onFocus={handleFocus} value={plan?.config?.[field] ?? ''} onChange={(e) => updateConfig(field, e.target.value)} className={smallInputCls} /></div>
                 ))}
@@ -2883,6 +2931,7 @@ export default function App() {
               <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">How much fits this year (headroom)</h3>
               <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
                 <li><strong>S&amp;S ISA:</strong> {formatGBP(P.isaAllowance)} less whatever your regular ISA contribution is that year.</li>
+                <li><strong>Pension after flexible access:</strong> once you take taxable pension income the money purchase annual allowance replaces the figure above, cutting it to {formatGBP(P.mpaaLimit)} permanently, with no carry-forward. Taking only tax-free cash, or buying an annuity, does not trigger it. Set the age this happens in Plan Inputs; the projection will warn you if it starts drawing pension income earlier than you declared.</li>
                 <li><strong>Pension:</strong> {formatGBP(P.pensionAllowance)} — but capped at your <em>relevant UK earnings</em> — less your regular pension contribution that year. Only employment and self-employment income counts as earnings; DB pensions, annuities, rent, dividends and interest do not. With no relevant earnings the limit is <strong>{formatGBP(P.pensionNoEarningsLimit)}</strong>, which is what normally applies once you have retired. If you leave your salary blank while still working, the engine treats your earnings as unknown and does not constrain the allowance.</li>
                 <li><strong>Other Investments and Cash Savings:</strong> no annual limit, so a deposit there is never staged.</li>
               </ul>
