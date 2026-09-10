@@ -3436,14 +3436,36 @@ export default function App() {
               </ul>
             </div>
 
-            <div id="doc-salary-sacrifice" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
-              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Zap className="w-4 h-4 text-indigo-600" /> Salary Sacrifice vs S&amp;S ISAs</h2>
-              <p className="text-xs text-slate-600 leading-relaxed">Salary sacrifice redirects gross earnings into your pension before income tax and employee NIC are deducted. Relief is calculated from the salary you enter, so it correctly reflects the {Math.round(P.basicRate * 100)}% + {Math.round(P.nicMain * 100)}% basic-rate band, the {Math.round(P.higherRate * 100)}% + {Math.round(P.nicUpper * 100)}% higher-rate band, and the {Math.round((P.higherRate + P.nicUpper) * 100 + P.higherRate * 100 * P.taperRate)}% effective rate where the personal allowance is tapered (£{P.thr.toLocaleString()}–£{Math.round(P.taperEnd).toLocaleString()}).</p>
+            <div id="doc-coverage" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-indigo-600" /> Modelling Decisions, Coverage &amp; Known Gaps</h2>
+              <p className="text-xs text-slate-600 leading-relaxed">Where the rules leave room for judgement, this is the call the model makes and why. Read this before trusting a number.</p>
+
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Decisions taken</h3>
               <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
-                <li><strong>Day-one leverage:</strong> £1,000 of take-home becomes about £{Math.round(1000 / (1 - (P.higherRate + P.nicUpper))).toLocaleString()} inside a pension for a higher-rate taxpayer, versus £1,000 in an ISA. Employers sometimes add part of their own {Math.round(P.erNic * 100)}% NIC saving — set the pass-through in Config.</li>
-                <li><strong>Exit tax:</strong> with {Math.round(P.pclsProp * 100)}% tax-free and the rest at the basic rate, the effective exit rate is about {Math.round((1 - P.pclsProp) * P.basicRate * 100)}%, so the pension keeps a large advantage unless withdrawals are pushed into higher rates — which is what Bracket-Smoothed Sizing guards against.</li>
-                <li><strong>Constraints modelled:</strong> annual allowance £{P.pensionAllowance.toLocaleString()}, tapered to a floor of £{P.aaTaperFloor.toLocaleString()} once earnings pass £{P.aaTaperThr.toLocaleString()}, three-year carry-forward, and sacrifice limited to salary. Not modelled: the National Minimum Wage floor and the Lifetime ISA (worth considering below age 40). The taper is driven by <em>earnings</em> here, whereas HMRC uses adjusted income (which adds employer contributions), so it is approximate for anyone near the threshold.</li>
+                <li><strong>Everything is in today's money.</strong> Growth uses each tier's <em>real</em> rate, so every pot, spend and bequest figure is in today's purchasing power. The "Combined (Nominal)" chart series is the only place inflation is added back, for display. A £100,000 bequest floor therefore means £100,000 of today's money — do not gross it up.</li>
+                <li><strong>The MPAA is derived, not declared.</strong> The model runs the expected path once, finds the first year each person draws taxable pension income, and applies the £{P.mpaaLimit.toLocaleString()} allowance from that age. It assumes you have <em>not</em> already flexibly accessed a pension — reasonable for planning, wrong if you have, which would need the trigger set earlier.</li>
+                <li><strong>Carry-forward is not consumed.</strong> Unused allowance from the prior three years is offered as headroom but is not tracked as being used up, so a plan that leans on it repeatedly is optimistic. It never lifts the earnings limit, and it accrues at each prior year's <em>tapered</em> allowance.</li>
+                <li><strong>The annual allowance taper keys off earnings.</strong> HMRC tapers on adjusted income, which adds employer contributions; the model only knows earnings, so the taper is approximate for anyone near the £{P.aaTaperThr.toLocaleString()} threshold.</li>
+                <li><strong>A blank salary means "unknown", not "zero".</strong> While you are still working, leaving salary empty leaves the pension allowance unconstrained rather than dropping it to £{P.pensionNoEarningsLimit.toLocaleString()}. Enter a salary for an accurate limit.</li>
+                <li><strong>CGT is realisation-based.</strong> Gains are booked only when the GIA is actually sold, using a running cost basis. Gains are wiped by the uplift on death, so nothing is charged on whatever remains at the terminal age.</li>
+                <li><strong>The tournament holds contributions equal.</strong> Every strategy is re-priced to cost the same total over the accumulation years as your current plan, by solving its contribution escalation. Without this a strategy could win simply by asking you to pay in more.</li>
+                <li><strong>Allowance harvesting is a bequest tool.</strong> It never improves survival — it moves money from a pot taxed on death into one that is not. It is worth nothing unless you set a pension death tax rate, and close calls are broken on the pot left <em>after</em> that tax.</li>
+                <li><strong>Allowances are frozen in real terms</strong> at the Config figures. Any future rise in the ISA or pension allowance is not modelled, so long staging schedules are deliberately cautious.</li>
               </ul>
+
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Modelled</h3>
+              <p className="text-xs text-slate-600 leading-relaxed">Income tax including the personal-allowance taper, employee NIC, the {Math.round(P.pclsProp * 100)}% tax-free element capped at the £{P.lsa.toLocaleString()} Lump Sum Allowance, the £{P.pensionAllowance.toLocaleString()} annual allowance with taper and three-year carry-forward, the relevant-earnings limit, the MPAA, ISA allowances, realisation-based CGT with its annual exempt amount and band split, state pension timing, the pre-SIPP access bridge, one-off deposits with multi-year staging, one-off costs, lifestyle spending tapers, and salary-sacrifice relief including any employer NIC pass-through.</p>
+
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Not modelled yet</h3>
+              <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
+                <li><strong>Self-employment:</strong> Class 2 and Class 4 NIC differ from the employee rates used here, and there is no employer NIC to pass through.</li>
+                <li><strong>Scottish and Welsh income tax</strong> — rates and bands are rest-of-UK throughout.</li>
+                <li><strong>Inheritance tax on the estate.</strong> The pension death tax setting applies a haircut to leftover pension only, so it represents the <em>extra</em> tax a pension suffers relative to an ISA, not IHT on everything.</li>
+                <li><strong>Defined benefit pensions</strong> beyond entering them as a taxable income stream; no accrual, revaluation or transfer values.</li>
+                <li><strong>Care costs, the Lifetime ISA, the National Minimum Wage floor on salary sacrifice, dividend and savings-interest taxation inside the GIA, share pooling and the 30-day CGT rule.</strong></li>
+                <li><strong>Allowance and threshold changes</strong> announced for future years, and any change to the state pension triple lock.</li>
+              </ul>
+              <p className="text-xs text-slate-500 leading-relaxed">This is an educational model, not advice. Where a figure matters to a real decision, check it against current HMRC guidance or a regulated adviser.</p>
             </div>
 
             <div id="doc-taper" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
