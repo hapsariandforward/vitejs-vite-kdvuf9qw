@@ -2187,9 +2187,13 @@ export default function App() {
             {/* One-offs */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
-                <div className="flex justify-between items-center">
-                  <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Plus className="w-4 h-4 text-blue-600" /> 4. One-Off Deposits (by Wrapper)</h3>
-                  <button onClick={addOneOffContrib} className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer border border-slate-200"><Plus className="w-3.5 h-3.5" /> Add Lump Sum</button>
+                <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2">
+                  <div>
+                    <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Plus className="w-4 h-4 text-blue-600" /> 4. One-Off Deposits (by Wrapper)</h3>
+                    <span className="text-[11px] text-slate-500 block mt-0.5">Lump sums into a chosen wrapper. Anything above that year's allowance is parked in Other Investments and fed in over later years.</span>
+                    <button type="button" onClick={() => goToDoc('doc-one-off-deposits')} className="text-[11px] text-blue-600 hover:text-blue-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer mt-0.5"><HelpCircle className="w-3.5 h-3.5" /> How one-off deposits &amp; multi-year staging work &rarr;</button>
+                  </div>
+                  <button onClick={addOneOffContrib} className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer border border-slate-200 self-start sm:self-auto"><Plus className="w-3.5 h-3.5" /> Add Lump Sum</button>
                 </div>
                 <div className="p-4 bg-indigo-50/80 border border-indigo-200 rounded-2xl text-xs text-slate-700 space-y-1.5">
                   <div className="flex items-center gap-2 font-bold text-indigo-950 text-sm"><Info className="w-4 h-4 text-indigo-600" /> Annual Allowance Headroom &mdash; {ctx.baseYear} tax year</div>
@@ -2763,6 +2767,33 @@ export default function App() {
                   <div key={k} className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><span className="font-bold text-slate-800">{k} ({v.label})</span><p className="text-slate-500">Expected real {E.num(v.real, 0).toFixed(2)}% pa, σ = {E.num(v.volatility, 0).toFixed(1)}%.</p></div>
                 ))}
               </div>
+            </div>
+
+            <div id="doc-one-off-deposits" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Plus className="w-4 h-4 text-blue-600" /> One-Off Deposits &amp; Multi-Year Staging</h2>
+              <p className="text-xs text-slate-600 leading-relaxed">A one-off deposit is a lump sum paid into a chosen wrapper in a chosen year. Because ISAs and pensions are capped each tax year, the engine checks the deposit against that year's remaining allowance before it lands.</p>
+
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Where the money comes from</h3>
+              <p className="text-xs text-slate-600 leading-relaxed"><strong>External (new capital)</strong> is money arriving from outside the plan — an inheritance, a bonus, a property sale — and nothing is deducted from your existing pots. Choosing any wrapper instead treats it as an internal transfer: the full amount is taken out of that pot in the deposit year. If that pot does not hold enough at the time, the engine moves what is there and the rest is recorded as a shortfall.</p>
+
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">How much fits this year (headroom)</h3>
+              <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
+                <li><strong>S&amp;S ISA:</strong> {formatGBP(P.isaAllowance)} less whatever your regular ISA contribution is that year.</li>
+                <li><strong>Pension:</strong> {formatGBP(P.pensionAllowance)} — but capped at your <em>relevant UK earnings</em> — less your regular pension contribution that year. Only employment and self-employment income counts as earnings; DB pensions, annuities, rent, dividends and interest do not. With no relevant earnings the limit is <strong>{formatGBP(P.pensionNoEarningsLimit)}</strong>, which is what normally applies once you have retired. If you leave your salary blank while still working, the engine treats your earnings as unknown and does not constrain the allowance.</li>
+                <li><strong>Other Investments and Cash Savings:</strong> no annual limit, so a deposit there is never staged.</li>
+              </ul>
+              <p className="text-xs text-slate-600 leading-relaxed">Headroom is therefore not a fixed number. It shrinks in later years if your regular contributions escalate, and it changes again at retirement, when regular contributions stop and the pension earnings test starts to bite. The card above the deposits table shows this tax year only — each deposit row shows the headroom for its own year.</p>
+
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">If the deposit exceeds the headroom</h3>
+              <p className="text-xs text-slate-600 leading-relaxed">Rather than silently breaching the allowance, the deposit is staged across several tax years:</p>
+              <ol className="list-decimal pl-5 text-xs text-slate-600 space-y-1">
+                <li>As much as fits the current year's allowance goes straight into the target wrapper.</li>
+                <li>The surplus is parked in <strong>Other Investments (GIA)</strong>, where it stays invested and grows at that account's risk tier.</li>
+                <li>At the start of each following tax year, as much as that year's allowance permits is moved from the GIA into the target wrapper, repeating until nothing is left. You can redirect where the staged money ends up from the row's settings icon.</li>
+              </ol>
+              <p className="text-xs text-slate-600 leading-relaxed">Where several deposits compete for the same person's allowance in the same year, they are resolved in date order, so one allowance is never counted twice. If a market fall shrinks the parked money, that year's transfer is capped at whatever the GIA actually holds. Anything still parked at the end of the plan stays in Other Investments and is flagged as a warning.</p>
+
+              <p className="text-xs text-slate-500 leading-relaxed"><strong>Assumption:</strong> allowances are held fixed in real terms at the figures in Config ({formatGBP(P.isaAllowance)} ISA, {formatGBP(P.pensionAllowance)} pension, {formatGBP(P.pensionNoEarningsLimit)} with no earnings). Any future increase in these limits is <strong>not</strong> modelled, so a long staging schedule is a cautious estimate — if allowances do rise, the money would move across in fewer years than shown. You can edit the figures in Config to test a different assumption.</p>
             </div>
 
             <div id="doc-one-offs" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
