@@ -1355,6 +1355,37 @@ function applyAllocationToPlan(plan, ctx, alloc, { contribByYear = null, transfe
   return cloned;
 }
 
+/*
+ * Reports what a tournament strategy actually changes versus the baseline plan, by diffing the two
+ * plan states account by account. Figures keep their native units — pension contributions are gross,
+ * ISA and GIA contributions net — so a shift of take-home from ISA to pension shows a larger rise
+ * than fall, the difference being tax and NIC relief.
+ */
+function diffStrategyPlans(basePlan, strategyPlan, { threshold = 50 } = {}) {
+  const byId = (p) => { const m = {}; (p?.accounts || []).forEach(a => { m[a.id] = a; }); return m; };
+  const base = byId(basePlan), next = byId(strategyPlan);
+  const contribDeltas = [], balanceDeltas = [], byCat = {};
+  Object.keys(next).forEach(id => {
+    const b = base[id], n = next[id];
+    if (!b || !n) return;
+    const [cat, ownerKey] = id.split('_');
+    const from = num(b.contrib, 0), to = num(n.contrib, 0);
+    const balFrom = num(b.balance, 0), balTo = num(n.balance, 0);
+    const cd = to - from, bd = balTo - balFrom;
+    byCat[cat] = byCat[cat] || { contrib: 0, balance: 0, owners: [] };
+    if (Math.abs(cd) >= threshold) {
+      contribDeltas.push({ id, cat, ownerKey, from, to, delta: cd });
+      byCat[cat].contrib += cd;
+      byCat[cat].owners.push(ownerKey);
+    }
+    if (Math.abs(bd) >= threshold) {
+      balanceDeltas.push({ id, cat, ownerKey, from: balFrom, to: balTo, delta: bd });
+      byCat[cat].balance += bd;
+    }
+  });
+  return { contribDeltas, balanceDeltas, byCat, hasChange: contribDeltas.length > 0 || balanceDeltas.length > 0 };
+}
+
 // Evaluate the Survival Maximizer's candidate grid and return the winner as a fully-formed strategy.
 function resolveSurvivalMaximizer(strategy, { trials = 400, seed = 12345, preAccessCap = Infinity, onCandidate = null } = {}) {
   const evaluated = strategy.candidates.map((c, i) => {
@@ -1528,8 +1559,8 @@ function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
 }
 
 // Namespace used by the UI (mirrors the modular engine.js exports)
-const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, employeeNIC, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, resolveSurvivalMaximizer, buildTournament, pickBest };
-export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament };
+const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, employeeNIC, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, diffStrategyPlans, resolveSurvivalMaximizer, buildTournament, pickBest };
+export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans };
 
 
 const STORAGE_KEY = 'rp_plan_full_v28';          // unchanged: old saved plans are migrated by normalizePlan
@@ -1643,6 +1674,69 @@ function WarningsBanner({ warnings }) {
 }
 
 // ---------------------------------------------------------------- Strategy tournament
+const WRAPPER_WORD = { pen: 'pension', isa: 'S&S ISA', other: 'GIA', cash: 'cash' };
+const joinClauses = (parts) => parts.length <= 1 ? (parts[0] || '') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+const sentenceCase = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+
+/*
+ * Plain-English description of what a tournament strategy moves relative to the current plan.
+ * Every strategy spends the same net budget, so the reconciliation clause matters: pension figures
+ * are gross and ISA figures net, which is why the rise and the fall do not match pound for pound.
+ */
+function summarizeStrategyChange(res, baselinePlayer, { isCouple = false, meta = null, threshold = 50 } = {}) {
+  if (!res) return [];
+  if (res.id === 'baseline') return ['Your plan exactly as entered — the benchmark every other strategy is measured against.'];
+  if (!res.planState || !baselinePlayer?.planState) return [];
+  const diff = E.diffStrategyPlans(baselinePlayer.planState, res.planState, { threshold });
+  const lines = [];
+  const plural = (n) => n === 1 ? '' : 's';
+
+  // one-off capital move (Bed & SIPP): its relief is bundled into taxReliefSaved, so it has to come
+  // back out before the annual figure can be quoted as a per-year number
+  const src = diff.balanceDeltas.find(d => d.delta < 0);
+  const dest = diff.balanceDeltas.find(d => d.delta > 0 && d.cat !== 'cash');
+  const refund = diff.balanceDeltas.find(d => d.cat === 'cash' && d.delta > 0);
+  const oneOffRelief = (src && dest) ? (dest.delta - Math.abs(src.delta) + (refund ? refund.delta : 0)) : 0;
+
+  const earlyYears = res.phase ? res.phase.yearsToFirstRetire - res.phase.switchYears : 0;
+  if (res.phase && res.phase.switchYears > 0 && earlyYears > 0) {
+    // contrib on the plan holds year-1 (early phase) only, so describe both phases explicitly
+    lines.push(`Two phases: pension-max for ${earlyYears} year${plural(earlyYears)} (pension ${formatGBP(res.phase.early.penContrib)}/yr, S&S ISA ${formatGBP(res.phase.early.isaContrib)}/yr), then ISA-max for the final ${res.phase.switchYears} year${plural(res.phase.switchYears)} before retirement (S&S ISA ${formatGBP(res.phase.late.isaContrib)}/yr, pension ${formatGBP(res.phase.late.penContrib)}/yr).`);
+  } else if (!diff.contribDeltas.length) {
+    lines.push('Effectively the same contribution split as your current plan — nothing material moves.');
+  } else {
+    const parts = [];
+    let overflowed = false;
+    ['pen', 'isa', 'other', 'cash'].forEach(cat => {
+      const c = diff.byCat[cat];
+      if (!c || Math.abs(c.contrib) < threshold) return;
+      const word = WRAPPER_WORD[cat];
+      // only one owner moving needs calling out; both moving is the unremarkable case
+      const only = (isCouple && c.owners.length === 1) ? ` (${E.OWNER_LABEL[c.owners[0]] || ''} only)` : '';
+      const amt = formatGBP(Math.abs(c.contrib));
+      // money appearing in the GIA from nothing is budget spilling past full allowances, not a choice
+      const fromNothing = diff.contribDeltas.filter(d => d.cat === cat).every(d => d.from < threshold);
+      if (cat === 'other' && c.contrib > 0 && fromNothing) { parts.push(`${amt}/yr now overflows into your GIA${only}`); overflowed = true; }
+      else parts.push(`your ${word} contributions ${c.contrib > 0 ? 'rise' : 'fall'} by ${amt}/yr${only}`);
+    });
+    const reliefDelta = E.num(res.taxReliefSaved, 0) - E.num(baselinePlayer.taxReliefSaved, 0) - oneOffRelief;
+    // an overridden budget means the strategies do not cost what the current plan costs, so the
+    // usual "same take-home cost" reconciliation would be a lie
+    const overridden = meta && Math.abs(E.num(meta.netBudget, 0) - E.num(meta.derivedBudget, 0)) >= threshold;
+    let tail = overridden ? ` — on the ${formatGBP(meta.netBudget)}/yr take-home budget you set, against ${formatGBP(meta.derivedBudget)}/yr in your plan today` : ' — the same take-home cost';
+    if (reliefDelta >= threshold) tail += `, with ${formatGBP(reliefDelta)}/yr more tax and NIC relief`;
+    else if (reliefDelta <= -threshold) tail += `, giving up ${formatGBP(Math.abs(reliefDelta))}/yr of tax and NIC relief`;
+    lines.push(`${sentenceCase(joinClauses(parts))}${tail}.`);
+    if (overflowed) lines.push('The GIA overflow is budget that no longer fits inside the ISA and pension allowances.');
+  }
+
+  // described separately from the annual figures because it is capital, not a yearly flow
+  if (src && dest) {
+    lines.push(`One-off: ${formatGBP(Math.abs(src.delta))} of existing ${WRAPPER_WORD[src.cat]} capital moves into the ${WRAPPER_WORD[dest.cat]}, becoming ${formatGBP(dest.delta)} after basic-rate relief${refund ? `, with ${formatGBP(refund.delta)} of higher-rate relief refunded to cash` : ''}.`);
+  }
+  return lines;
+}
+
 function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, onNavigateDocs }) {
   const P = ctx.P;
   const isCouple = ctx.isCouple;
@@ -1705,6 +1799,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
   };
 
   const se = results && results.players.length ? results.players[0].stats.standardError : 0;
+  const baselinePlayer = results ? results.players.find(p => p.id === 'baseline') : null;
 
   return (
     <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
@@ -1790,6 +1885,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
             {results.players.map((res) => {
               const isBest = res.id === results.bestId;
               const st = res.stats;
+              const summaryLines = summarizeStrategyChange(res, baselinePlayer, { isCouple, meta: results.meta });
               return (
                 <div key={res.id} className={`p-4 rounded-2xl border flex flex-col justify-between space-y-3 ${isBest ? 'bg-emerald-50/60 border-emerald-300 shadow-sm' : res.id === 'baseline' ? 'bg-slate-50 border-slate-200' : 'bg-surface border-indigo-100 shadow-xs'}`}>
                   <div className="space-y-2">
@@ -1798,6 +1894,11 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
                       <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${st.successRate >= 90 ? 'bg-emerald-100 text-emerald-800' : st.successRate >= 75 ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-800'}`}>{st.successRate.toFixed(1)}% Safe</span>
                     </div>
                     <p className="text-[11px] text-slate-500 leading-normal">{res.description}</p>
+                    {summaryLines.length > 0 && (
+                      <div className="border-l-2 border-indigo-300 pl-2.5 space-y-1">
+                        {summaryLines.map((line, i) => <p key={i} className="text-[11px] leading-snug text-slate-700">{line}</p>)}
+                      </div>
+                    )}
                     <div className="pt-2 border-t border-slate-100 space-y-1 text-[11px] font-mono">
                       <div className="flex justify-between"><span className="text-slate-500">S&amp;S ISA:</span><strong className="text-teal-700">£{Math.round(res.isaContrib || 0).toLocaleString()}/yr{res.phase && res.phase.switchYears > 0 ? ' avg' : ''}</strong></div>
                       <div className="flex justify-between"><span className="text-slate-500">Pension:</span><strong className="text-blue-700">£{Math.round(res.penContrib || 0).toLocaleString()}/yr{res.phase && res.phase.switchYears > 0 ? ' avg' : ''}</strong></div>
