@@ -186,7 +186,20 @@ function normalizePlan(raw) {
     accounts: [],
     riskProfiles: {},
     otherIncomes: Array.isArray(src.otherIncomes) ? src.otherIncomes.filter(isPlainObject).map(i => ({ id: String(i.id || 'inc_' + Math.random().toString(36).slice(2)), name: i.name ?? '', owner: i.owner === 'Partner' ? 'Partner' : 'Myself', startAge: i.startAge ?? '', endAge: i.endAge ?? '', amount: i.amount ?? '', taxTreatment: i.taxTreatment === 'Tax-free' ? 'Tax-free' : 'Taxable', notes: i.notes ?? '' })) : [],
-    oneOffContributions: Array.isArray(src.oneOffContributions) ? src.oneOffContributions.filter(isPlainObject).map(x => ({ id: String(x.id || 'c_' + Math.random().toString(36).slice(2)), date: x.date || (x.year ? `${x.year}-01-01` : ''), year: num(x.year, x.date ? parseInt(String(x.date).slice(0, 4)) : ''), owner: x.owner === 'Partner' ? 'Partner' : 'Myself', category: Object.values(CATEGORY_LABEL).includes(x.category) ? x.category : 'Pensions', amount: x.amount ?? '', desc: x.desc ?? '' })) : [],
+    oneOffContributions: Array.isArray(src.oneOffContributions) ? src.oneOffContributions.filter(isPlainObject).map(x => {
+      const category = Object.values(CATEGORY_LABEL).includes(x.category) ? x.category : 'Pensions';
+      return {
+        id: String(x.id || 'c_' + Math.random().toString(36).slice(2)),
+        date: x.date || (x.year ? `${x.year}-01-01` : ''),
+        year: num(x.year, x.date ? parseInt(String(x.date).slice(0, 4)) : ''),
+        owner: x.owner === 'Partner' ? 'Partner' : 'Myself',
+        category,
+        amount: x.amount ?? '',
+        desc: x.desc ?? '',
+        transferredFrom: ['External', ...Object.values(CATEGORY_LABEL)].includes(x.transferredFrom) ? x.transferredFrom : 'External',
+        stagedTargetWrapper: Object.values(CATEGORY_LABEL).includes(x.stagedTargetWrapper) ? x.stagedTargetWrapper : category
+      };
+    }) : [],
     oneOffCosts: Array.isArray(src.oneOffCosts) ? src.oneOffCosts.filter(isPlainObject).map(x => ({ id: String(x.id || 'cost_' + Math.random().toString(36).slice(2)), date: x.date || (x.year ? `${x.year}-01-01` : ''), year: num(x.year, x.date ? parseInt(String(x.date).slice(0, 4)) : ''), owner: x.owner === 'Partner' ? 'Partner' : 'Myself', amount: x.amount ?? '', desc: x.desc ?? '' })) : [],
     config: { ...DEFAULT_CONFIG, ...c }
   };
@@ -522,16 +535,89 @@ function buildContext(rawPlan) {
   }));
   const yearOf = (x) => x.date ? parseInt(String(x.date).slice(0, 4)) : num(x.year, NaN);
   const oneOffContribs = new Map();
-  plan.oneOffContributions.forEach(x => {
-    if (!isCouple && x.owner === 'Partner') return;
-    const y = yearOf(x); if (!Number.isFinite(y)) return;
-    const cat = Object.keys(CATEGORY_LABEL).find(k => CATEGORY_LABEL[k] === x.category) || 'pen';
-    const id = accountId(cat, x.owner === 'Partner' ? 'part' : 'self');
-    const amt = Math.max(0, num(x.amount, 0));
-    if (amt <= 0) return;
-    if (!oneOffContribs.has(y)) oneOffContribs.set(y, []);
-    oneOffContribs.get(y).push({ id, amount: amt });
-  });
+  const oneOffDeductions = new Map();
+  const stagedTransfers = new Map();
+  const oneOffStaging = new Map();
+  {
+    // Shared per-owner/wrapper/year claim ledger: every deposit and staged drip tranche competes for the
+    // same headroom, so two deposits for the same owner/wrapper can never double-claim one year's allowance.
+    const claimed = new Map(); // `${ownerKey}|${cat}|${t}` -> £ already claimed this pass
+    const claim = (ownerKey, cat, t, want) => {
+      const key = `${ownerKey}|${cat}|${t}`;
+      const already = claimed.get(key) || 0;
+      const avail = Math.max(0, wrapperHeadroomAtYear({ P, owners, acc }, ownerKey, cat, t) - already);
+      const take = Math.min(want, avail);
+      claimed.set(key, already + take);
+      return take;
+    };
+
+    const ordered = plan.oneOffContributions
+      .filter(x => isCouple || x.owner !== 'Partner')
+      .map((x, i) => ({ x, i, y: yearOf(x) }))
+      .filter(e => Number.isFinite(e.y))
+      .sort((a, b) => (a.y - b.y) || (a.i - b.i));
+
+    ordered.forEach(({ x, y }) => {
+      const t = y - baseYear;
+      const ownerKey = x.owner === 'Partner' ? 'part' : 'self';
+      const targetCat = Object.keys(CATEGORY_LABEL).find(k => CATEGORY_LABEL[k] === x.category) || 'pen';
+      const targetId = accountId(targetCat, ownerKey);
+      const otherId = accountId('other', ownerKey);
+      const amt = Math.max(0, num(x.amount, 0));
+      if (amt <= 0) return;
+
+      // source deduction (independent of staging outcome; deducts the full deposit amount D)
+      if (x.transferredFrom && x.transferredFrom !== 'External') {
+        const srcCat = Object.keys(CATEGORY_LABEL).find(k => CATEGORY_LABEL[k] === x.transferredFrom);
+        if (srcCat) {
+          const sourceId = accountId(srcCat, ownerKey);
+          if (!oneOffDeductions.has(y)) oneOffDeductions.set(y, []);
+          oneOffDeductions.get(y).push({ id: sourceId, amount: amt });
+          if (t === 0) {
+            const startBal = acc[sourceId] ? acc[sourceId].balance : 0;
+            if (amt > startBal) warnings.push(
+              `${OWNER_LABEL[ownerKey]}: one-off deposit of £${Math.round(amt).toLocaleString()} exceeds available ${CATEGORY_LABEL[srcCat]} balance (£${Math.round(startBal).toLocaleString()}); the deduction will be capped to the available balance.`
+            );
+          }
+        }
+      }
+
+      // headroom resolution: direct deposit if within headroom, otherwise stage the surplus (Option A)
+      const H0 = claim(ownerKey, targetCat, t, amt);
+      if (!oneOffContribs.has(y)) oneOffContribs.set(y, []);
+      if (amt <= H0 + 1e-6) {
+        oneOffContribs.get(y).push({ id: targetId, amount: amt });
+        oneOffStaging.set(x.id, { direct: true, targetId, otherId, stagedId: targetId, amount: amt, H0: amt, surplus0: 0, tranches: [], unresolvedRemainder: 0 });
+        return;
+      }
+
+      const surplus0 = amt - H0;
+      if (H0 > 0) oneOffContribs.get(y).push({ id: targetId, amount: H0 });
+      oneOffContribs.get(y).push({ id: otherId, amount: surplus0 });
+
+      const stagedCat = Object.keys(CATEGORY_LABEL).find(k => CATEGORY_LABEL[k] === x.stagedTargetWrapper) || targetCat;
+      const stagedId = accountId(stagedCat, ownerKey);
+      const tranches = [];
+      let remaining = surplus0;
+      if (stagedCat !== 'other') {
+        for (let dt = t + 1; dt <= totalYears && remaining > 0.005; dt++) {
+          const tranche = claim(ownerKey, stagedCat, dt, remaining);
+          if (tranche <= 0) continue;
+          const dy = baseYear + dt;
+          if (!stagedTransfers.has(dy)) stagedTransfers.set(dy, []);
+          stagedTransfers.get(dy).push({ fromId: otherId, toId: stagedId, amount: tranche });
+          tranches.push({ year: dy, amount: tranche });
+          remaining -= tranche;
+        }
+      } else {
+        remaining = 0;
+      }
+      if (remaining > 0.005) warnings.push(
+        `${OWNER_LABEL[ownerKey]}: £${Math.round(remaining).toLocaleString()} of the ${y} one-off deposit could not be fully staged into ${CATEGORY_LABEL[stagedCat]} within the plan horizon and will remain in Other Investments.`
+      );
+      oneOffStaging.set(x.id, { direct: false, targetId, otherId, stagedId, amount: amt, H0, surplus0, tranches, unresolvedRemainder: Math.max(0, remaining) });
+    });
+  }
   const oneOffCosts = new Map();
   plan.oneOffCosts.forEach(x => {
     const y = yearOf(x); if (!Number.isFinite(y)) return;
@@ -552,7 +638,7 @@ function buildContext(rawPlan) {
     solvencyFloor: Math.max(0, num(c.solvencyFloor, 0)),
     inflation: clamp(num(c.inflation, 2.5), -50, 100) / 100,
     yf, baseYear, valuationDate,
-    otherIncomes, oneOffContribs, oneOffCosts
+    otherIncomes, oneOffContribs, oneOffCosts, oneOffDeductions, stagedTransfers, oneOffStaging
   };
   return ctx;
 }
@@ -592,16 +678,37 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
   const anyAccess = owners.some(o => access[o.key]);
   const anyRetired = owners.some(o => !working[o.key]);
 
-  // 1. one-off deposits (dated: not pro-rated)
+  // 0. one-off deposit source-pot deductions (full D, this year only; internal-source deposits)
+  let oneOffDeductionShortfall = 0;
+  const deductions = ctx.oneOffDeductions.get(year);
+  if (deductions) deductions.forEach(x => {
+    if (pots[x.id] === undefined) return;
+    const avail = pots[x.id];
+    const take = Math.min(avail, x.amount);
+    pots[x.id] = avail - take;
+    oneOffDeductionShortfall += Math.max(0, x.amount - take);
+  });
+
+  // 1. one-off deposits (dated: not pro-rated) — includes staged deposits' year-0 immediate tranche + parked surplus
   const deposits = ctx.oneOffContribs.get(year);
   if (deposits) deposits.forEach(x => { if (pots[x.id] !== undefined) pots[x.id] += x.amount; });
+
+  // 1.5 staged multi-year drip transfers (t>=1): drain GIA into the (possibly redirected) staged target,
+  // capped at whatever remains in GIA — this naturally handles a market-crash-depleted GIA.
+  const drips = ctx.stagedTransfers.get(year);
+  if (drips) drips.forEach(x => {
+    const avail = pots[x.fromId] || 0;
+    const move = Math.min(avail, x.amount);
+    pots[x.fromId] = avail - move;
+    pots[x.toId] = (pots[x.toId] || 0) + move;
+  });
 
   // 2. regular contributions while the owner works (year 0 pro-rated)
   const contribThisYear = { self: 0, part: 0 };
   const isaContribThisYear = { self: 0, part: 0 };
   ctx.accounts.forEach(a => {
     if (!working[a.owner]) return;
-    const amt = a.contribByYear ? (a.contribByYear[t] || 0) : a.contrib * Math.pow(1 + a.growth, t);
+    const amt = contribAtYear(a, t);
     if (amt > 0) {
       pots[a.id] += amt * frac;
       contribThisYear[a.owner] += amt * frac;
@@ -643,7 +750,7 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
     owners.forEach(o => {
       if (!working[o.key] || o.salary <= 0) return;
       const pen = acc[o.ids.pen];
-      const penContrib = pen ? (pen.contribByYear ? (pen.contribByYear[t] || 0) : pen.contrib * Math.pow(1 + pen.growth, t)) : 0;
+      const penContrib = pen ? contribAtYear(pen, t) : 0;
       const sacrifice = Math.min(o.salary, penContrib / (1 + P.erNic * P.erPass));
       const takeHome = o.salary - sacrifice - calculateUKTaxAndNIC(o.salary - sacrifice, P);
       const nonPensionContribs = (contribThisYear[o.key] / frac) - penContrib;
@@ -764,7 +871,7 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
     });
   }
 
-  const unmetDemand = owners.reduce((s, o) => s + Math.max(0, demand[o.key]), 0) + unmetCost;
+  const unmetDemand = owners.reduce((s, o) => s + Math.max(0, demand[o.key]), 0) + unmetCost + oneOffDeductionShortfall;
   const lockedPensionWealth = owners.reduce((s, o) => s + (access[o.key] ? 0 : (pots[o.ids.pen] || 0)), 0);
   const preNmpaInsolvent = unmetDemand > 1 && (!anyAccess || lockedPensionWealth > 0);
 
@@ -942,6 +1049,25 @@ function bridgeRequirement(ctx) {
     if (r.targetSpend > 0) { years++; needed += r.netDrawdown; }
   }
   return { gapYears: years, netNeeded: needed };
+}
+
+// Regular-contribution amount for account `a` in projection-year index t (post-escalation, or a phased schedule).
+function contribAtYear(a, t) {
+  return a.contribByYear ? (a.contribByYear[t] || 0) : a.contrib * Math.pow(1 + a.growth, t);
+}
+
+// Remaining annual ISA/pension headroom for `ownerKey` in year index t, net only of that owner's own regular
+// (escalating) contribution to the same wrapper. Other Investments / Cash Savings have no HMRC cap.
+function wrapperHeadroomAtYear(ctx, ownerKey, category, t) {
+  const { P, acc, owners } = ctx;
+  if (category === 'other' || category === 'cash') return Infinity;
+  const o = owners.find(x => x.key === ownerKey);
+  if (!o) return 0;
+  const a = acc[o.ids[category]];
+  const regContrib = a ? contribAtYear(a, t) : 0;
+  if (category === 'isa') return Math.max(0, P.isaAllowance - regContrib);
+  const cap = o.salary > 0 ? Math.min(P.pensionAllowance, o.salary) : P.pensionAllowance;
+  return Math.max(0, cap - regContrib);
 }
 
 /*
@@ -1211,7 +1337,7 @@ function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
 }
 
 // Namespace used by the UI (mirrors the modular engine.js exports)
-const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, employeeNIC, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, allocateBudget, applyAllocationToPlan, resolveSurvivalMaximizer, buildTournament, pickBest };
+const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, employeeNIC, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, wrapperHeadroomAtYear, allocateBudget, applyAllocationToPlan, resolveSurvivalMaximizer, buildTournament, pickBest };
 export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament };
 
 
@@ -1670,6 +1796,8 @@ export default function App() {
   const [simProgress, setSimProgress] = useState(null);
   const [isSimulating, setIsSimulating] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
+  const [expandedOneOff, setExpandedOneOff] = useState(() => new Set());
+  const toggleOneOffExpand = (id) => setExpandedOneOff(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
 
   const handleFocus = (e) => e.target.select();
   const activeRiskMatrix = plan?.riskProfiles || E.DEFAULT_RISK_PROFILES;
@@ -1775,7 +1903,7 @@ export default function App() {
   const updateListItem = (listKey, id, patch) => setPlan(p => ({ ...p, [listKey]: (p[listKey] || []).map(i => i.id === id ? { ...i, ...patch } : i) }));
   const addOtherIncome = () => setPlan(prev => ({ ...prev, otherIncomes: [...(prev.otherIncomes || []), { id: 'inc_' + Date.now(), name: '', owner: 'Myself', startAge: '', endAge: '', amount: '', taxTreatment: 'Taxable', notes: '' }] }));
   const deleteOtherIncome = (id) => setPlan(prev => ({ ...prev, otherIncomes: (prev.otherIncomes || []).filter(i => i.id !== id) }));
-  const addOneOffContrib = () => { const y = new Date().getFullYear() + 1; setPlan(prev => ({ ...prev, oneOffContributions: [...(prev.oneOffContributions || []), { id: 'c_' + Date.now(), date: `${y}-01-01`, year: y, owner: 'Myself', category: 'Pensions', amount: '', desc: '' }] })); };
+  const addOneOffContrib = () => { const y = new Date().getFullYear() + 1; setPlan(prev => ({ ...prev, oneOffContributions: [...(prev.oneOffContributions || []), { id: 'c_' + Date.now(), date: `${y}-01-01`, year: y, owner: 'Myself', category: 'Pensions', amount: '', desc: '', transferredFrom: 'External', stagedTargetWrapper: 'Pensions' }] })); };
   const deleteOneOffContrib = (id) => setPlan(prev => ({ ...prev, oneOffContributions: (prev.oneOffContributions || []).filter(c => c.id !== id) }));
   const addOneOffCost = () => { const y = new Date().getFullYear() + 1; setPlan(prev => ({ ...prev, oneOffCosts: [...(prev.oneOffCosts || []), { id: 'cost_' + Date.now(), date: `${y}-06-01`, year: y, owner: 'Myself', amount: '', desc: '' }] })); };
   const deleteOneOffCost = (id) => setPlan(prev => ({ ...prev, oneOffCosts: (prev.oneOffCosts || []).filter(c => c.id !== id) }));
@@ -2136,23 +2264,75 @@ export default function App() {
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Plus className="w-4 h-4 text-blue-600" /> 4. One-Off Deposits (by Wrapper)</h3>
                   <button onClick={addOneOffContrib} className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer border border-slate-200"><Plus className="w-3.5 h-3.5" /> Add Lump Sum</button>
                 </div>
+                <div className="p-4 bg-indigo-50/80 border border-indigo-200 rounded-2xl text-xs text-slate-700 space-y-1.5">
+                  <div className="flex items-center gap-2 font-bold text-indigo-950 text-sm"><Info className="w-4 h-4 text-indigo-600" /> Annual Allowance Headroom</div>
+                  {ctx.owners.map(o => (
+                    <div key={o.key} className="flex flex-wrap gap-x-4">
+                      <span className="font-semibold">{o.label}:</span>
+                      <span>S&amp;S ISA remaining <strong>{formatGBP(E.wrapperHeadroomAtYear(ctx, o.key, 'isa', 0))}</strong>/yr</span>
+                      <span>Pension remaining <strong>{formatGBP(E.wrapperHeadroomAtYear(ctx, o.key, 'pen', 0))}</strong>/yr</span>
+                    </div>
+                  ))}
+                  <p className="text-slate-500 text-[11px] leading-relaxed">A one-off deposit that exceeds remaining headroom is auto-staged: the allowed amount deposits now, the rest parks in Other Investments and drip-feeds into the target wrapper as future years' allowance opens up.</p>
+                </div>
                 {(plan?.oneOffContributions || []).length === 0 ? (
                   <div className="text-xs text-slate-400 italic p-3 bg-slate-50 border border-slate-200 rounded-xl">No one-off contributions scheduled.</div>
                 ) : (
                   <div className="space-y-2">
-                    {plan.oneOffContributions.map(c => (
-                      <div key={c.id} className="flex flex-wrap items-center gap-2 p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs">
-                        <input type="date" value={c.date || (c.year ? `${c.year}-01-01` : '')} onChange={(e) => { const d = e.target.value; updateListItem('oneOffContributions', c.id, { date: d, year: parseInt(d.slice(0, 4)) || '' }); }} className="p-1 bg-white border border-slate-300 rounded font-mono text-slate-800 text-xs" />
-                        {isCouple ? (
-                          <select value={c.owner} onChange={(e) => updateListItem('oneOffContributions', c.id, { owner: e.target.value })} className="p-1 bg-white border border-slate-300 rounded text-slate-700"><option value="Myself">Myself</option><option value="Partner">Partner</option></select>
-                        ) : <span className="text-slate-500 font-semibold px-1">Myself</span>}
-                        <select value={c.category} onChange={(e) => updateListItem('oneOffContributions', c.id, { category: e.target.value })} className="p-1 bg-white border border-slate-300 rounded text-blue-700 font-semibold">
-                          {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
-                        </select>
-                        <input type="number" min="0" step="1000" placeholder="Amount (£)" onFocus={handleFocus} value={c.amount} onChange={(e) => updateListItem('oneOffContributions', c.id, { amount: parseInputNumber(e.target.value) })} className="w-24 p-1 bg-white border border-slate-300 rounded font-mono text-emerald-700 font-bold" />
-                        <button onClick={() => deleteOneOffContrib(c.id)} className="p-1 ml-auto text-slate-400 hover:text-rose-600 cursor-pointer transition-colors"><Trash2 className="w-4 h-4" /></button>
-                      </div>
-                    ))}
+                    {plan.oneOffContributions.map(c => {
+                      const st = ctx.oneOffStaging.get(c.id);
+                      const isExpanded = expandedOneOff.has(c.id);
+                      return (
+                        <div key={c.id} className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <input type="date" value={c.date || (c.year ? `${c.year}-01-01` : '')} onChange={(e) => { const d = e.target.value; updateListItem('oneOffContributions', c.id, { date: d, year: parseInt(d.slice(0, 4)) || '' }); }} className="p-1 bg-white border border-slate-300 rounded font-mono text-slate-800 text-xs" />
+                            {isCouple ? (
+                              <select value={c.owner} onChange={(e) => updateListItem('oneOffContributions', c.id, { owner: e.target.value })} className="p-1 bg-white border border-slate-300 rounded text-slate-700"><option value="Myself">Myself</option><option value="Partner">Partner</option></select>
+                            ) : <span className="text-slate-500 font-semibold px-1">Myself</span>}
+                            <select value={c.transferredFrom} onChange={(e) => updateListItem('oneOffContributions', c.id, { transferredFrom: e.target.value })} className="p-1 bg-white border border-slate-300 rounded text-slate-700" title="Transferred from">
+                              <option value="External">External (New Capital)</option>
+                              {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
+                            </select>
+                            <select value={c.category} onChange={(e) => { const category = e.target.value; const patch = { category }; if (c.stagedTargetWrapper === c.category) patch.stagedTargetWrapper = category; updateListItem('oneOffContributions', c.id, patch); }} className="p-1 bg-white border border-slate-300 rounded text-blue-700 font-semibold">
+                              {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
+                            </select>
+                            <input type="number" min="0" step="1000" placeholder="Amount (£)" onFocus={handleFocus} value={c.amount} onChange={(e) => updateListItem('oneOffContributions', c.id, { amount: parseInputNumber(e.target.value) })} className="w-24 p-1 bg-white border border-slate-300 rounded font-mono text-emerald-700 font-bold" />
+                            {st && !st.direct && (
+                              <button onClick={() => toggleOneOffExpand(c.id)} className="p-1 text-amber-600 hover:text-amber-800 cursor-pointer transition-colors" title="Staging schedule"><Settings className="w-4 h-4" /></button>
+                            )}
+                            <button onClick={() => deleteOneOffContrib(c.id)} className="p-1 ml-auto text-slate-400 hover:text-rose-600 cursor-pointer transition-colors"><Trash2 className="w-4 h-4" /></button>
+                          </div>
+                          {st && (
+                            <div>
+                              {st.direct ? (
+                                <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded font-sans text-[10px] font-bold">Direct Deposit (£{Math.round(st.amount).toLocaleString()} within headroom)</span>
+                              ) : (
+                                <span className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded font-sans text-[10px] font-bold">Staged (Option A): £{Math.round(st.H0).toLocaleString()} now &rarr; {c.category}, £{Math.round(st.surplus0).toLocaleString()} parked in Other Investments</span>
+                              )}
+                            </div>
+                          )}
+                          {st && !st.direct && isExpanded && (
+                            <div className="w-full p-2.5 bg-white border border-amber-200 rounded-lg text-[11px] space-y-1.5">
+                              <div className="flex items-center gap-2">
+                                <span className="font-semibold text-slate-600">Staged destination:</span>
+                                <select value={c.stagedTargetWrapper} onChange={(e) => updateListItem('oneOffContributions', c.id, { stagedTargetWrapper: e.target.value })} className="p-1 bg-white border border-slate-300 rounded text-slate-700">
+                                  {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
+                                </select>
+                              </div>
+                              <div className="space-y-0.5 text-slate-600">
+                                <div>Year {c.year}: £{Math.round(st.H0).toLocaleString()} direct to {c.category} + £{Math.round(st.surplus0).toLocaleString()} parked in Other Investments</div>
+                                {st.tranches.map((tr, i) => (
+                                  <div key={i}>Year {tr.year}: £{Math.round(tr.amount).toLocaleString()} transferred to {c.stagedTargetWrapper}</div>
+                                ))}
+                                {st.unresolvedRemainder > 0 && (
+                                  <div className="text-amber-700">£{Math.round(st.unresolvedRemainder).toLocaleString()} remains parked in Other Investments beyond the plan horizon.</div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
