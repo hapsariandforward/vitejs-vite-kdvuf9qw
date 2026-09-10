@@ -61,11 +61,11 @@ const RISK_EQUITY_WEIGHTS = {
 };
 
 const DEFAULT_RISK_PROFILES = {
-  'High Risk': { label: '80–100% Equities', real: 4.44, unlucky: 1.66, lucky: 7.31, nominal: 7.05, volatility: 15.5 },
-  'Medium/High Risk': { label: '60–80% Equities', real: 3.72, unlucky: 1.38, lucky: 6.13, nominal: 6.31, volatility: 11.5 },
-  'Medium Risk': { label: '40–60% Equities', real: 3.00, unlucky: 1.10, lucky: 4.95, nominal: 5.58, volatility: 8.0 },
-  'Medium/Low Risk': { label: '20–40% Equities', real: 2.28, unlucky: 0.82, lucky: 3.77, nominal: 4.84, volatility: 5.5 },
-  'Low Risk': { label: 'High interest Cash Savings, Fixed Income, Bonds', real: 1.56, unlucky: 0.54, lucky: 2.59, nominal: 4.10, volatility: 3.0 },
+  'High Risk': { label: 'Highest — 80–100% Equities', real: 4.44, unlucky: 1.66, lucky: 7.31, nominal: 7.05, volatility: 15.5 },
+  'Medium/High Risk': { label: 'High — 60–80% Equities', real: 3.72, unlucky: 1.38, lucky: 6.13, nominal: 6.31, volatility: 11.5 },
+  'Medium Risk': { label: 'Medium — 40–60% Equities', real: 3.00, unlucky: 1.10, lucky: 4.95, nominal: 5.58, volatility: 8.0 },
+  'Medium/Low Risk': { label: 'Medium/Low — 20–40% Equities', real: 2.28, unlucky: 0.82, lucky: 3.77, nominal: 4.84, volatility: 5.5 },
+  'Low Risk': { label: 'Low — High interest Cash Savings, Fixed Income, Bonds', real: 1.56, unlucky: 0.54, lucky: 2.59, nominal: 4.10, volatility: 3.0 },
   'Cash Equivalents': { label: 'instant cash savings/money market', real: -0.50, unlucky: -1.00, lucky: 0.00, nominal: 1.99, volatility: 0.5 }
 };
 
@@ -1164,7 +1164,7 @@ function optimizeSpend(planOrCtx, { targetRate = 90, seed = 12345, searchTrials 
   const paths = pathsForSeed(seed, searchTrials, ctx.totalYears);
   const rateAt = (spend) => { let s = 0; for (const zs of paths) if (runTrial(ctx, zs, spend).survived) s++; return (s / searchTrials) * 100; };
   let low = 0;
-  if (rateAt(0) < targetRate) return { spend: 0, ...monteCarlo(ctx, { trials: finalTrials, seed: seed + 1, spendOverride: 0 }), note: 'Even zero spending fails the target (pre-access gap or one-off costs).' };
+  if (rateAt(0) < targetRate) return { spend: 0, ...monteCarlo(ctx, { trials: finalTrials, seed: seed + 1, spendOverride: 0 }), note: 'Even zero spending fails the target (pre-SIPP access gap or one-off costs).' };
   let high = Math.max(20000, ctx.targetSpend * 2, 150000);
   let guard = 0;
   while (rateAt(high) >= targetRate && guard++ < 8) { low = high; high *= 2; }
@@ -1487,7 +1487,7 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
       }
     }
     strategies.push(mk('relief', 'Relief-First' + (transfer ? ' + Bed & SIPP' : ''),
-      'Routes the budget to pension first (subject to the pre-access bridge minimum) to capture maximum upfront tax and NIC relief' + (transfer ? '; also moves spare ISA capital into the pension.' : '.'),
+      'Routes the budget to pension first (subject to the pre-SIPP access bridge minimum) to capture maximum upfront tax and NIC relief' + (transfer ? '; also moves spare ISA capital into the pension.' : '.'),
       alloc, { transferNet: transfer ? Math.round(transfer.net) : 0, transferGross: transfer ? Math.round(transfer.gross) : 0, taxReliefSaved: alloc.taxReliefSaved + reliefExtra, planOpts: { transfer } }));
   }
   // 5 bracket-smoothed pension sizing
@@ -1536,10 +1536,10 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
     };
     strategies.push(mk('phased', 'Relief-First, Bridge-Last',
       switchYears > 0
-        ? `Pension-max for ${yearsToFirstRetire - switchYears} years so the tax uplift compounds longest, then ISA-max for the final ${switchYears} years to build the pre-access bridge.`
+        ? `Pension-max for ${yearsToFirstRetire - switchYears} years so the tax uplift compounds longest, then ISA-max for the final ${switchYears} years to build the pre-SIPP access bridge.`
         : bridge.gapYears > 0
           ? 'Existing liquid assets already cover the bridge reserve, so this collapses to Relief-First (shown for completeness).'
-          : 'No pre-access gap, so this collapses to Relief-First (shown for completeness).',
+          : 'No pre-SIPP access gap, so this collapses to Relief-First (shown for completeness).',
       blended, { phase: { switchYears, yearsToFirstRetire, early: reliefAlloc, late: isaAlloc }, planOpts: { contribByYear } }));
   }
   return { ctx, meta, strategies };
@@ -1841,7 +1841,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
         <div>
           <label className="text-slate-700 font-semibold block mb-1">Bridge-risk cap (Survival Maximizer)</label>
           <select value={preAccessCap} onChange={(e) => setPreAccessCap(e.target.value === 'any' ? 'any' : Number(e.target.value))} className="w-full p-2 bg-surface border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer">
-            <option value={0}>0% pre-access failures</option>
+            <option value={0}>0% pre-SIPP access failures</option>
             <option value={2}>≤ 2%</option>
             <option value={5}>≤ 5%</option>
             <option value={10}>≤ 10%</option>
@@ -1860,7 +1860,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
       {meta && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-[11px] font-mono">
           <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Net budget tested</span><strong>£{Math.round(meta.netBudget).toLocaleString()}/yr</strong></div>
-          <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Pre-access gap</span><strong>{meta.bridge.gapYears} yr{meta.bridge.gapYears === 1 ? '' : 's'}</strong></div>
+          <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Pre-SIPP access gap</span><strong>{meta.bridge.gapYears} yr{meta.bridge.gapYears === 1 ? '' : 's'}</strong></div>
           <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Bridge reserve target (+{Math.round(E.num(plan?.config?.bridgeSafetyMargin, 30))}%)</span><strong>{fmtK(meta.bridgeCapital)}</strong></div>
           <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Liquid today above buffer</span><strong>{fmtK(Math.max(0, meta.liquidToday - E.num(emergencyFloor, 0)))}</strong></div>
         </div>
@@ -1910,7 +1910,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
                       <div className="flex justify-between"><span className="text-slate-500 font-sans">10th %ile pot:</span><span className="font-bold text-slate-800">{fmtK(st.p10Terminal)}</span></div>
                       {ctx.pensionDeathTaxRate > 0 && <div className="flex justify-between"><span className="text-slate-500 font-sans">Median pot net of pension death tax:</span><span className="font-bold text-slate-800">{fmtK(st.medianTerminalNet)}</span></div>}
                       <div className="flex justify-between"><span className="text-slate-500 font-sans">Median failure age:</span><span className={`font-bold ${st.preNmpaFailRate > 5 ? 'text-rose-600' : 'text-slate-700'}`}>{st.medianFailAge ? `Age ${st.medianFailAge}` : 'None'}</span></div>
-                      <div className="flex justify-between"><span className="text-slate-500 font-sans">Pre-access (bridge) failures:</span><span className={`font-bold ${st.preNmpaFailRate > 5 ? 'text-rose-600' : 'text-slate-700'}`}>{st.preNmpaFailRate.toFixed(1)}%</span></div>
+                      <div className="flex justify-between"><span className="text-slate-500 font-sans">Pre-SIPP access (bridge) failures:</span><span className={`font-bold ${st.preNmpaFailRate > 5 ? 'text-rose-600' : 'text-slate-700'}`}>{st.preNmpaFailRate.toFixed(1)}%</span></div>
                     </div>
                     {res.searchResults && (
                       <details className="text-[10px] text-slate-500">
@@ -2238,8 +2238,8 @@ export default function App() {
   };
   const handleExportCSV = () => {
     if (!timelineData.length) return;
-    const headers = ['Year', 'Age (Myself)', 'Age (Partner)', 'Working (Myself)', 'Working (Partner)', 'Target Spend (£)', 'Net Guaranteed Income (£)', 'Working Partner Take-home (£)', 'State Pension (Myself £)', 'State Pension (Partner £)', 'Net Drawdown Demand (£)', 'Pension Withdrawals Gross (£)', 'PA Harvested (£)', 'Income Tax (£)', 'CGT (£)', 'Realised Gains (£)', 'Pensions (£)', 'ISAs (£)', 'Other Investments (£)', 'Cash Savings (£)', 'Total Combined Pot (£)', 'Pre-access Liquid (£)', 'Unmet (£)', 'Status'];
-    const rows = timelineData.map(r => [r.year, r.ageSelf, isCouple ? r.agePart : 'N/A', r.workingSelf ? 'Yes' : 'No', isCouple ? (r.workingPart ? 'Yes' : 'No') : 'N/A', r.targetSpend.toFixed(0), r.netGuaranteed.toFixed(0), r.workingTakeHome.toFixed(0), r.spSelf.toFixed(0), isCouple ? r.spPart.toFixed(0) : '0', r.netDrawdown.toFixed(0), r.drawdownPensions.toFixed(0), r.harvested.toFixed(0), r.taxPaid.toFixed(0), (r.cgtPaid || 0).toFixed(0), (r.realisedGains || 0).toFixed(0), r.pensions.toFixed(0), r.isas.toFixed(0), r.other.toFixed(0), r.cash.toFixed(0), r.totalCombined.toFixed(0), r.preNmpaLiquid.toFixed(0), r.unmetDemand.toFixed(0), r.preNmpaInsolvent ? 'Pre-access gap' : r.unmetDemand > E.FAIL_TOLERANCE ? 'Shortfall' : 'Solvent']);
+    const headers = ['Year', 'Age (Myself)', 'Age (Partner)', 'Working (Myself)', 'Working (Partner)', 'Target Spend (£)', 'Net Guaranteed Income (£)', 'Working Partner Take-home (£)', 'State Pension (Myself £)', 'State Pension (Partner £)', 'Net Drawdown Demand (£)', 'Pension Withdrawals Gross (£)', 'PA Harvested (£)', 'Income Tax (£)', 'CGT (£)', 'Realised Gains (£)', 'Pensions (£)', 'ISAs (£)', 'Other Investments (£)', 'Cash Savings (£)', 'Total Combined Pot (£)', 'Pre-SIPP access Liquid (£)', 'Unmet (£)', 'Status'];
+    const rows = timelineData.map(r => [r.year, r.ageSelf, isCouple ? r.agePart : 'N/A', r.workingSelf ? 'Yes' : 'No', isCouple ? (r.workingPart ? 'Yes' : 'No') : 'N/A', r.targetSpend.toFixed(0), r.netGuaranteed.toFixed(0), r.workingTakeHome.toFixed(0), r.spSelf.toFixed(0), isCouple ? r.spPart.toFixed(0) : '0', r.netDrawdown.toFixed(0), r.drawdownPensions.toFixed(0), r.harvested.toFixed(0), r.taxPaid.toFixed(0), (r.cgtPaid || 0).toFixed(0), (r.realisedGains || 0).toFixed(0), r.pensions.toFixed(0), r.isas.toFixed(0), r.other.toFixed(0), r.cash.toFixed(0), r.totalCombined.toFixed(0), r.preNmpaLiquid.toFixed(0), r.unmetDemand.toFixed(0), r.preNmpaInsolvent ? 'Pre-SIPP access gap' : r.unmetDemand > E.FAIL_TOLERANCE ? 'Shortfall' : 'Solvent']);
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
     const link = document.createElement('a'); link.setAttribute('href', encodeURI(csvContent)); link.setAttribute('download', `retirement_audit_${new Date().toISOString().slice(0, 10)}.csv`);
     document.body.appendChild(link); link.click(); link.remove();
@@ -2262,7 +2262,7 @@ export default function App() {
       const rateAt = (spend) => { let s = 0; for (const zs of paths) if (E.runTrial(ctx, zs, spend).survived) s++; return (s / SEARCH_TRIALS) * 100; };
       let low = 0, result;
       if (rateAt(0) < targetConfidence) {
-        result = { spend: 0, note: 'Even zero spending fails the target — check the pre-access gap, one-off costs or the bequest floor.' };
+        result = { spend: 0, note: 'Even zero spending fails the target — check the pre-SIPP access gap, one-off costs or the bequest floor.' };
       } else {
         let high = Math.max(20000, ctx.targetSpend * 2, 150000), guard = 0;
         while (rateAt(high) >= targetConfidence && guard++ < 8) { low = high; high *= 2; }
@@ -2592,13 +2592,19 @@ export default function App() {
                             {isCouple ? (
                               <select value={c.owner} onChange={(e) => updateListItem('oneOffContributions', c.id, { owner: e.target.value })} className="p-1 bg-surface border border-slate-300 rounded text-slate-700"><option value="Myself">Myself</option><option value="Partner">Partner</option></select>
                             ) : <span className="text-slate-500 font-semibold px-1">Myself</span>}
-                            <select value={c.transferredFrom} onChange={(e) => updateListItem('oneOffContributions', c.id, { transferredFrom: e.target.value })} className="p-1 bg-surface border border-slate-300 rounded text-slate-700" title="Transferred from">
-                              <option value="External">External (New Capital)</option>
-                              {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
-                            </select>
-                            <select value={c.category} onChange={(e) => { const category = e.target.value; const patch = { category }; if (c.stagedTargetWrapper === c.category) patch.stagedTargetWrapper = category; updateListItem('oneOffContributions', c.id, patch); }} className="p-1 bg-surface border border-slate-300 rounded text-blue-700 font-semibold">
-                              {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
-                            </select>
+                            <div className="flex flex-col gap-0.5">
+                              <span className="text-[9px] text-slate-400 leading-none">New capital or internal transfer?</span>
+                              <select value={c.transferredFrom} onChange={(e) => updateListItem('oneOffContributions', c.id, { transferredFrom: e.target.value })} className="p-1 bg-surface border border-slate-300 rounded text-slate-700" title="Transferred from">
+                                <option value="External">External (New Capital)</option>
+                                {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
+                              </select>
+                            </div>
+                            <div className="flex flex-col gap-0.5">
+                              <span className="text-[9px] text-slate-400 leading-none">Funding destination</span>
+                              <select value={c.category} onChange={(e) => { const category = e.target.value; const patch = { category }; if (c.stagedTargetWrapper === c.category) patch.stagedTargetWrapper = category; updateListItem('oneOffContributions', c.id, patch); }} className="p-1 bg-surface border border-slate-300 rounded text-blue-700 font-semibold">
+                                {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
+                              </select>
+                            </div>
                             <input type="number" min="0" step="1000" placeholder="Amount (£)" onFocus={handleFocus} value={c.amount} onChange={(e) => updateListItem('oneOffContributions', c.id, { amount: parseInputNumber(e.target.value) })} className="w-24 p-1 bg-surface border border-slate-300 rounded font-mono text-emerald-700 font-bold" />
                             {st && !st.direct && (
                               <button onClick={() => toggleOneOffExpand(c.id)} className="p-1 text-amber-600 hover:text-amber-800 cursor-pointer transition-colors" title="Staging schedule"><Settings className="w-4 h-4" /></button>
@@ -2725,7 +2731,7 @@ export default function App() {
                 <div><label className="text-slate-600 font-semibold block mb-1">Personal Pension Access Age (NMPA)</label><input type="number" min="0" max="120" placeholder="58" onFocus={handleFocus} value={plan?.demographics?.privatePensionAge ?? ''} onChange={(e) => updateDemographics('privatePensionAge', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Statutory NMPA is 55 today and 57 from April 2028.</span></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">State Pension Start Age</label><input type="number" min="0" max="120" placeholder="68" onFocus={handleFocus} value={plan?.demographics?.statePensionAge ?? ''} onChange={(e) => updateDemographics('statePensionAge', e.target.value)} className={inputCls} /></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">Cash buffer kept from surplus income (months)</label><input type="number" min="0" step="1" placeholder="6" onFocus={handleFocus} value={plan?.config?.cashBufferMonths ?? ''} onChange={(e) => updateConfig('cashBufferMonths', e.target.value)} className={inputCls} /></div>
-                <div><label className="text-slate-600 font-semibold block mb-1">Tournament bridge safety margin (%)</label><input type="number" min="0" step="5" placeholder="30" onFocus={handleFocus} value={plan?.config?.bridgeSafetyMargin ?? ''} onChange={(e) => updateConfig('bridgeSafetyMargin', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Uplift on the pre-access reserve, assuming 0% real growth.</span></div>
+                <div><label className="text-slate-600 font-semibold block mb-1">Tournament bridge safety margin (%)</label><input type="number" min="0" step="5" placeholder="30" onFocus={handleFocus} value={plan?.config?.bridgeSafetyMargin ?? ''} onChange={(e) => updateConfig('bridgeSafetyMargin', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Uplift on the pre-SIPP access reserve, assuming 0% real growth.</span></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">Pension death-tax haircut (%)</label><input type="number" min="0" max="100" step="5" placeholder="0" onFocus={handleFocus} value={plan?.config?.pensionDeathTaxRate ?? ''} onChange={(e) => updateConfig('pensionDeathTaxRate', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Applied to pension left at age {terminalAge} for the "net" pot figures only (IHT from April 2027 / beneficiary income tax).</span></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">Monte Carlo seed</label><div className="flex gap-1"><input type="number" value={mcSeed} onChange={(e) => setMcSeed(Math.max(1, parseInt(e.target.value) || 1))} className={inputCls} /><button type="button" onClick={() => setMcSeed(Math.floor(Math.random() * 1e9) + 1)} className="px-2 bg-slate-100 border border-slate-300 rounded-lg text-[11px] font-semibold cursor-pointer hover:bg-slate-200">Reseed</button></div><span className="text-[10px] text-slate-400 mt-1 block">Same seed = same market paths (reproducible, fair comparisons).</span></div>
               </div>
@@ -2735,7 +2741,7 @@ export default function App() {
               <div className="flex justify-between items-center">
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">Asset Allocations, Return Matrix &amp; Volatilities (σ)</h3>
-                  <span className="text-[11px] text-slate-500">Expected real return is treated as the median (geometric) annual rate; Monte Carlo paths are log-normal around it with the stated σ, one market factor for all wrappers.</span>
+                  <span className="text-[11px] text-slate-500">Expected real return is treated as the median (geometric) annual rate; Monte Carlo paths are log-normal around it with the stated σ, one market factor for all wrappers. Default rates and volatilities are drawn from Vanguard's Capital Markets Model (VCMM).</span>
                 </div>
                 <button onClick={() => setIsEditingRisk(!isEditingRisk)} className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border ${isEditingRisk ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'}`}><Pencil className="w-3.5 h-3.5" />{isEditingRisk ? 'Done Editing' : 'Edit Matrix'}</button>
               </div>
@@ -2796,7 +2802,7 @@ export default function App() {
               <p className="leading-relaxed"><strong>What it does:</strong> Models compound wealth paths and tax-wrapper decumulation using steady real rates of return (Expected baseline, Lucky 90th percentile, Unlucky 10th percentile). Use the Sandbox below to test contributions and salary sacrifice ratios.</p>
               <p className="text-slate-500 text-[11px] leading-relaxed"><strong>Why these figures differ from Monte Carlo:</strong> this trajectory assumes smooth, constant returns without volatility or sequence-of-returns shocks. The Monte Carlo median is centred on the same expected rate, so the gap between the two is the cost of volatility.</p>
               <p className={`text-[11px] font-semibold ${deterministicVerdict.survived ? 'text-emerald-700' : 'text-rose-700'}`}>
-                {deterministicVerdict.survived ? `Expected path survives to ${terminalAge}` : `Expected path fails at age ${deterministicVerdict.failAge} (${deterministicVerdict.failReason === 'pre-access' ? 'pre-access bridge exhausted' : deterministicVerdict.failReason === 'floor' ? 'below the bequest floor' : 'spending shortfall'})`} — lifetime tax {formatGBP(deterministicVerdict.lifetimeTax)}{P.cgtEnabled ? ' (income tax + CGT)' : ''}.
+                {deterministicVerdict.survived ? `Expected path survives to ${terminalAge}` : `Expected path fails at age ${deterministicVerdict.failAge} (${deterministicVerdict.failReason === 'pre-access' ? 'pre-SIPP access bridge exhausted' : deterministicVerdict.failReason === 'floor' ? 'below the bequest floor' : 'spending shortfall'})`} — lifetime tax {formatGBP(deterministicVerdict.lifetimeTax)}{P.cgtEnabled ? ' (income tax + CGT)' : ''}.
               </p>
             </div>
 
@@ -2958,7 +2964,7 @@ export default function App() {
             <div className="p-4 bg-indigo-50/80 border border-indigo-200 rounded-2xl text-xs text-slate-700 space-y-1.5 shadow-2xs">
               <div className="flex items-center gap-2 font-bold text-indigo-950 text-sm"><Dices className="w-4 h-4 text-indigo-600" /> Stochastic Monte Carlo Stress Testing ({MC_TRIALS.toLocaleString()} Randomized Paths)</div>
               <p className="leading-relaxed"><strong>What it does:</strong> Stress-tests your target living expenditure against {MC_TRIALS.toLocaleString()} randomized market runs using each risk tier's annual volatility (σ). It reports the failure probability, when capital runs out, and solves for your sustainable maximum spending at a chosen confidence level.</p>
-              <p className="text-slate-500 text-[11px] leading-relaxed"><strong>How failure is defined:</strong> a year in which living costs or a one-off cost cannot be met from any accessible wrapper (a pre-access failure means pension money existed but was locked), or a terminal pot below the bequest floor. Paths are seeded, so re-running with the same seed reproduces the result exactly.</p>
+              <p className="text-slate-500 text-[11px] leading-relaxed"><strong>How failure is defined:</strong> a year in which living costs or a one-off cost cannot be met from any accessible wrapper (a pre-SIPP access failure means pension money existed but was locked), or a terminal pot below the bequest floor. Paths are seeded, so re-running with the same seed reproduces the result exactly.</p>
             </div>
 
             <div className="bg-surface border border-slate-200/90 rounded-2xl p-5 shadow-xs flex flex-wrap items-center justify-between gap-3">
@@ -2988,7 +2994,7 @@ export default function App() {
                   <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 w-full lg:w-auto text-xs border-t lg:border-t-0 border-slate-200/80 pt-3 lg:pt-0">
                     <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Survival Rate</span><span className={`text-base font-black font-mono ${simResult.successRate >= 90 ? 'text-emerald-700' : simResult.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}`}>{simResult.successRate.toFixed(1)}%</span></div>
                     <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Age of Failure</span><span className={`text-base font-black font-mono ${!simResult.medianFailAge ? 'text-emerald-700' : simResult.medianFailAge < nmpa ? 'text-rose-700' : 'text-amber-700'}`}>{simResult.medianFailAge ? `Age ${simResult.medianFailAge}` : 'None'}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono truncate">{simResult.medianFailAge ? `Median of failures (earliest ${simResult.earliestFailAge})` : '100% Solvency'}</span></div>
-                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Pre-access failures</span><span className={`text-base font-black font-mono ${simResult.preNmpaFailRate > 5 ? 'text-rose-700' : 'text-slate-700'}`}>{simResult.preNmpaFailRate.toFixed(1)}%</span></div>
+                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Pre-SIPP access failures</span><span className={`text-base font-black font-mono ${simResult.preNmpaFailRate > 5 ? 'text-rose-700' : 'text-slate-700'}`}>{simResult.preNmpaFailRate.toFixed(1)}%</span></div>
                     <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">10th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-rose-700">{formatGBP(simResult.p10Terminal)}</span></div>
                     <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Median Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-blue-700">{formatGBP(simResult.medianTerminal)}</span>{ctx.pensionDeathTaxRate > 0 && <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">net of pension death tax {formatGBP(simResult.medianTerminalNet)}</span>}</div>
                     <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">90th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-emerald-700">{formatGBP(simResult.p90Terminal)}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">median lifetime tax {formatGBP(simResult.medianLifetimeTax)}</span></div>
@@ -3082,7 +3088,7 @@ export default function App() {
             </div>
             <div className="overflow-x-auto border border-slate-200 rounded-xl">
               <table className="w-full text-left text-xs border-collapse">
-                <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans"><tr><th className="p-2.5">Year</th><th className="p-2.5">Age (M)</th>{isCouple && <th className="p-2.5">Age (P)</th>}<th className="p-2.5">Spend Target</th><th className="p-2.5">Guaranteed + Take-home (net)</th><th className="p-2.5">Net Drawdown</th><th className="p-2.5">Pension Draw (gross)</th><th className="p-2.5">Tax</th>{P.cgtEnabled && <th className="p-2.5">CGT</th>}<th className="p-2.5">Pensions</th><th className="p-2.5">ISAs</th><th className="p-2.5">Other Inv</th><th className="p-2.5">Cash</th><th className="p-2.5">Total Combined</th><th className="p-2.5">Pre-access Liquid</th><th className="p-2.5 text-right">Status</th></tr></thead>
+                <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans"><tr><th className="p-2.5">Year</th><th className="p-2.5">Age (M)</th>{isCouple && <th className="p-2.5">Age (P)</th>}<th className="p-2.5">Spend Target</th><th className="p-2.5">Guaranteed + Take-home (net)</th><th className="p-2.5">Net Drawdown</th><th className="p-2.5">Pension Draw (gross)</th><th className="p-2.5">Tax</th>{P.cgtEnabled && <th className="p-2.5">CGT</th>}<th className="p-2.5">Pensions</th><th className="p-2.5">ISAs</th><th className="p-2.5">Other Inv</th><th className="p-2.5">Cash</th><th className="p-2.5">Total Combined</th><th className="p-2.5">Pre-SIPP access Liquid</th><th className="p-2.5 text-right">Status</th></tr></thead>
                 <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
                   {timelineData.map(r => (
                     <tr key={r.year} className="hover:bg-slate-50/80 transition-colors">
@@ -3095,7 +3101,7 @@ export default function App() {
                       {P.cgtEnabled && <td className="p-2 text-amber-700">{formatGBP(r.cgtPaid || 0)}{r.realisedGains > 0 && <span className="text-[9px] text-slate-400 block">on {formatGBP(r.realisedGains)} gains</span>}</td>}
                       <td className="p-2 text-sky-700">{formatGBP(r.pensions)}</td><td className="p-2 text-teal-700">{formatGBP(r.isas)}</td><td className="p-2 text-amber-700">{formatGBP(r.other)}</td><td className="p-2 text-slate-700">{formatGBP(r.cash)}</td>
                       <td className="p-2 font-bold text-blue-700">{formatGBP(r.totalCombined)}</td><td className="p-2 text-slate-600">{formatGBP(r.preNmpaLiquid)}</td>
-                      <td className="p-2 text-right">{r.preNmpaInsolvent ? <span className="px-2 py-0.5 bg-rose-100 text-rose-800 rounded font-sans text-[10px] font-bold">Pre-access Gap</span> : r.unmetDemand > E.FAIL_TOLERANCE ? <span className="px-2 py-0.5 bg-rose-100 text-rose-800 rounded font-sans text-[10px] font-bold">Shortfall {formatGBP(r.unmetDemand)}</span> : <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded font-sans text-[10px] font-bold">Solvent</span>}</td>
+                      <td className="p-2 text-right">{r.preNmpaInsolvent ? <span className="px-2 py-0.5 bg-rose-100 text-rose-800 rounded font-sans text-[10px] font-bold">Pre-SIPP access Gap</span> : r.unmetDemand > E.FAIL_TOLERANCE ? <span className="px-2 py-0.5 bg-rose-100 text-rose-800 rounded font-sans text-[10px] font-bold">Shortfall {formatGBP(r.unmetDemand)}</span> : <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded font-sans text-[10px] font-bold">Solvent</span>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -3114,13 +3120,13 @@ export default function App() {
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">1. Equal net budget</strong><p className="text-slate-500">Each strategy costs the same take-home pay. Pension money is grossed up using each owner's own salary (income tax + NIC relief, plus any employer NIC pass-through set in Config), capped by the annual allowance (£{P.pensionAllowance.toLocaleString()}) and salary; ISA money is capped at £{P.isaAllowance.toLocaleString()} per person; anything left over flows to a GIA.</p></div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">2. Conservative bridge sizing</strong><p className="text-slate-500">If spending starts before anyone can access a pension (age {nmpa}), the bridge reserve is the sum of net drawdown in those years (after guaranteed income and a working partner's take-home), uplifted by the safety margin ({E.num(plan?.config?.bridgeSafetyMargin, 30)}%) and assuming 0% real growth.</p></div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">3. The players</strong><p className="text-slate-500"><strong>Current Plan</strong> · <strong>Survival Maximizer</strong> (searches the ISA share from 0% to 100% and keeps the best survival, subject to the bridge-risk cap) · <strong>Liquidity-First</strong> (ISA allowances first) · <strong>Relief-First</strong> (pension first, bridge minimum kept; with a Bed &amp; SIPP transfer of spare ISA capital in full scope) · <strong>Bracket-Smoothed Sizing</strong> (pension funded only to the pot whose sustainable withdrawal plus state pension fills the basic-rate band, the rest to ISA) · <strong>Relief-First, Bridge-Last</strong> (pension-max early, ISA-max in the final years before retirement).</p></div>
-                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">4. Reading the results</strong><p className="text-slate-500">Rank by survival first; ties within 0.5 points are broken by the 10th-percentile pot. Watch the pre-access failure rate: a strategy can win on total survival by accepting more bridge risk. The "Partner balancing" option steers new money to the partner with the smaller projected pension so both personal allowances can be used in retirement; it costs relief if that partner pays a lower marginal rate, so it does not always win.</p></div>
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">4. Reading the results</strong><p className="text-slate-500">Rank by survival first; ties within 0.5 points are broken by the 10th-percentile pot. Watch the pre-SIPP access failure rate: a strategy can win on total survival by accepting more bridge risk. The "Partner balancing" option steers new money to the partner with the smaller projected pension so both personal allowances can be used in retirement; it costs relief if that partner pays a lower marginal rate, so it does not always win.</p></div>
               </div>
             </div>
 
             <div id="doc-decumulation" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Sliders className="w-4 h-4 text-blue-600" /> Decumulation Policies &amp; Pension Drawdown Strategies</h2>
-              <p className="text-xs text-slate-600 leading-relaxed">How money is withdrawn across wrappers changes lifetime tax and the size of the pot left at the end; it changes the probability of maintaining your living costs far less than the spend level, asset allocation and the pre-access bridge do.</p>
+              <p className="text-xs text-slate-600 leading-relaxed">How money is withdrawn across wrappers changes lifetime tax and the size of the pot left at the end; it changes the probability of maintaining your living costs far less than the spend level, asset allocation and the pre-SIPP access bridge do.</p>
               <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1.5">
                 <li><strong>Tax Smoothing (default):</strong> fills the £{P.pa.toLocaleString()} allowance from pension income (0%), then draws pension income up to the £{P.basicLimit.toLocaleString()} higher-rate threshold (about {Math.round((1 - P.pclsProp) * P.basicRate * 100)}% effective with the {Math.round(P.pclsProp * 100)}% tax-free element), then cash, GIA and ISA, with pension income above the threshold as the last resort. Cash and ISAs are preserved as the low-volatility reserve and the tax-free shield for later life.</li>
                 <li><strong>UK FIRE Bracket Fill:</strong> draws pension only up to the £{P.pa.toLocaleString()} allowance, then cash, GIA and ISAs; pension income above the allowance is the last resort. Pays the least tax during your lifetime and leaves the largest pot, but that pot is mostly taxable pension — set the pension death-tax haircut in Config to see the difference net of what beneficiaries would pay.</li>
@@ -3216,7 +3222,7 @@ export default function App() {
               <p className="text-xs text-slate-600 leading-relaxed">When a one-off capital cost is scheduled, the engine liquidates assets in this order:</p>
               <ol className="list-decimal pl-5 text-xs text-slate-600 space-y-1">
                 <li><strong>Cash Savings</strong> (both owners), then <strong>Other Investments (GIA)</strong>, then <strong>Stocks &amp; Shares ISAs</strong>.</li>
-                <li><strong>Pensions</strong>, but only for an owner who has reached the access age ({nmpa}). If the cost still cannot be met, the year is flagged as a shortfall — or a pre-access gap when pension money existed but was locked.</li>
+                <li><strong>Pensions</strong>, but only for an owner who has reached the access age ({nmpa}). If the cost still cannot be met, the year is flagged as a shortfall — or a pre-SIPP access gap when pension money existed but was locked.</li>
               </ol>
               <p className="text-xs text-slate-500">Known simplifications: state pension is held flat in real terms (no triple-lock uplift), tax thresholds and allowances are held flat in real terms, and the death of a partner is not modelled.</p>
               <p className="text-xs text-slate-500 leading-relaxed"><strong>Pension allowance limitations.</strong> The model assumes you have <strong>not</strong> yet flexibly accessed a pension, because it is built for planning towards retirement rather than for someone already drawing an income. If you have already taken taxable pension income, your annual allowance is already {formatGBP(P.mpaaLimit)} and the projection will overstate how much you can contribute until the year it starts drawing. Carry forward is also worked out independently for each year rather than being consumed as it is used, so several large staged deposits in overlapping years could each count the same unused allowance. Neither the tapered annual allowance for high earners nor annual allowance charges themselves are modelled.</p>
