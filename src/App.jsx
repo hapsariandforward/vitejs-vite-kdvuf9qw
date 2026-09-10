@@ -1545,6 +1545,38 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
   return { ctx, meta, strategies };
 }
 
+/*
+ * Every meaningful combination of the three decumulation methodology settings, each as a ready-to-run
+ * plan. The harvest flag only bites on policies that declare `harvest`, so policies that ignore it
+ * (Sequential) emit a single variant instead of a duplicate pair that would waste a simulation and
+ * show up as a phantom tie.
+ */
+function buildPolicyCandidates(rawPlan) {
+  const plan = normalizePlan(rawPlan);
+  const out = [];
+  Object.entries(DECUMULATION_POLICIES).forEach(([policyKey, policy]) => {
+    ['Phased Drawdown', 'Full 25% Lump Sum'].forEach(drawdownStrategy => {
+      // harvest-off first so that an exact tie leaves the simpler setting alone rather than
+      // switching on a behaviour that showed no measured benefit
+      (policy.harvest ? [false, true] : [false]).forEach(harvest => {
+        out.push({
+          id: `${policyKey}|${drawdownStrategy}|${harvest ? 'h1' : 'h0'}`,
+          decumulationPolicy: policyKey,
+          drawdownStrategy,
+          harvestPersonalAllowance: harvest,
+          harvestApplies: !!policy.harvest,
+          planState: {
+            ...plan,
+            spending: { ...plan.spending, decumulationPolicy: policyKey, drawdownStrategy },
+            config: { ...plan.config, harvestPersonalAllowance: harvest }
+          }
+        });
+      });
+    });
+  });
+  return out;
+}
+
 // Pick the best candidate: respect the pre-access risk cap where possible, then highest success (within noise),
 // then 10th-percentile pot, then median.
 function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
@@ -1559,8 +1591,8 @@ function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
 }
 
 // Namespace used by the UI (mirrors the modular engine.js exports)
-const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, employeeNIC, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, diffStrategyPlans, resolveSurvivalMaximizer, buildTournament, pickBest };
-export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans };
+const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, employeeNIC, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, diffStrategyPlans, resolveSurvivalMaximizer, buildTournament, buildPolicyCandidates, pickBest };
+export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans, buildPolicyCandidates, pickBest };
 
 
 const STORAGE_KEY = 'rp_plan_full_v28';          // unchanged: old saved plans are migrated by normalizePlan
@@ -2017,6 +2049,9 @@ export default function App() {
   const [simProgress, setSimProgress] = useState(null);
   const [isSimulating, setIsSimulating] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
+  const [policyResults, setPolicyResults] = useState(null);
+  const [policyProgress, setPolicyProgress] = useState(null);
+  const [isPolicySearching, setIsPolicySearching] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showAdvancedConfig, setShowAdvancedConfig] = useState(false);
   const [expandedOneOff, setExpandedOneOff] = useState(() => new Set());
@@ -2278,6 +2313,53 @@ export default function App() {
       const stats = await runMonteCarloAsync(ctx, { trials: MC_TRIALS, seed: mcSeed + 1, spendOverride: result.spend, onProgress: (f) => setSimProgress({ label: `Confirming £${result.spend.toLocaleString()} over ${MC_TRIALS.toLocaleString()} paths…`, value: 0.6 + 0.4 * f }) });
       setSimResult({ type: 'optimize', title: `Safe Max Annual Spend (${targetConfidence}% Target)`, ...stats, spend: result.spend, note: result.note });
     } finally { setIsOptimizing(false); setSimProgress(null); }
+  };
+
+  // ------------------------------------------------------------ decumulation policy auto-pick
+  // Every policy combination is scored on the same seed (common random numbers), so the differences
+  // between them are far more reliable than each one's absolute sampling error.
+  const POLICY_SHORT = { 'Bracket Fill Basic': 'Tax Smoothing', 'Bracket Fill': 'UK FIRE Bracket Fill', 'Sequential': 'Sequential' };
+  const policyRowLabel = (c) => `${POLICY_SHORT[c.decumulationPolicy] || c.decumulationPolicy} · ${c.drawdownStrategy === 'Full 25% Lump Sum' ? 'Lump Sum' : 'Phased'}${c.harvestApplies ? (c.harvestPersonalAllowance ? ' · harvest on' : ' · harvest off') : ''}`;
+  // nothing to decumulate means every policy scores identically, so the sweep would be meaningless
+  const policySweepReady = useMemo(() => {
+    const funded = (ctx.accounts || []).reduce((s, a) => s + a.balance + a.contrib, 0);
+    return funded > 0 && ctx.targetSpend > 0;
+  }, [ctx]);
+
+  const handleFindBestPolicy = async () => {
+    setIsPolicySearching(true); setPolicyResults(null);
+    setPolicyProgress({ label: 'Preparing policy combinations…', value: 0 });
+    await tick();
+    try {
+      const candidates = E.buildPolicyCandidates(plan);
+      const out = [];
+      for (let i = 0; i < candidates.length; i++) {
+        const c = candidates[i];
+        const label = policyRowLabel(c);
+        setPolicyProgress({ label: `Testing ${i + 1}/${candidates.length}: ${label}`, value: i / candidates.length });
+        await tick();
+        // resolve MPAA per candidate: the policies differ in when taxable pension income starts
+        const cctx = E.buildContext(E.resolveMpaa(c.planState));
+        const stats = await runMonteCarloAsync(cctx, {
+          trials: TOURNAMENT_TRIALS, seed: mcSeed,
+          onProgress: (f) => setPolicyProgress({ label: `Testing ${i + 1}/${candidates.length}: ${label}`, value: (i + f) / candidates.length })
+        });
+        out.push({ ...c, label, stats });
+      }
+      const best = E.pickBest(out);
+      setPlan(prev => ({
+        ...prev,
+        spending: { ...(prev.spending || {}), decumulationPolicy: best.decumulationPolicy, drawdownStrategy: best.drawdownStrategy },
+        config: { ...(prev.config || {}), harvestPersonalAllowance: best.harvestPersonalAllowance }
+      }));
+      const rows = [...out].sort((a, b) =>
+        (a.id === best.id ? -1 : b.id === best.id ? 1 : 0) ||
+        (b.stats.successRate - a.stats.successRate) ||
+        (b.stats.p10Terminal - a.stats.p10Terminal) ||
+        (b.stats.medianTerminal - a.stats.medianTerminal));
+      setPolicyResults({ rows, bestId: best.id, seed: mcSeed, trials: TOURNAMENT_TRIALS });
+      flash(`Applied "${best.label}" — highest survival of ${candidates.length} policy combinations`, 4000);
+    } finally { setIsPolicySearching(false); setPolicyProgress(null); }
   };
 
   const displayedAccounts = isCouple ? (plan?.accounts || []) : (plan?.accounts || []).filter(a => a.owner === 'Myself');
@@ -2681,8 +2763,21 @@ export default function App() {
         {activeTab === 'config' && (
           <div className="space-y-6">
             <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
-              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Sliders className="w-4 h-4 text-blue-600" /> Decumulation &amp; Pension Withdrawal Methodology</h2>
-              <p className="text-xs text-slate-500">Select how withdrawals are ordered across tax wrappers and how pensions are crystallized. <button type="button" onClick={() => goToDoc('doc-decumulation')} className="text-blue-600 hover:underline font-semibold cursor-pointer">What the evidence says &rarr;</button></p>
+              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Sliders className="w-4 h-4 text-blue-600" /> Decumulation &amp; Pension Withdrawal Methodology</h2>
+                  <p className="text-xs text-slate-500 mt-1">Select how withdrawals are ordered across tax wrappers and how pensions are crystallized. <button type="button" onClick={() => goToDoc('doc-decumulation')} className="text-blue-600 hover:underline font-semibold cursor-pointer">What the evidence says &rarr;</button></p>
+                </div>
+                <div className="shrink-0">
+                  <button type="button" onClick={handleFindBestPolicy} disabled={isPolicySearching || !policySweepReady}
+                    className="px-3.5 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 dark:from-[#2C5C8F] dark:to-[#A9781F] dark:hover:from-[#204568] text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed">
+                    <Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300 dark:fill-[#FCD34D] dark:text-[#FCD34D]" />
+                    {isPolicySearching ? 'Searching…' : '⚡ Auto-Pick Best Policy'}
+                  </button>
+                  {!policySweepReady && <span className="text-[10px] text-slate-400 mt-1 block text-right max-w-[15rem]">Add balances or contributions and a living spend first — with nothing to draw down every policy scores the same.</span>}
+                </div>
+              </div>
+              {policyProgress && <ProgressBar value={policyProgress.value} label={policyProgress.label} />}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs pt-1">
                 <div>
                   <label className="text-slate-600 font-semibold block mb-1">Decumulation Policy</label>
@@ -2721,6 +2816,35 @@ export default function App() {
                   <button type="button" onClick={() => goToDoc('doc-cgt')} className="text-[11px] text-blue-600 hover:text-blue-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer mt-1"><HelpCircle className="w-3.5 h-3.5" /> How capital gains are tracked &amp; taxed &rarr;</button>
                 </div>
               </div>
+
+              {policyResults && (
+                <div className="pt-3 border-t border-slate-100 space-y-2">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5"><Trophy className="w-3.5 h-3.5 text-emerald-600" /> Policy search results — winner applied above</h3>
+                    <span className="text-[10px] text-slate-400">{policyResults.rows.length} combinations · {policyResults.trials.toLocaleString()} paths each · seed {policyResults.seed} · ranked by survival, ties within 0.5 points broken by the 10th-percentile pot</span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-[11px] border-collapse">
+                      <thead><tr className="border-b border-slate-200 text-slate-500 font-semibold"><th className="pb-1.5 pr-3">Policy combination</th><th className="pb-1.5 pr-3">Survival</th><th className="pb-1.5 pr-3">Pre-SIPP access failures</th><th className="pb-1.5 pr-3">10th %ile pot</th><th className="pb-1.5">Median pot</th></tr></thead>
+                      <tbody className="divide-y divide-slate-100 font-mono">
+                        {policyResults.rows.map(r => {
+                          const won = r.id === policyResults.bestId;
+                          return (
+                            <tr key={r.id} className={won ? 'bg-emerald-50/70' : 'hover:bg-slate-50/80'}>
+                              <td className={`py-1.5 pr-3 font-sans ${won ? 'font-bold text-emerald-900' : 'text-slate-700'}`}>{won && <Trophy className="w-3 h-3 text-emerald-600 inline mr-1 -mt-0.5" />}{r.label}</td>
+                              <td className={`py-1.5 pr-3 font-bold ${r.stats.successRate >= 90 ? 'text-emerald-700' : r.stats.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}`}>{r.stats.successRate.toFixed(1)}%</td>
+                              <td className={`py-1.5 pr-3 ${r.stats.preNmpaFailRate > 5 ? 'text-rose-600 font-bold' : 'text-slate-600'}`}>{r.stats.preNmpaFailRate.toFixed(1)}%</td>
+                              <td className="py-1.5 pr-3 text-slate-700">{fmtK(r.stats.p10Terminal)}</td>
+                              <td className="py-1.5 text-slate-700">{fmtK(r.stats.medianTerminal)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <p className="text-[10px] text-slate-400">Every combination is scored on the same market paths, so differences between rows are more reliable than each row's own sampling error. Changing any plan input invalidates these results — re-run to refresh.</p>
+                </div>
+              )}
             </div>
 
             <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
