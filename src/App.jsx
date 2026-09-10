@@ -3,14 +3,14 @@ import * as d3 from 'd3';
 import {
   TrendingUp, Layers, Check, RotateCcw, Dices, Zap, ShieldCheck, Target, Sliders, Download, Upload, Users, Wallet, Coins,
   Settings, Plus, Trash2, Table, FileSpreadsheet, CheckCircle2, AlertTriangle, Pencil, HelpCircle, BookOpen, History, Bookmark,
-  Save, Sparkles, ArrowUpRight, ArrowDownRight, Trophy, Info
+  Save, Sparkles, ArrowUpRight, ArrowDownRight, Trophy, Info, Sun, Moon, Monitor
 } from 'lucide-react';
 // ============================================================================================
-// Retirement Planning Studio v3.4 — single-file build (engine + UI).
+// Monte-Carlo Retirement Planner v3.4 — single-file build (engine + UI).
 // The engine section is framework-free and unit-tested; the UI section starts at "export default function App".
 // ============================================================================================
 /* =====================================================================================
-   Retirement Planning Studio — projection engine (pure, framework-free, unit-testable)
+   Monte-Carlo Retirement Planner — projection engine (pure, framework-free, unit-testable)
    -------------------------------------------------------------------------------------
    Everything in this section is deterministic given its inputs. No React, no DOM, no
    randomness other than the explicitly seeded generator used by the Monte Carlo runner.
@@ -1534,21 +1534,51 @@ export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_
 
 const STORAGE_KEY = 'rp_plan_full_v28';          // unchanged: old saved plans are migrated by normalizePlan
 const SCENARIOS_STORAGE_KEY = 'rp_saved_scenarios_v3';
+const THEME_STORAGE_KEY = 'rp_theme_v1';
 const APP_VERSION = 'v3.4';
 const MC_TRIALS = 5000;
 const TOURNAMENT_TRIALS = 1500;
 const SEARCH_TRIALS = 400;
 
+// Three themes: 'classic' (the original stock look, kept as an opt-in third option),
+// 'light' (Riviera Ledger) and 'dark' (Control Room).
 const SERIES_CONFIG = [
-  { id: 'lucky', label: 'Lucky (90th %ile)', color: '#059669', strokeWidth: 2.5, dash: 'none', defaultActive: true },
-  { id: 'expected', label: 'Expected (Real)', color: '#2563eb', strokeWidth: 3, dash: 'none', defaultActive: true },
-  { id: 'unlucky', label: 'Unlucky (10th %ile)', color: '#dc2626', strokeWidth: 2.5, dash: '5,4', defaultActive: true },
-  { id: 'nominal', label: 'Combined (Nominal)', color: '#7c3aed', strokeWidth: 2, dash: '4,3', defaultActive: false },
-  { id: 'pensions', label: 'Combined Pensions', color: '#0284c7', strokeWidth: 2, dash: 'none', defaultActive: true },
-  { id: 'isas', label: 'Combined ISAs', color: '#0d9488', strokeWidth: 2, dash: 'none', defaultActive: true },
-  { id: 'other', label: 'Combined Other', color: '#d97706', strokeWidth: 1.5, dash: 'none', defaultActive: false },
-  { id: 'cash', label: 'Combined Cash', color: '#475569', strokeWidth: 1.5, dash: '3,3', defaultActive: false }
+  { id: 'lucky', label: 'Lucky (90th %ile)', colors: { classic: '#059669', light: '#2F7A4F', dark: '#3FD68C' }, strokeWidth: 2.5, dash: 'none', defaultActive: true },
+  { id: 'expected', label: 'Expected (Real)', colors: { classic: '#2563eb', light: '#2C5C8F', dark: '#3D74E8' }, strokeWidth: 3, dash: 'none', defaultActive: true },
+  { id: 'unlucky', label: 'Unlucky (10th %ile)', colors: { classic: '#dc2626', light: '#B33B3B', dark: '#FF6B6B' }, strokeWidth: 2.5, dash: '5,4', defaultActive: true },
+  { id: 'nominal', label: 'Combined (Nominal)', colors: { classic: '#7c3aed', light: '#6D28D9', dark: '#8B7CF6' }, strokeWidth: 2, dash: '4,3', defaultActive: false },
+  { id: 'pensions', label: 'Combined Pensions', colors: { classic: '#0284c7', light: '#0284C7', dark: '#4FC3F0' }, strokeWidth: 2, dash: 'none', defaultActive: true },
+  { id: 'isas', label: 'Combined ISAs', colors: { classic: '#0d9488', light: '#0D9488', dark: '#3FDBC7' }, strokeWidth: 2, dash: 'none', defaultActive: true },
+  { id: 'other', label: 'Combined Other', colors: { classic: '#d97706', light: '#B0631E', dark: '#E89A4A' }, strokeWidth: 1.5, dash: 'none', defaultActive: false },
+  { id: 'cash', label: 'Combined Cash', colors: { classic: '#475569', light: '#5C6B72', dark: '#8A939B' }, strokeWidth: 1.5, dash: '3,3', defaultActive: false }
 ];
+
+const CHART_PALETTE = {
+  classic: { gridMajor: '#f1f5f9', gridMinor: '#f8fafc', axisText: '#64748b', hoverCrosshair: '#94a3b8', sandboxDash: '#f59e0b', historicalLine: '#6366f1', trajectoryHoverFill: '#2563eb', historicalHoverFill: '#6366f1', hoverDotStroke: '#ffffff' },
+  light:   { gridMajor: '#DCDFD2', gridMinor: '#E6E8DE', axisText: '#5C6B72', hoverCrosshair: '#8A9098', sandboxDash: '#B0631E', historicalLine: '#A9781F', trajectoryHoverFill: '#2C5C8F', historicalHoverFill: '#A9781F', hoverDotStroke: '#FBFAF4' },
+  dark:    { gridMajor: '#1e232b', gridMinor: '#171b21', axisText: '#8a939b', hoverCrosshair: '#5b636c', sandboxDash: '#e89a4a', historicalLine: '#8b7cf6', trajectoryHoverFill: '#3D74E8', historicalHoverFill: '#8b7cf6', hoverDotStroke: '#14171B' },
+};
+
+const MARKER_PALETTE = {
+  classic: {
+    retireSelf: { line: '#f59e0b', fill: '#fef3c7', stroke: '#fde68a', text: '#b45309' },
+    retirePart: { line: '#d97706', fill: '#fef3c7', stroke: '#fde68a', text: '#b45309' },
+    nmpa: { line: '#0284c7', fill: '#e0f2fe', stroke: '#bae6fd', text: '#0369a1' },
+    statePension: { line: '#059669', fill: '#d1fae5', stroke: '#a7f3d0', text: '#065f46' },
+  },
+  light: {
+    retireSelf: { line: '#A9781F', fill: '#F3E9CE', stroke: '#D9C48A', text: '#6B4E12' },
+    retirePart: { line: '#855D18', fill: '#F3E9CE', stroke: '#D9C48A', text: '#6B4E12' },
+    nmpa: { line: '#2C5C8F', fill: '#DCE6EF', stroke: '#AFC2D6', text: '#1B3A57' },
+    statePension: { line: '#2F7A4F', fill: '#DCEEE1', stroke: '#A9D3B8', text: '#1F5636' },
+  },
+  dark: {
+    retireSelf: { line: '#D4A537', fill: '#2E2209', stroke: '#47350D', text: '#F5DFA9' },
+    retirePart: { line: '#E2BC5E', fill: '#2E2209', stroke: '#47350D', text: '#F5DFA9' },
+    nmpa: { line: '#3D74E8', fill: '#16233A', stroke: '#223756', text: '#B9D3FF' },
+    statePension: { line: '#3FD68C', fill: '#0F2E20', stroke: '#17472F', text: '#A3EBC7' },
+  },
+};
 
 const HISTORICAL_PRESETS = [
   { label: '1929 Crash (Great Depression)', year: 1929 },
@@ -1586,8 +1616,8 @@ async function runMonteCarloAsync(ctx, { trials, seed, spendOverride = null, onP
   return { ...E.summarizeTrials(results), spend: spendOverride !== null ? spendOverride : ctx.targetSpend };
 }
 
-const inputCls = 'w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none';
-const smallInputCls = 'w-full p-2 bg-slate-50 border border-slate-300 rounded font-bold text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none';
+const inputCls = 'w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none';
+const smallInputCls = 'w-full p-2 bg-slate-50 border border-slate-300 rounded font-bold text-slate-900 focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none';
 
 function ProgressBar({ value, label }) {
   return (
@@ -1677,7 +1707,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
   const se = results && results.players.length ? results.players[0].stats.standardError : 0;
 
   return (
-    <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+    <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
         <div>
           <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
@@ -1696,12 +1726,12 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
         <div>
           <label className="text-slate-700 font-semibold block mb-1">Annual take-home budget (£ net)</label>
           <input type="number" min="0" step="250" value={budgetOverride} placeholder={meta ? `${Math.round(meta.derivedBudget).toLocaleString()} (from plan)` : ''} onChange={(e) => setBudgetOverride(e.target.value)}
-            className="w-full p-2 bg-white border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none" />
+            className="w-full p-2 bg-surface border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none" />
           <span className="text-[10px] text-slate-500 block mt-1">Derived from current ISA + net cost of pension contributions{salaryMissing.length ? ` (salary missing for ${salaryMissing.join(', ')} — ${Math.round((P.higherRate + P.nicUpper) * 100)}% relief assumed)` : ''}.</span>
         </div>
         <div>
           <label className="text-slate-700 font-semibold block mb-1">Optimization scope</label>
-          <select value={scope} onChange={(e) => setScope(e.target.value)} className="w-full p-2 bg-white border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer">
+          <select value={scope} onChange={(e) => setScope(e.target.value)} className="w-full p-2 bg-surface border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer">
             <option value="contributions">Contributions only (rebalance future deposits)</option>
             <option value="full">Full reallocation (+ Bed &amp; SIPP transfer of spare ISA)</option>
           </select>
@@ -1715,7 +1745,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
         </div>
         <div>
           <label className="text-slate-700 font-semibold block mb-1">Bridge-risk cap (Survival Maximizer)</label>
-          <select value={preAccessCap} onChange={(e) => setPreAccessCap(e.target.value === 'any' ? 'any' : Number(e.target.value))} className="w-full p-2 bg-white border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer">
+          <select value={preAccessCap} onChange={(e) => setPreAccessCap(e.target.value === 'any' ? 'any' : Number(e.target.value))} className="w-full p-2 bg-surface border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer">
             <option value={0}>0% pre-access failures</option>
             <option value={2}>≤ 2%</option>
             <option value={5}>≤ 5%</option>
@@ -1725,7 +1755,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
         </div>
         <div>
           <label className="text-slate-700 font-semibold block mb-1">Owner split of new money</label>
-          <select value={balance} disabled={!isCouple} onChange={(e) => setBalance(e.target.value)} className="w-full p-2 bg-white border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer disabled:opacity-50">
+          <select value={balance} disabled={!isCouple} onChange={(e) => setBalance(e.target.value)} className="w-full p-2 bg-surface border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer disabled:opacity-50">
             <option value="proportional">Keep current Myself/Partner ratio</option>
             <option value="balanced">Balance pensions between partners</option>
           </select>
@@ -1744,8 +1774,8 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
       <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between">
         {progress ? <div className="flex-1"><ProgressBar value={progress.value} label={progress.label} /></div> : <span className="text-[11px] text-slate-400">Seed {seed} — change it in Config to test a different set of market paths.</span>}
         <button type="button" onClick={handleRun} disabled={isEvaluating || !preview || (meta && meta.netBudget <= 0)}
-          className="px-4 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
-          <Zap className="w-3.5 h-3.5 fill-amber-300 text-amber-300" />
+          className="px-4 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 dark:from-[#A9781F] dark:to-[#2C5C8F] dark:hover:from-[#855D18] dark:hover:to-[#204568] text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
+          <Zap className="w-3.5 h-3.5 fill-amber-300 text-amber-300 dark:fill-[#FCD34D] dark:text-[#FCD34D]" />
           {isEvaluating ? 'Evaluating…' : '⚡ Run Strategy Tournament'}
         </button>
       </div>
@@ -1761,7 +1791,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
               const isBest = res.id === results.bestId;
               const st = res.stats;
               return (
-                <div key={res.id} className={`p-4 rounded-2xl border flex flex-col justify-between space-y-3 ${isBest ? 'bg-emerald-50/60 border-emerald-300 shadow-sm' : res.id === 'baseline' ? 'bg-slate-50 border-slate-200' : 'bg-white border-indigo-100 shadow-xs'}`}>
+                <div key={res.id} className={`p-4 rounded-2xl border flex flex-col justify-between space-y-3 ${isBest ? 'bg-emerald-50/60 border-emerald-300 shadow-sm' : res.id === 'baseline' ? 'bg-slate-50 border-slate-200' : 'bg-surface border-indigo-100 shadow-xs'}`}>
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-xs font-bold text-slate-900 leading-tight flex items-center gap-1">{isBest && <Trophy className="w-3.5 h-3.5 text-emerald-600" />}{res.name}</span>
@@ -1805,10 +1835,22 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
 
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('trajectory');
+  const [activeTab, setActiveTab] = useState('inputs');
   const [isEditingRisk, setIsEditingRisk] = useState(false);
   const [selectedHistoricalYear, setSelectedHistoricalYear] = useState(1965);
   const [mcSeed, setMcSeed] = useState(12345);
+
+  // Theme: 'classic' (original stock look, the default), 'light' (Riviera Ledger), 'dark' (Control Room).
+  const [theme, setTheme] = useState(() => {
+    const saved = safeStorageGet(THEME_STORAGE_KEY);
+    if (saved === 'classic' || saved === 'light' || saved === 'dark') return saved;
+    return 'classic';
+  });
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    safeStorageSet(THEME_STORAGE_KEY, theme);
+  }, [theme]);
 
   const [plan, setPlan] = useState(() => E.normalizePlan(safeStorageGet(STORAGE_KEY) ? (() => { try { return JSON.parse(safeStorageGet(STORAGE_KEY)); } catch (e) { return null; } })() : null));
 
@@ -2139,7 +2181,7 @@ export default function App() {
 
   const displayedAccounts = isCouple ? (plan?.accounts || []) : (plan?.accounts || []).filter(a => a.owner === 'Myself');
   const tabBtn = (id, Icon, label, accent = 'blue') => (
-    <button key={id} onClick={() => setActiveTab(id)} className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${activeTab === id ? (accent === 'indigo' ? 'bg-white text-indigo-600 shadow-xs' : 'bg-white text-blue-600 shadow-xs') : 'text-slate-600 hover:text-slate-900'}`}>
+    <button key={id} onClick={() => setActiveTab(id)} className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${activeTab === id ? (accent === 'indigo' ? 'bg-surface text-indigo-600 shadow-xs' : 'bg-surface text-blue-600 shadow-xs') : 'text-slate-600 hover:text-slate-900'}`}>
       <Icon className="w-3.5 h-3.5" /> {label}
     </button>
   );
@@ -2150,45 +2192,68 @@ export default function App() {
       <text y={y + 14} textAnchor="middle" fill={textColor} fontSize="10" fontWeight="bold">{label} ({shownAge})</text>
     </g>
   ) : null;
+  const mp = MARKER_PALETTE[theme];
+  const cp = CHART_PALETTE[theme];
+  const themedSeries = useMemo(() => SERIES_CONFIG.map(s => ({ ...s, color: s.colors[theme] })), [theme]);
   const markers = (scale) => (
     <>
-      {ageMarker(ctx.owners[0].retireAge, 'Retire M', '#f59e0b', '#fef3c7', '#fde68a', '#b45309', 10, scale)}
-      {isCouple && ageMarker(ctx.owners[1].retireAge + (currentAge - ctx.agePart0), 'Retire P', '#d97706', '#fef3c7', '#fde68a', '#b45309', 32, scale, ctx.owners[1].retireAge)}
-      {ageMarker(nmpa, 'NMPA', '#0284c7', '#e0f2fe', '#bae6fd', '#0369a1', 54, scale)}
-      {ageMarker(ctx.spa, 'State Pen', '#059669', '#d1fae5', '#a7f3d0', '#065f46', 76, scale)}
+      {ageMarker(ctx.owners[0].retireAge, 'Retire M', mp.retireSelf.line, mp.retireSelf.fill, mp.retireSelf.stroke, mp.retireSelf.text, 10, scale)}
+      {isCouple && ageMarker(ctx.owners[1].retireAge + (currentAge - ctx.agePart0), 'Retire P', mp.retirePart.line, mp.retirePart.fill, mp.retirePart.stroke, mp.retirePart.text, 32, scale, ctx.owners[1].retireAge)}
+      {ageMarker(nmpa, 'NMPA', mp.nmpa.line, mp.nmpa.fill, mp.nmpa.stroke, mp.nmpa.text, 54, scale)}
+      {ageMarker(ctx.spa, 'State Pen', mp.statePension.line, mp.statePension.fill, mp.statePension.stroke, mp.statePension.text, 76, scale)}
     </>
   );
 
+
+  const themeOptions = [
+    { id: 'classic', Icon: Monitor, title: 'Classic theme (original look)' },
+    { id: 'light', Icon: Sun, title: 'Riviera Ledger (light)' },
+    { id: 'dark', Icon: Moon, title: 'Control Room (dark)' },
+  ];
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 p-4 sm:p-6 lg:p-8 font-sans">
       <div className="max-w-7xl mx-auto space-y-6">
 
         {/* Header Bar */}
-        <div className="bg-white border border-slate-200/90 rounded-2xl p-5 shadow-xs flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-          <div>
-            <div className="flex items-center gap-2.5">
-              <div className="p-2 bg-blue-50 text-blue-600 rounded-xl border border-blue-100"><TrendingUp className="w-5 h-5" /></div>
-              <h1 className="text-xl font-bold tracking-tight text-slate-900">Retirement Planning Studio</h1>
-              <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 font-semibold border border-blue-100">{APP_VERSION}</span>
+        <div className="bg-surface border border-slate-200/90 rounded-2xl p-5 shadow-xs">
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+            <div>
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-blue-50 text-blue-600 rounded-xl border border-blue-100"><TrendingUp className="w-5 h-5" /></div>
+                <h1 className="text-xl font-bold tracking-tight text-slate-900 font-display italic">Monte-Carlo Retirement Planner</h1>
+                <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 font-semibold border border-blue-100">{APP_VERSION}</span>
+              </div>
+              <p className="text-xs text-slate-500 mt-1 max-w-3xl leading-relaxed">
+                UK multi-wrapper drawdown model, Monte Carlo &amp; historical backtesting. <strong className="text-slate-700 font-semibold">For educational &amp; illustrative purposes only — this is not financial advice.</strong> Please complete <span className="font-semibold text-blue-700">Plan Inputs</span> first; Config changes are optional.
+              </p>
             </div>
-            <p className="text-xs text-slate-500 mt-1 max-w-3xl leading-relaxed">
-              UK multi-wrapper drawdown model, Monte Carlo &amp; historical backtesting. <strong className="text-slate-700 font-semibold">For educational &amp; illustrative purposes only — this is not financial advice.</strong> Please complete <span className="font-semibold text-blue-700">Plan Inputs</span> first; Config changes are optional.
-            </p>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex items-center gap-1 bg-slate-100 p-1.5 rounded-xl border border-slate-200/80 flex-wrap">
+                {tabBtn('inputs', Sliders, 'Plan Inputs')}
+                {tabBtn('config', Settings, 'Config & Assumptions')}
+                {tabBtn('trajectory', Layers, 'Portfolio Trajectory')}
+                {tabBtn('simulation', Dices, 'Monte Carlo Simulation', 'indigo')}
+                {tabBtn('historical', History, 'Historical Backtest', 'indigo')}
+                {tabBtn('audit', Table, 'Audit Data Table')}
+                {tabBtn('docs', BookOpen, 'Documentation')}
+              </div>
+              <div className="flex items-center gap-0.5 bg-slate-100 p-1 rounded-xl border border-slate-200/80">
+                {themeOptions.map(({ id, Icon, title }) => (
+                  <button key={id} type="button" onClick={() => setTheme(id)} title={title}
+                    className={`p-1.5 rounded-lg transition-all cursor-pointer ${theme === id ? 'bg-surface text-indigo-600 shadow-xs' : 'text-slate-500 hover:text-slate-800'}`}>
+                    <Icon className="w-4 h-4" />
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
-          <div className="flex items-center gap-1 bg-slate-100 p-1.5 rounded-xl border border-slate-200/80 flex-wrap">
-            {tabBtn('inputs', Sliders, 'Plan Inputs')}
-            {tabBtn('config', Settings, 'Config & Assumptions')}
-            {tabBtn('trajectory', Layers, 'Portfolio Trajectory')}
-            {tabBtn('simulation', Dices, 'Monte Carlo Simulation', 'indigo')}
-            {tabBtn('historical', History, 'Historical Backtest', 'indigo')}
-            {tabBtn('audit', Table, 'Audit Data Table')}
-            {tabBtn('docs', BookOpen, 'Documentation')}
-          </div>
+          <div className="h-px bg-indigo-600/60 mt-4" />
+          <div className="h-px bg-indigo-600/25 mt-[3px]" />
         </div>
 
         {/* Scenario Toolbar */}
-        <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
+        <div className="bg-surface border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3 flex-wrap">
             <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700"><Bookmark className="w-4 h-4 text-blue-600" /><span>Active Scenario:</span></div>
             <div className="flex items-center gap-1.5">
@@ -2201,7 +2266,7 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-2 flex-wrap ml-auto">
-            <input type="text" placeholder="Scenario name (optional)" value={scenarioNameInput} onChange={(e) => setScenarioNameInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleSaveScenario(); }} className="p-1.5 px-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 w-48 sm:w-56" />
+            <input type="text" placeholder="Scenario name (optional)" value={scenarioNameInput} onChange={(e) => setScenarioNameInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleSaveScenario(); }} className="p-1.5 px-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium text-slate-900 placeholder:text-slate-400 focus:bg-surface focus:outline-none focus:ring-2 focus:ring-blue-500 w-48 sm:w-56" />
             <button onClick={handleSaveScenario} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95"><Save className="w-3.5 h-3.5" /> Save</button>
             <button onClick={handleSaveAsNewScenario} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all border border-slate-200 cursor-pointer"><Plus className="w-3.5 h-3.5 text-slate-600" /> Save as New Scenario</button>
             {saveSuccessMsg && <span className="text-xs font-bold text-emerald-700 flex items-center gap-1 bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-200"><Check className="w-3 h-3 text-emerald-600" /> {saveSuccessMsg}</span>}
@@ -2213,7 +2278,7 @@ export default function App() {
         {/* TAB 1: PLAN INPUTS */}
         {activeTab === 'inputs' && (
           <div className="space-y-6">
-            <div className="flex flex-wrap items-center justify-between gap-3 bg-white border border-slate-200/90 p-4 rounded-2xl shadow-xs">
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-surface border border-slate-200/90 p-4 rounded-2xl shadow-xs">
               <div>
                 <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider">User Inputs &amp; Wrapper Portfolios</h2>
                 <p className="text-xs text-slate-500">Press <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">Tab</kbd> to move between fields. All amounts are in today's money (real terms).</p>
@@ -2227,15 +2292,15 @@ export default function App() {
             </div>
 
             {/* Demographics & Targets */}
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Users className="w-4 h-4 text-blue-600" /> 1. Demographics, Salaries &amp; Retirement Targets</h3>
                   <span className="text-xs text-slate-500">Choose whether this plan is for an individual or a couple.</span>
                 </div>
                 <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
-                  <button type="button" onClick={() => updateDemographics('planningMode', 'single')} className={`px-3 py-1 rounded-lg font-bold transition-all cursor-pointer ${!isCouple ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>Single</button>
-                  <button type="button" onClick={() => updateDemographics('planningMode', 'couple')} className={`px-3 py-1 rounded-lg font-bold transition-all cursor-pointer ${isCouple ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>With Partner</button>
+                  <button type="button" onClick={() => updateDemographics('planningMode', 'single')} className={`px-3 py-1 rounded-lg font-bold transition-all cursor-pointer ${!isCouple ? 'bg-surface text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>Single</button>
+                  <button type="button" onClick={() => updateDemographics('planningMode', 'couple')} className={`px-3 py-1 rounded-lg font-bold transition-all cursor-pointer ${isCouple ? 'bg-surface text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>With Partner</button>
                 </div>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
@@ -2316,7 +2381,7 @@ export default function App() {
             </div>
 
             {/* Balances & Contributions */}
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Wallet className="w-4 h-4 text-blue-600" /> 2. Current Balances, Annual Contributions &amp; Risk Profiles</h3>
                 <button type="button" onClick={() => goToDoc('doc-risk-profiles')} className="text-xs text-blue-600 hover:text-blue-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer self-start sm:self-auto"><HelpCircle className="w-3.5 h-3.5" /> Guide to investment allocations &amp; fund types &rarr;</button>
@@ -2335,11 +2400,11 @@ export default function App() {
                       <tr key={acc.id} className="hover:bg-slate-50/80 transition-colors">
                         <td className="py-2.5 font-sans font-bold text-slate-800">{acc.category}{Array.isArray(acc.contribByYear) && <span className="ml-2 px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[10px] font-normal">phased schedule</span>}</td>
                         {isCouple && <td className="py-2.5 font-sans text-slate-500">{acc.owner}</td>}
-                        <td className="py-2.5"><input type="number" min="0" step="500" placeholder="0" onFocus={handleFocus} value={acc.balance} onChange={(e) => updateAccountField(acc.id, 'balance', e.target.value)} className="w-32 p-1.5 bg-slate-50 border border-slate-300 rounded font-bold text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" /></td>
-                        <td className="py-2.5"><input type="number" min="0" step="250" placeholder="0" onFocus={handleFocus} value={acc.contrib} onChange={(e) => { updateAccountField(acc.id, 'contrib', e.target.value); if (acc.contribByYear) setPlan(prev => ({ ...prev, accounts: prev.accounts.map(a => a.id === acc.id ? { ...a, contribByYear: undefined } : a) })); }} className={`w-28 p-1.5 bg-slate-50 border rounded text-slate-800 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none ${over ? 'border-rose-400 text-rose-700' : 'border-slate-300'}`} title={over ? 'Exceeds the annual allowance set in Config' : ''} /></td>
-                        <td className="py-2.5"><input type="number" step="0.5" placeholder="0" onFocus={handleFocus} value={acc.growth} onChange={(e) => updateAccountField(acc.id, 'growth', e.target.value)} className="w-20 p-1.5 bg-slate-50 border border-slate-300 rounded text-slate-800 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" /></td>
+                        <td className="py-2.5"><input type="number" min="0" step="500" placeholder="0" onFocus={handleFocus} value={acc.balance} onChange={(e) => updateAccountField(acc.id, 'balance', e.target.value)} className="w-32 p-1.5 bg-slate-50 border border-slate-300 rounded font-bold text-slate-900 focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none" /></td>
+                        <td className="py-2.5"><input type="number" min="0" step="250" placeholder="0" onFocus={handleFocus} value={acc.contrib} onChange={(e) => { updateAccountField(acc.id, 'contrib', e.target.value); if (acc.contribByYear) setPlan(prev => ({ ...prev, accounts: prev.accounts.map(a => a.id === acc.id ? { ...a, contribByYear: undefined } : a) })); }} className={`w-28 p-1.5 bg-slate-50 border rounded text-slate-800 focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none ${over ? 'border-rose-400 text-rose-700' : 'border-slate-300'}`} title={over ? 'Exceeds the annual allowance set in Config' : ''} /></td>
+                        <td className="py-2.5"><input type="number" step="0.5" placeholder="0" onFocus={handleFocus} value={acc.growth} onChange={(e) => updateAccountField(acc.id, 'growth', e.target.value)} className="w-20 p-1.5 bg-slate-50 border border-slate-300 rounded text-slate-800 focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none" /></td>
                         <td className="py-2.5">
-                          <select value={acc.risk} onChange={(e) => updateAccountField(acc.id, 'risk', e.target.value)} className="p-1.5 bg-slate-50 border border-slate-300 rounded text-xs text-blue-700 font-semibold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer">
+                          <select value={acc.risk} onChange={(e) => updateAccountField(acc.id, 'risk', e.target.value)} className="p-1.5 bg-slate-50 border border-slate-300 rounded text-xs text-blue-700 font-semibold focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer">
                             {Object.keys(activeRiskMatrix).map(rk => <option key={rk} value={rk}>{activeRiskMatrix[rk].label || rk}</option>)}
                           </select>
                         </td>
@@ -2351,7 +2416,7 @@ export default function App() {
             </div>
 
             {/* Other income */}
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex justify-between items-center">
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (e.g. DB Pension, Part-time work, Rental)</h3>
@@ -2366,19 +2431,19 @@ export default function App() {
                 <div className="space-y-2">
                   {plan.otherIncomes.map(inc => (
                     <div key={inc.id} className="grid grid-cols-1 sm:grid-cols-6 gap-2 p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs items-center">
-                      <input type="text" onFocus={handleFocus} value={inc.name} onChange={(e) => updateListItem('otherIncomes', inc.id, { name: e.target.value })} className="p-1.5 bg-white border border-slate-300 rounded font-bold text-slate-800 sm:col-span-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="Description" />
+                      <input type="text" onFocus={handleFocus} value={inc.name} onChange={(e) => updateListItem('otherIncomes', inc.id, { name: e.target.value })} className="p-1.5 bg-surface border border-slate-300 rounded font-bold text-slate-800 sm:col-span-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="Description" />
                       {isCouple ? (
-                        <select value={inc.owner} onChange={(e) => updateListItem('otherIncomes', inc.id, { owner: e.target.value })} className="p-1.5 bg-white border border-slate-300 rounded text-slate-700"><option value="Myself">Myself</option><option value="Partner">Partner</option></select>
+                        <select value={inc.owner} onChange={(e) => updateListItem('otherIncomes', inc.id, { owner: e.target.value })} className="p-1.5 bg-surface border border-slate-300 rounded text-slate-700"><option value="Myself">Myself</option><option value="Partner">Partner</option></select>
                       ) : <div className="p-1.5 text-slate-500 font-semibold">Myself</div>}
                       <div className="flex items-center gap-1">
                         <span className="text-slate-500">Age</span>
-                        <input type="number" min="0" max="120" placeholder="Start" onFocus={handleFocus} value={inc.startAge} onChange={(e) => updateListItem('otherIncomes', inc.id, { startAge: parseInputNumber(e.target.value) })} className="w-12 p-1 bg-white border border-slate-300 rounded font-mono text-center font-bold" />
+                        <input type="number" min="0" max="120" placeholder="Start" onFocus={handleFocus} value={inc.startAge} onChange={(e) => updateListItem('otherIncomes', inc.id, { startAge: parseInputNumber(e.target.value) })} className="w-12 p-1 bg-surface border border-slate-300 rounded font-mono text-center font-bold" />
                         <span className="text-slate-400">to</span>
-                        <input type="number" min="0" max="120" placeholder="End" onFocus={handleFocus} value={inc.endAge} onChange={(e) => updateListItem('otherIncomes', inc.id, { endAge: parseInputNumber(e.target.value) })} className="w-12 p-1 bg-white border border-slate-300 rounded font-mono text-center font-bold" />
+                        <input type="number" min="0" max="120" placeholder="End" onFocus={handleFocus} value={inc.endAge} onChange={(e) => updateListItem('otherIncomes', inc.id, { endAge: parseInputNumber(e.target.value) })} className="w-12 p-1 bg-surface border border-slate-300 rounded font-mono text-center font-bold" />
                       </div>
                       <div className="flex items-center gap-2">
-                        <input type="number" min="0" step="500" placeholder="£/yr" onFocus={handleFocus} value={inc.amount} onChange={(e) => updateListItem('otherIncomes', inc.id, { amount: parseInputNumber(e.target.value) })} className="w-24 p-1.5 bg-white border border-slate-300 rounded font-mono text-emerald-700 font-bold" />
-                        <select value={inc.incomeType} onChange={(e) => updateListItem('otherIncomes', inc.id, { incomeType: e.target.value })} className="p-1.5 bg-white border border-slate-300 rounded text-xs font-semibold text-amber-700" title="Drives both income tax and whether this counts as relevant earnings for pension contributions">
+                        <input type="number" min="0" step="500" placeholder="£/yr" onFocus={handleFocus} value={inc.amount} onChange={(e) => updateListItem('otherIncomes', inc.id, { amount: parseInputNumber(e.target.value) })} className="w-24 p-1.5 bg-surface border border-slate-300 rounded font-mono text-emerald-700 font-bold" />
+                        <select value={inc.incomeType} onChange={(e) => updateListItem('otherIncomes', inc.id, { incomeType: e.target.value })} className="p-1.5 bg-surface border border-slate-300 rounded text-xs font-semibold text-amber-700" title="Drives both income tax and whether this counts as relevant earnings for pension contributions">
                           {Object.keys(E.INCOME_TYPES).map(k => <option key={k} value={k}>{E.INCOME_TYPES[k].label}</option>)}
                         </select>
                       </div>
@@ -2391,7 +2456,7 @@ export default function App() {
 
             {/* One-offs */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
                 <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2">
                   <div>
                     <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Plus className="w-4 h-4 text-blue-600" /> 4. One-Off Deposits (by Wrapper)</h3>
@@ -2422,18 +2487,18 @@ export default function App() {
                       return (
                         <div key={c.id} className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
                           <div className="flex flex-wrap items-center gap-2">
-                            <input type="date" value={c.date || (c.year ? `${c.year}-01-01` : '')} onChange={(e) => { const d = e.target.value; updateListItem('oneOffContributions', c.id, { date: d, year: parseInt(d.slice(0, 4)) || '' }); }} className="p-1 bg-white border border-slate-300 rounded font-mono text-slate-800 text-xs" />
+                            <input type="date" value={c.date || (c.year ? `${c.year}-01-01` : '')} onChange={(e) => { const d = e.target.value; updateListItem('oneOffContributions', c.id, { date: d, year: parseInt(d.slice(0, 4)) || '' }); }} className="p-1 bg-surface border border-slate-300 rounded font-mono text-slate-800 text-xs" />
                             {isCouple ? (
-                              <select value={c.owner} onChange={(e) => updateListItem('oneOffContributions', c.id, { owner: e.target.value })} className="p-1 bg-white border border-slate-300 rounded text-slate-700"><option value="Myself">Myself</option><option value="Partner">Partner</option></select>
+                              <select value={c.owner} onChange={(e) => updateListItem('oneOffContributions', c.id, { owner: e.target.value })} className="p-1 bg-surface border border-slate-300 rounded text-slate-700"><option value="Myself">Myself</option><option value="Partner">Partner</option></select>
                             ) : <span className="text-slate-500 font-semibold px-1">Myself</span>}
-                            <select value={c.transferredFrom} onChange={(e) => updateListItem('oneOffContributions', c.id, { transferredFrom: e.target.value })} className="p-1 bg-white border border-slate-300 rounded text-slate-700" title="Transferred from">
+                            <select value={c.transferredFrom} onChange={(e) => updateListItem('oneOffContributions', c.id, { transferredFrom: e.target.value })} className="p-1 bg-surface border border-slate-300 rounded text-slate-700" title="Transferred from">
                               <option value="External">External (New Capital)</option>
                               {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
                             </select>
-                            <select value={c.category} onChange={(e) => { const category = e.target.value; const patch = { category }; if (c.stagedTargetWrapper === c.category) patch.stagedTargetWrapper = category; updateListItem('oneOffContributions', c.id, patch); }} className="p-1 bg-white border border-slate-300 rounded text-blue-700 font-semibold">
+                            <select value={c.category} onChange={(e) => { const category = e.target.value; const patch = { category }; if (c.stagedTargetWrapper === c.category) patch.stagedTargetWrapper = category; updateListItem('oneOffContributions', c.id, patch); }} className="p-1 bg-surface border border-slate-300 rounded text-blue-700 font-semibold">
                               {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
                             </select>
-                            <input type="number" min="0" step="1000" placeholder="Amount (£)" onFocus={handleFocus} value={c.amount} onChange={(e) => updateListItem('oneOffContributions', c.id, { amount: parseInputNumber(e.target.value) })} className="w-24 p-1 bg-white border border-slate-300 rounded font-mono text-emerald-700 font-bold" />
+                            <input type="number" min="0" step="1000" placeholder="Amount (£)" onFocus={handleFocus} value={c.amount} onChange={(e) => updateListItem('oneOffContributions', c.id, { amount: parseInputNumber(e.target.value) })} className="w-24 p-1 bg-surface border border-slate-300 rounded font-mono text-emerald-700 font-bold" />
                             {st && !st.direct && (
                               <button onClick={() => toggleOneOffExpand(c.id)} className="p-1 text-amber-600 hover:text-amber-800 cursor-pointer transition-colors" title="Staging schedule"><Settings className="w-4 h-4" /></button>
                             )}
@@ -2454,10 +2519,10 @@ export default function App() {
                             </div>
                           )}
                           {st && !st.direct && isExpanded && (
-                            <div className="w-full p-2.5 bg-white border border-amber-200 rounded-lg text-[11px] space-y-1.5">
+                            <div className="w-full p-2.5 bg-surface border border-amber-200 rounded-lg text-[11px] space-y-1.5">
                               <div className="flex items-center gap-2">
                                 <span className="font-semibold text-slate-600">Staged destination:</span>
-                                <select value={c.stagedTargetWrapper} onChange={(e) => updateListItem('oneOffContributions', c.id, { stagedTargetWrapper: e.target.value })} className="p-1 bg-white border border-slate-300 rounded text-slate-700">
+                                <select value={c.stagedTargetWrapper} onChange={(e) => updateListItem('oneOffContributions', c.id, { stagedTargetWrapper: e.target.value })} className="p-1 bg-surface border border-slate-300 rounded text-slate-700">
                                   {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
                                 </select>
                               </div>
@@ -2478,7 +2543,7 @@ export default function App() {
                   </div>
                 )}
               </div>
-              <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
                 <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2">
                   <div>
                     <h3 className="text-xs font-bold text-rose-700 uppercase tracking-wider flex items-center gap-2"><Trash2 className="w-4 h-4 text-rose-600" /> 5. One-Off Capital Costs</h3>
@@ -2492,9 +2557,9 @@ export default function App() {
                   <div className="space-y-2">
                     {plan.oneOffCosts.map(cost => (
                       <div key={cost.id} className="flex flex-wrap items-center gap-2 p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs">
-                        <input type="date" value={cost.date || (cost.year ? `${cost.year}-01-01` : '')} onChange={(e) => { const d = e.target.value; updateListItem('oneOffCosts', cost.id, { date: d, year: parseInt(d.slice(0, 4)) || '' }); }} className="p-1 bg-white border border-slate-300 rounded font-mono text-slate-800 text-xs" />
-                        <input type="text" onFocus={handleFocus} value={cost.desc} onChange={(e) => updateListItem('oneOffCosts', cost.id, { desc: e.target.value })} className="p-1 bg-white border border-slate-300 rounded text-slate-700 flex-1" placeholder="Purpose" />
-                        <input type="number" min="0" step="1000" placeholder="Amount (£)" onFocus={handleFocus} value={cost.amount} onChange={(e) => updateListItem('oneOffCosts', cost.id, { amount: parseInputNumber(e.target.value) })} className="w-24 p-1 bg-white border border-slate-300 rounded font-mono text-rose-700 font-bold" />
+                        <input type="date" value={cost.date || (cost.year ? `${cost.year}-01-01` : '')} onChange={(e) => { const d = e.target.value; updateListItem('oneOffCosts', cost.id, { date: d, year: parseInt(d.slice(0, 4)) || '' }); }} className="p-1 bg-surface border border-slate-300 rounded font-mono text-slate-800 text-xs" />
+                        <input type="text" onFocus={handleFocus} value={cost.desc} onChange={(e) => updateListItem('oneOffCosts', cost.id, { desc: e.target.value })} className="p-1 bg-surface border border-slate-300 rounded text-slate-700 flex-1" placeholder="Purpose" />
+                        <input type="number" min="0" step="1000" placeholder="Amount (£)" onFocus={handleFocus} value={cost.amount} onChange={(e) => updateListItem('oneOffCosts', cost.id, { amount: parseInputNumber(e.target.value) })} className="w-24 p-1 bg-surface border border-slate-300 rounded font-mono text-rose-700 font-bold" />
                         <button onClick={() => deleteOneOffCost(cost.id)} className="p-1 text-slate-400 hover:text-rose-600 cursor-pointer transition-colors"><Trash2 className="w-4 h-4" /></button>
                       </div>
                     ))}
@@ -2508,13 +2573,13 @@ export default function App() {
         {/* TAB 2: CONFIG */}
         {activeTab === 'config' && (
           <div className="space-y-6">
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Sliders className="w-4 h-4 text-blue-600" /> Decumulation &amp; Pension Withdrawal Methodology</h2>
               <p className="text-xs text-slate-500">Select how withdrawals are ordered across tax wrappers and how pensions are crystallized. <button type="button" onClick={() => goToDoc('doc-decumulation')} className="text-blue-600 hover:underline font-semibold cursor-pointer">What the evidence says &rarr;</button></p>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs pt-1">
                 <div>
                   <label className="text-slate-600 font-semibold block mb-1">Decumulation Policy</label>
-                  <select value={plan?.spending?.decumulationPolicy} onChange={(e) => updateSpending('decumulationPolicy', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs text-blue-700 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer">
+                  <select value={plan?.spending?.decumulationPolicy} onChange={(e) => updateSpending('decumulationPolicy', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs text-blue-700 font-bold focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer">
                     {Object.entries(E.DECUMULATION_POLICIES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
                   </select>
                   <span className="text-[10px] text-slate-400 mt-1 block">
@@ -2525,7 +2590,7 @@ export default function App() {
                 </div>
                 <div>
                   <label className="text-slate-600 font-semibold block mb-1">Pension Drawdown Strategy</label>
-                  <select value={plan?.spending?.drawdownStrategy} onChange={(e) => updateSpending('drawdownStrategy', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs text-blue-700 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer">
+                  <select value={plan?.spending?.drawdownStrategy} onChange={(e) => updateSpending('drawdownStrategy', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs text-blue-700 font-bold focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer">
                     <option value="Phased Drawdown">Phased Drawdown (Ongoing {Math.round(P.pclsProp * 100)}% tax-free proportion)</option>
                     <option value="Full 25% Lump Sum">Full Lump Sum (Upfront statutory PCLS into Cash)</option>
                   </select>
@@ -2551,7 +2616,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Settings className="w-4 h-4 text-blue-600" /> Global Economic &amp; Calculation Configuration</h2>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs pt-3">
                 <div><label className="text-slate-600 font-semibold block mb-1">Valuation Date (Today)</label><input type="date" value={plan?.config?.valuationDate ?? ''} onChange={(e) => updateConfig('valuationDate', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Year 0 flows are pro-rated to the {(ctx.yf * 100).toFixed(0)}% of the year remaining.</span></div>
@@ -2565,7 +2630,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
               <div className="flex justify-between items-center">
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">Asset Allocations, Return Matrix &amp; Volatilities (σ)</h3>
@@ -2582,7 +2647,7 @@ export default function App() {
                       {[['real', 'text-blue-700', 0.05], ['unlucky', 'text-rose-700', 0.05], ['lucky', 'text-emerald-700', 0.05], ['nominal', 'text-purple-700', 0.05], ['volatility', 'text-amber-700', 0.5]].map(([field, color, step]) => (
                         <td key={field} className="py-2.5">
                           {isEditingRisk ? (
-                            <input type="number" step={step} min={field === 'volatility' ? 0 : undefined} onFocus={handleFocus} value={val[field] ?? ''} onChange={(e) => updateRiskField(key, field, e.target.value)} className={`w-20 p-1 bg-slate-50 border border-slate-300 rounded font-mono ${color} font-bold focus:bg-white focus:ring-1 focus:ring-blue-500`} />
+                            <input type="number" step={step} min={field === 'volatility' ? 0 : undefined} onFocus={handleFocus} value={val[field] ?? ''} onChange={(e) => updateRiskField(key, field, e.target.value)} className={`w-20 p-1 bg-slate-50 border border-slate-300 rounded font-mono ${color} font-bold focus:bg-surface focus:ring-1 focus:ring-blue-500`} />
                           ) : <span className={`${color} font-bold`}>{E.num(val[field], 0).toFixed(field === 'volatility' ? 1 : 2)}%</span>}
                         </td>
                       ))}
@@ -2592,7 +2657,7 @@ export default function App() {
               </table>
             </div>
 
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">UK Income Tax, National Insurance &amp; Pension Allowances</h3>
               <p className="text-[11px] text-slate-500">Defaults are rUK 2025/26 (frozen to April 2028). Scottish bands differ. All thresholds are held constant in real terms.</p>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs font-mono">
@@ -2634,7 +2699,7 @@ export default function App() {
               </p>
             </div>
 
-            <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
+            <div className="bg-surface border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <span className="text-xs text-slate-500 font-semibold">Active View:</span>
                 {(isCouple ? ['Combined', 'Myself', 'Partner'] : ['Combined']).map(p => (
@@ -2644,12 +2709,12 @@ export default function App() {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Expected Terminal Pot</div><div className="text-2xl font-black font-mono text-blue-600 mt-2">{formatGBP(chartDisplayData[chartDisplayData.length - 1]?.expected)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Target className="w-3.5 h-3.5 text-blue-600" /> Constant expected real growth to age {terminalAge}</div></div>
-              <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Lucky Scenario (90th %ile)</div><div className="text-2xl font-black font-mono text-emerald-600 mt-2">{formatGBP(timelineData[timelineData.length - 1]?.lucky)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><TrendingUp className="w-3.5 h-3.5 text-emerald-600" /> Constant above-average return rate</div></div>
-              <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Unlucky Scenario (10th %ile)</div><div className="text-2xl font-black font-mono text-rose-600 mt-2">{formatGBP(timelineData[timelineData.length - 1]?.unlucky)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><ShieldCheck className="w-3.5 h-3.5 text-rose-600" /> Constant below-average return rate</div></div>
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Expected Terminal Pot</div><div className="text-2xl font-black font-mono text-blue-600 mt-2">{formatGBP(chartDisplayData[chartDisplayData.length - 1]?.expected)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Target className="w-3.5 h-3.5 text-blue-600" /> Constant expected real growth to age {terminalAge}</div></div>
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Lucky Scenario (90th %ile)</div><div className="text-2xl font-black font-mono text-emerald-600 mt-2">{formatGBP(timelineData[timelineData.length - 1]?.lucky)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><TrendingUp className="w-3.5 h-3.5 text-emerald-600" /> Constant above-average return rate</div></div>
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Unlucky Scenario (10th %ile)</div><div className="text-2xl font-black font-mono text-rose-600 mt-2">{formatGBP(timelineData[timelineData.length - 1]?.unlucky)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><ShieldCheck className="w-3.5 h-3.5 text-rose-600" /> Constant below-average return rate</div></div>
             </div>
 
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                 <div>
                   <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Layers className="w-4 h-4 text-blue-600" /> Projected Portfolio Trajectory</h2>
@@ -2663,17 +2728,17 @@ export default function App() {
               <div className="relative overflow-x-auto">
                 <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="w-full h-auto select-none" onMouseLeave={() => setHoveredPoint(null)}>
                   <g transform={`translate(${margin.left}, ${margin.top})`}>
-                    {yScale.ticks(6).map((t, i) => <g key={i} transform={`translate(0, ${yScale(t)})`}><line x2={innerWidth} stroke="#f1f5f9" strokeDasharray="3,3" /><text x={-10} dy="0.32em" fill="#64748b" fontSize="10" textAnchor="end" fontFamily="monospace">£{(t / 1000).toFixed(0)}k</text></g>)}
-                    {xScale.ticks(10).map((t, i) => <g key={i} transform={`translate(${xScale(t)}, 0)`}><line y2={innerHeight} stroke="#f8fafc" /><text y={innerHeight + 20} fill="#64748b" fontSize="11" textAnchor="middle" fontFamily="monospace">{t}</text></g>)}
+                    {yScale.ticks(6).map((t, i) => <g key={i} transform={`translate(0, ${yScale(t)})`}><line x2={innerWidth} stroke={cp.gridMajor} strokeDasharray="3,3" /><text x={-10} dy="0.32em" fill={cp.axisText} fontSize="10" textAnchor="end" fontFamily="monospace">£{(t / 1000).toFixed(0)}k</text></g>)}
+                    {xScale.ticks(10).map((t, i) => <g key={i} transform={`translate(${xScale(t)}, 0)`}><line y2={innerHeight} stroke={cp.gridMinor} /><text y={innerHeight + 20} fill={cp.axisText} fontSize="11" textAnchor="middle" fontFamily="monospace">{t}</text></g>)}
                     {markers(xScale)}
-                    {SERIES_CONFIG.map(s => (activeSeries[s.id] && pathGenerators[s.id]) ? <path key={s.id} d={pathGenerators[s.id]} fill="none" stroke={s.color} strokeWidth={s.strokeWidth} strokeDasharray={s.dash} strokeLinecap="round" /> : null)}
-                    {sandboxLinePath && <path d={sandboxLinePath} fill="none" stroke="#f59e0b" strokeWidth="3.5" strokeDasharray="6,4" strokeLinecap="round" />}
+                    {themedSeries.map(s => (activeSeries[s.id] && pathGenerators[s.id]) ? <path key={s.id} d={pathGenerators[s.id]} fill="none" stroke={s.color} strokeWidth={s.strokeWidth} strokeDasharray={s.dash} strokeLinecap="round" /> : null)}
+                    {sandboxLinePath && <path d={sandboxLinePath} fill="none" stroke={cp.sandboxDash} strokeWidth="3.5" strokeDasharray="6,4" strokeLinecap="round" />}
                     <rect width={innerWidth} height={innerHeight} fill="transparent" onMouseMove={(e) => { const rect = e.currentTarget.getBoundingClientRect(); const age = Math.round(xScale.invert((e.clientX - rect.left) * (innerWidth / Math.max(1, rect.width)))); setHoveredPoint(visibleData.find(d => d.ageSelf === age) || null); }} />
-                    {hoveredPoint && <g transform={`translate(${xScale(hoveredPoint.ageSelf)}, 0)`}><line y2={innerHeight} stroke="#94a3b8" strokeWidth="1" strokeDasharray="2,2" /><circle cy={yScale(hoveredPoint.expected || 0)} r="4" fill="#2563eb" stroke="#ffffff" strokeWidth="2" /></g>}
+                    {hoveredPoint && <g transform={`translate(${xScale(hoveredPoint.ageSelf)}, 0)`}><line y2={innerHeight} stroke={cp.hoverCrosshair} strokeWidth="1" strokeDasharray="2,2" /><circle cy={yScale(hoveredPoint.expected || 0)} r="4" fill={cp.trajectoryHoverFill} stroke={cp.hoverDotStroke} strokeWidth="2" /></g>}
                   </g>
                 </svg>
                 {hoveredPoint && (
-                  <div className="absolute top-4 left-24 bg-white/95 border border-slate-200 p-3 rounded-xl shadow-lg text-xs space-y-1 backdrop-blur-md pointer-events-none">
+                  <div className="absolute top-4 left-24 bg-surface/95 border border-slate-200 p-3 rounded-xl shadow-lg text-xs space-y-1 backdrop-blur-md pointer-events-none">
                     <div className="font-bold text-slate-800 border-b border-slate-100 pb-1 flex justify-between gap-4"><span>Age {hoveredPoint.ageSelf} ({hoveredPoint.year})</span><span className="text-slate-500">Spend Demand: {formatGBP(hoveredPoint.targetSpend)}/yr</span></div>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-1 font-mono">
                       {activeSeries.expected && <div className="text-blue-600 font-bold">Projected Pot: {formatGBP(hoveredPoint.expected)}</div>}
@@ -2689,8 +2754,8 @@ export default function App() {
               </div>
               <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
                 <div className="flex flex-wrap items-center gap-2">
-                  {SERIES_CONFIG.map(s => (
-                    <button key={s.id} onClick={() => setActiveSeries(prev => ({ ...prev, [s.id]: !prev[s.id] }))} className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center gap-2 transition-all cursor-pointer border ${activeSeries[s.id] ? 'bg-slate-100 border-slate-300 text-slate-900 font-semibold' : 'bg-white border-slate-200 text-slate-400 opacity-60'}`}>
+                  {themedSeries.map(s => (
+                    <button key={s.id} onClick={() => setActiveSeries(prev => ({ ...prev, [s.id]: !prev[s.id] }))} className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center gap-2 transition-all cursor-pointer border ${activeSeries[s.id] ? 'bg-slate-100 border-slate-300 text-slate-900 font-semibold' : 'bg-surface border-slate-200 text-slate-400 opacity-60'}`}>
                       <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: s.color }} />{s.label}{activeSeries[s.id] && <Check className="w-3 h-3 text-slate-600" />}
                     </button>
                   ))}
@@ -2700,7 +2765,7 @@ export default function App() {
             </div>
 
             {/* SANDBOX */}
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-5">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-5">
               <div className="pb-3 border-b border-slate-100">
                 <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Sparkles className="w-4 h-4 text-amber-500" /> Contribution &amp; Escalation Sandbox</h3>
                 <p className="text-xs text-slate-500 mt-0.5">Test contributions, escalation rates and tournament strategies without modifying your base plan inputs.</p>
@@ -2709,7 +2774,7 @@ export default function App() {
                 <div><h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Wrapper Sandbox Controls</h4><span className="text-[11px] text-slate-500">Adjust retirement ages and individual wrappers below, or reset back to your baseline plan inputs.</span></div>
                 <div className="flex items-center gap-2">
                   <button onClick={handleResetSandbox} disabled={!isSandboxModified} className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all border ${isSandboxModified ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300 cursor-pointer' : 'bg-slate-50 text-slate-300 border-slate-200 cursor-not-allowed'}`}><RotateCcw className="w-3.5 h-3.5" /> Reset Sandbox</button>
-                  <button onClick={handleApplySandboxToPlan} disabled={!isSandboxModified} className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs ${isSandboxModified ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white cursor-pointer active:scale-95' : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'}`}><Check className="w-3.5 h-3.5" /> Apply to Plan Inputs</button>
+                  <button onClick={handleApplySandboxToPlan} disabled={!isSandboxModified} className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs ${isSandboxModified ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 dark:from-[#C77A2E] dark:to-[#B0631E] dark:hover:from-[#B0631E] dark:hover:to-[#8A4C17] text-white cursor-pointer active:scale-95' : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'}`}><Check className="w-3.5 h-3.5" /> Apply to Plan Inputs</button>
                 </div>
               </div>
               <div className="p-4 bg-slate-50/80 border border-slate-200 rounded-2xl space-y-3">
@@ -2725,7 +2790,7 @@ export default function App() {
                     const changed = val !== base;
                     const yearsToGo = Math.max(0, Math.round(val - o.age0));
                     return (
-                      <div key={o.key} className={`p-3 rounded-xl border transition-colors ${changed ? 'bg-amber-50/60 border-amber-200' : 'bg-white border-slate-200'}`}>
+                      <div key={o.key} className={`p-3 rounded-xl border transition-colors ${changed ? 'bg-amber-50/60 border-amber-200' : 'bg-surface border-slate-200'}`}>
                         <div className="flex items-center justify-between mb-1.5">
                           <span className="text-xs font-bold text-slate-800 font-sans">{o.label}</span>
                           {changed
@@ -2733,7 +2798,7 @@ export default function App() {
                             : <span className="text-slate-400 font-sans text-[10px]">Base: {base}</span>}
                         </div>
                         <div className="flex items-center gap-1.5 flex-wrap">
-                          <input type="number" min="0" max="120" step="1" value={val} onFocus={handleFocus} onChange={(e) => updateSandboxRetire(o.key, e.target.value)} className="w-20 p-1.5 bg-white border border-slate-300 rounded font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500" />
+                          <input type="number" min="0" max="120" step="1" value={val} onFocus={handleFocus} onChange={(e) => updateSandboxRetire(o.key, e.target.value)} className="w-20 p-1.5 bg-surface border border-slate-300 rounded font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500" />
                           {[-5, -1, 1, 5].map(d => (
                             <button key={d} onClick={() => adjustSandboxRetire(o.key, d)} className="px-1.5 py-1 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded text-[10px] font-sans font-semibold text-slate-700 cursor-pointer">{d > 0 ? '+' : ''}{d}</button>
                           ))}
@@ -2772,9 +2837,9 @@ export default function App() {
                         <tr key={acc.id} className={`transition-colors ${isModified ? 'bg-amber-50/40' : 'hover:bg-slate-50/60'}`}>
                           <td className="p-3 font-sans font-bold text-slate-800">{acc.category}<span className="block text-[10px] text-slate-400 font-normal">Base: {formatGBP(E.num(acc.contrib, 0))} / yr @ {acc.growth || 0}%{sb.balance !== undefined && E.num(sb.balance, 0) !== E.num(acc.balance, 0) ? ` · balance ${formatGBP(E.num(acc.balance, 0))} → ${formatGBP(sb.balance)}` : ''}</span></td>
                           {isCouple && <td className="p-3 font-sans text-slate-600">{acc.owner}</td>}
-                          <td className="p-3"><div className="flex items-center gap-1.5"><input type="number" min="0" step="250" value={sb.contrib} onFocus={handleFocus} onChange={(e) => updateSandboxField(acc.id, 'contrib', e.target.value)} className="w-28 p-1.5 bg-white border border-slate-300 rounded font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500" />{sb.contribByYear && <span className="px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[10px] font-sans" title="Year-by-year schedule from a phased strategy; editing replaces it">phased</span>}</div></td>
+                          <td className="p-3"><div className="flex items-center gap-1.5"><input type="number" min="0" step="250" value={sb.contrib} onFocus={handleFocus} onChange={(e) => updateSandboxField(acc.id, 'contrib', e.target.value)} className="w-28 p-1.5 bg-surface border border-slate-300 rounded font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500" />{sb.contribByYear && <span className="px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[10px] font-sans" title="Year-by-year schedule from a phased strategy; editing replaces it">phased</span>}</div></td>
                           <td className="p-3"><div className="flex items-center gap-1">{[-1000, -500, 500, 1000].map(d => <button key={d} onClick={() => adjustSandboxContrib(acc.id, d)} className="px-1.5 py-1 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded text-[10px] font-sans font-semibold text-slate-700 cursor-pointer">{d > 0 ? '+' : ''}{Math.abs(d) >= 1000 ? `${d / 1000}k` : d}</button>)}</div></td>
-                          <td className="p-3"><div className="flex items-center gap-1.5"><input type="number" step="0.5" value={sb.growth} onFocus={handleFocus} onChange={(e) => updateSandboxField(acc.id, 'growth', e.target.value)} className="w-20 p-1.5 bg-white border border-slate-300 rounded text-slate-900 font-bold focus:outline-none focus:ring-2 focus:ring-amber-500" /><span className="text-slate-400 font-sans">%</span></div></td>
+                          <td className="p-3"><div className="flex items-center gap-1.5"><input type="number" step="0.5" value={sb.growth} onFocus={handleFocus} onChange={(e) => updateSandboxField(acc.id, 'growth', e.target.value)} className="w-20 p-1.5 bg-surface border border-slate-300 rounded text-slate-900 font-bold focus:outline-none focus:ring-2 focus:ring-amber-500" /><span className="text-slate-400 font-sans">%</span></div></td>
                           <td className="p-3 text-right">{isModified ? <span className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded font-sans text-[10px] font-bold">Adjusted</span> : <span className="text-slate-400 font-sans text-[10px]">Unchanged</span>}</td>
                         </tr>
                       );
@@ -2795,15 +2860,15 @@ export default function App() {
               <p className="text-slate-500 text-[11px] leading-relaxed"><strong>How failure is defined:</strong> a year in which living costs or a one-off cost cannot be met from any accessible wrapper (a pre-access failure means pension money existed but was locked), or a terminal pot below the bequest floor. Paths are seeded, so re-running with the same seed reproduces the result exactly.</p>
             </div>
 
-            <div className="bg-white border border-slate-200/90 rounded-2xl p-5 shadow-xs flex flex-wrap items-center justify-between gap-3">
+            <div className="bg-surface border border-slate-200/90 rounded-2xl p-5 shadow-xs flex flex-wrap items-center justify-between gap-3">
               <div><h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Run Multi-Path Simulation</h3><span className="text-[11px] text-slate-500">Run {MC_TRIALS.toLocaleString()} stochastic trials or calculate your sustainable safe spending limit.</span></div>
               <div className="flex items-center gap-2 flex-wrap">
                 <div className="flex items-center bg-slate-100 border border-slate-200 rounded-xl p-1 text-xs">
                   <span className="text-slate-500 px-2 font-medium">Confidence:</span>
-                  {[85, 90, 95].map(rate => <button key={rate} onClick={() => setTargetConfidence(rate)} className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${targetConfidence === rate ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>{rate}%</button>)}
+                  {[85, 90, 95].map(rate => <button key={rate} onClick={() => setTargetConfidence(rate)} className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${targetConfidence === rate ? 'bg-surface text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>{rate}%</button>)}
                 </div>
                 <button onClick={handleRunMC} disabled={isSimulating || isOptimizing} className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs active:scale-95 disabled:opacity-60"><Dices className="w-3.5 h-3.5 text-blue-200" />{isSimulating ? 'Testing…' : 'Test Current Spend'}</button>
-                <button onClick={handleOptimize} disabled={isSimulating || isOptimizing} className="px-3.5 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95 disabled:opacity-60"><Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300" />{isOptimizing ? 'Solving…' : `⚡ Safe Max Annual Spend (${targetConfidence}%)`}</button>
+                <button onClick={handleOptimize} disabled={isSimulating || isOptimizing} className="px-3.5 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 dark:from-[#2C5C8F] dark:to-[#A9781F] dark:hover:from-[#204568] text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95 disabled:opacity-60"><Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300 dark:fill-[#FCD34D] dark:text-[#FCD34D]" />{isOptimizing ? 'Solving…' : `⚡ Safe Max Annual Spend (${targetConfidence}%)`}</button>
               </div>
               {simProgress && <div className="w-full"><ProgressBar value={simProgress.value} label={simProgress.label} /></div>}
             </div>
@@ -2820,12 +2885,12 @@ export default function App() {
                     </div>
                   </div>
                   <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 w-full lg:w-auto text-xs border-t lg:border-t-0 border-slate-200/80 pt-3 lg:pt-0">
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Survival Rate</span><span className={`text-base font-black font-mono ${simResult.successRate >= 90 ? 'text-emerald-700' : simResult.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}`}>{simResult.successRate.toFixed(1)}%</span></div>
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Age of Failure</span><span className={`text-base font-black font-mono ${!simResult.medianFailAge ? 'text-emerald-700' : simResult.medianFailAge < nmpa ? 'text-rose-700' : 'text-amber-700'}`}>{simResult.medianFailAge ? `Age ${simResult.medianFailAge}` : 'None'}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono truncate">{simResult.medianFailAge ? `Median of failures (earliest ${simResult.earliestFailAge})` : '100% Solvency'}</span></div>
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Pre-access failures</span><span className={`text-base font-black font-mono ${simResult.preNmpaFailRate > 5 ? 'text-rose-700' : 'text-slate-700'}`}>{simResult.preNmpaFailRate.toFixed(1)}%</span></div>
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">10th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-rose-700">{formatGBP(simResult.p10Terminal)}</span></div>
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Median Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-blue-700">{formatGBP(simResult.medianTerminal)}</span>{ctx.pensionDeathTaxRate > 0 && <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">net of pension death tax {formatGBP(simResult.medianTerminalNet)}</span>}</div>
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">90th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-emerald-700">{formatGBP(simResult.p90Terminal)}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">median lifetime tax {formatGBP(simResult.medianLifetimeTax)}</span></div>
+                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Survival Rate</span><span className={`text-base font-black font-mono ${simResult.successRate >= 90 ? 'text-emerald-700' : simResult.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}`}>{simResult.successRate.toFixed(1)}%</span></div>
+                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Age of Failure</span><span className={`text-base font-black font-mono ${!simResult.medianFailAge ? 'text-emerald-700' : simResult.medianFailAge < nmpa ? 'text-rose-700' : 'text-amber-700'}`}>{simResult.medianFailAge ? `Age ${simResult.medianFailAge}` : 'None'}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono truncate">{simResult.medianFailAge ? `Median of failures (earliest ${simResult.earliestFailAge})` : '100% Solvency'}</span></div>
+                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Pre-access failures</span><span className={`text-base font-black font-mono ${simResult.preNmpaFailRate > 5 ? 'text-rose-700' : 'text-slate-700'}`}>{simResult.preNmpaFailRate.toFixed(1)}%</span></div>
+                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">10th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-rose-700">{formatGBP(simResult.p10Terminal)}</span></div>
+                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Median Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-blue-700">{formatGBP(simResult.medianTerminal)}</span>{ctx.pensionDeathTaxRate > 0 && <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">net of pension death tax {formatGBP(simResult.medianTerminalNet)}</span>}</div>
+                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">90th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-emerald-700">{formatGBP(simResult.p90Terminal)}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">median lifetime tax {formatGBP(simResult.medianLifetimeTax)}</span></div>
                   </div>
                 </div>
                 {simResult.preNmpaFailRate > 0 && (
@@ -2849,16 +2914,16 @@ export default function App() {
               <p>Feeds actual historical real returns (US large-cap equities and a 50/50 government/corporate bond blend, weighted by each wrapper's risk tier) into your plan, <strong>starting from today (Age {currentAge})</strong> through to Age {terminalAge}.</p>
               <p className="text-slate-500">Selectable start years are capped at <strong>{maxHistoricalStartYear}</strong> so your {spanYears}-year plan runs within recorded history through {E.HISTORICAL_LAST_YEAR}.{historicalMetrics?.beyondData && ' Years beyond the dataset use the expected return.'}</p>
             </div>
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                 <div><h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Select Historical Scenario or Start Year</h3><span className="text-[11px] text-slate-500">Select an iconic crisis preset or slide to any year between {E.HISTORICAL_FIRST_YEAR} and {maxHistoricalStartYear}.</span></div>
-                <div className="flex items-center gap-2 bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200 text-xs font-mono font-bold text-indigo-700"><span>Start Year:</span><input type="number" min={E.HISTORICAL_FIRST_YEAR} max={maxHistoricalStartYear} value={activeHistoricalStartYear} onChange={(e) => setSelectedHistoricalYear(Math.max(E.HISTORICAL_FIRST_YEAR, Math.min(maxHistoricalStartYear, Number(e.target.value) || E.HISTORICAL_FIRST_YEAR)))} className="w-16 p-1 bg-white border border-slate-300 rounded text-center text-indigo-900 focus:outline-none focus:ring-1 focus:ring-indigo-500" /></div>
+                <div className="flex items-center gap-2 bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200 text-xs font-mono font-bold text-indigo-700"><span>Start Year:</span><input type="number" min={E.HISTORICAL_FIRST_YEAR} max={maxHistoricalStartYear} value={activeHistoricalStartYear} onChange={(e) => setSelectedHistoricalYear(Math.max(E.HISTORICAL_FIRST_YEAR, Math.min(maxHistoricalStartYear, Number(e.target.value) || E.HISTORICAL_FIRST_YEAR)))} className="w-16 p-1 bg-surface border border-slate-300 rounded text-center text-indigo-900 focus:outline-none focus:ring-1 focus:ring-indigo-500" /></div>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
                 {HISTORICAL_PRESETS.map(p => {
                   const isValid = p.year <= maxHistoricalStartYear;
                   return (
-                    <button key={p.year} onClick={() => isValid && setSelectedHistoricalYear(p.year)} disabled={!isValid} className={`p-2.5 rounded-xl border text-left transition-all ${!isValid ? 'bg-slate-50 text-slate-300 border-slate-200/50 cursor-not-allowed opacity-50' : activeHistoricalStartYear === p.year ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs cursor-pointer' : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200 cursor-pointer'}`}>
+                    <button key={p.year} onClick={() => isValid && setSelectedHistoricalYear(p.year)} disabled={!isValid} className={`p-2.5 rounded-xl border text-left transition-all ${!isValid ? 'bg-slate-50 text-slate-300 border-slate-200/50 cursor-not-allowed opacity-50' : activeHistoricalStartYear === p.year ? 'bg-indigo-600 dark:bg-[#A9781F] text-white border-indigo-600 shadow-xs cursor-pointer' : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200 cursor-pointer'}`}>
                       <div className="flex items-center justify-between"><span className="font-bold text-xs">{p.year}</span>{!isValid && <span className="text-[9px] text-slate-400 font-sans">Over {E.HISTORICAL_LAST_YEAR}</span>}</div>
                       <div className={`text-[10px] leading-tight truncate mt-0.5 ${!isValid ? 'text-slate-300' : activeHistoricalStartYear === p.year ? 'text-indigo-100' : 'text-slate-500'}`}>{p.label.split('(')[0]}</div>
                     </button>
@@ -2871,28 +2936,28 @@ export default function App() {
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
                 <div className={`p-4 rounded-2xl border shadow-xs ${historicalMetrics.survived ? 'bg-emerald-50/90 border-emerald-200' : 'bg-rose-50/90 border-rose-200'}`}>
                   <span className="text-[11px] font-bold uppercase tracking-wider block text-slate-500 mb-1">Backtest Verdict</span>
-                  <div className="flex items-center gap-2">{historicalMetrics.survived ? <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0" /> : <AlertTriangle className="w-6 h-6 text-rose-600 shrink-0" />}<div><div className={`text-base font-black ${historicalMetrics.survived ? 'text-emerald-800' : 'text-rose-800'}`}>{historicalMetrics.survived ? `Survived to Age ${terminalAge}` : `${historicalMetrics.failReason === 'floor' ? 'Below floor' : 'Depleted'} at Age ${historicalMetrics.failAge}`}</div><span className="text-[11px] text-slate-500">{historicalMetrics.survived ? 'Zero insolvency detected' : `Failed in plan year ${historicalMetrics.failYear} (${historicalMetrics.failReason})`}</span></div></div>
+                  <div className="flex items-center gap-2">{historicalMetrics.survived ? <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0" /> : <AlertTriangle className="w-6 h-6 text-rose-600 shrink-0" />}<div><div className={`text-base font-black font-display italic ${historicalMetrics.survived ? 'text-emerald-800' : 'text-rose-800'}`}>{historicalMetrics.survived ? `Survived to Age ${terminalAge}` : `${historicalMetrics.failReason === 'floor' ? 'Below floor' : 'Depleted'} at Age ${historicalMetrics.failAge}`}</div><span className="text-[11px] text-slate-500">{historicalMetrics.survived ? 'Zero insolvency detected' : `Failed in plan year ${historicalMetrics.failYear} (${historicalMetrics.failReason})`}</span></div></div>
                 </div>
-                <div className="bg-white border border-slate-200/90 p-4 rounded-2xl shadow-xs"><span className="text-[11px] font-bold uppercase tracking-wider block text-slate-500 mb-1">Starting Balance (Today)</span><div className="text-xl font-bold font-mono text-slate-900 mt-1">{formatGBP(historicalMetrics.startVal)}</div><span className="text-[11px] text-slate-400">After year-0 flows, at Age {currentAge}</span></div>
-                <div className="bg-white border border-slate-200/90 p-4 rounded-2xl shadow-xs"><span className="text-[11px] font-bold uppercase tracking-wider block text-slate-500 mb-1">Lowest Portfolio Trough</span><div className="text-xl font-bold font-mono text-amber-700 mt-1">{formatGBP(historicalMetrics.minVal)}</div><span className="text-[11px] text-slate-400">Lowest total experienced</span></div>
-                <div className="bg-white border border-slate-200/90 p-4 rounded-2xl shadow-xs"><span className="text-[11px] font-bold uppercase tracking-wider block text-slate-500 mb-1">Terminal Pot @ {terminalAge}</span><div className={`text-xl font-bold font-mono mt-1 ${historicalMetrics.terminalVal > 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{formatGBP(historicalMetrics.terminalVal)}</div><span className="text-[11px] text-slate-400">Real purchasing power remaining · lifetime tax {formatGBP(historicalMetrics.lifetimeTax)}</span></div>
+                <div className="bg-surface border border-slate-200/90 p-4 rounded-2xl shadow-xs"><span className="text-[11px] font-bold uppercase tracking-wider block text-slate-500 mb-1">Starting Balance (Today)</span><div className="text-xl font-bold font-mono text-slate-900 mt-1">{formatGBP(historicalMetrics.startVal)}</div><span className="text-[11px] text-slate-400">After year-0 flows, at Age {currentAge}</span></div>
+                <div className="bg-surface border border-slate-200/90 p-4 rounded-2xl shadow-xs"><span className="text-[11px] font-bold uppercase tracking-wider block text-slate-500 mb-1">Lowest Portfolio Trough</span><div className="text-xl font-bold font-mono text-amber-700 mt-1">{formatGBP(historicalMetrics.minVal)}</div><span className="text-[11px] text-slate-400">Lowest total experienced</span></div>
+                <div className="bg-surface border border-slate-200/90 p-4 rounded-2xl shadow-xs"><span className="text-[11px] font-bold uppercase tracking-wider block text-slate-500 mb-1">Terminal Pot @ {terminalAge}</span><div className={`text-xl font-bold font-mono mt-1 ${historicalMetrics.terminalVal > 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{formatGBP(historicalMetrics.terminalVal)}</div><span className="text-[11px] text-slate-400">Real purchasing power remaining · lifetime tax {formatGBP(historicalMetrics.lifetimeTax)}</span></div>
               </div>
             )}
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div><h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider">Historical Wealth Path (Simulating {activeHistoricalStartYear}–{activeHistoricalStartYear + spanYears})</h3><span className="text-xs text-slate-500">Real purchasing power across accumulation and decumulation</span></div>
               <div className="relative overflow-x-auto">
                 <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="w-full h-auto select-none" onMouseLeave={() => setHoveredHistPoint(null)}>
                   <g transform={`translate(${margin.left}, ${margin.top})`}>
-                    {histYScale.ticks(6).map((t, i) => <g key={i} transform={`translate(0, ${histYScale(t)})`}><line x2={innerWidth} stroke="#f1f5f9" strokeDasharray="3,3" /><text x={-10} dy="0.32em" fill="#64748b" fontSize="10" textAnchor="end" fontFamily="monospace">£{(t / 1000).toFixed(0)}k</text></g>)}
-                    {histXScale.ticks(10).map((t, i) => <g key={i} transform={`translate(${histXScale(t)}, 0)`}><line y2={innerHeight} stroke="#f8fafc" /><text y={innerHeight + 20} fill="#64748b" fontSize="11" textAnchor="middle" fontFamily="monospace">{t}</text></g>)}
+                    {histYScale.ticks(6).map((t, i) => <g key={i} transform={`translate(0, ${histYScale(t)})`}><line x2={innerWidth} stroke={cp.gridMajor} strokeDasharray="3,3" /><text x={-10} dy="0.32em" fill={cp.axisText} fontSize="10" textAnchor="end" fontFamily="monospace">£{(t / 1000).toFixed(0)}k</text></g>)}
+                    {histXScale.ticks(10).map((t, i) => <g key={i} transform={`translate(${histXScale(t)}, 0)`}><line y2={innerHeight} stroke={cp.gridMinor} /><text y={innerHeight + 20} fill={cp.axisText} fontSize="11" textAnchor="middle" fontFamily="monospace">{t}</text></g>)}
                     {markers(histXScale)}
-                    {histLinePath && <path d={histLinePath} fill="none" stroke="#6366f1" strokeWidth="3" strokeLinecap="round" />}
+                    {histLinePath && <path d={histLinePath} fill="none" stroke={cp.historicalLine} strokeWidth="3" strokeLinecap="round" />}
                     <rect width={innerWidth} height={innerHeight} fill="transparent" onMouseMove={(e) => { const rect = e.currentTarget.getBoundingClientRect(); const age = Math.round(histXScale.invert((e.clientX - rect.left) * (innerWidth / Math.max(1, rect.width)))); setHoveredHistPoint(historicalTimeline.find(d => d.ageSelf === age) || null); }} />
-                    {hoveredHistPoint && <g transform={`translate(${histXScale(hoveredHistPoint.ageSelf)}, 0)`}><line y2={innerHeight} stroke="#94a3b8" strokeWidth="1" strokeDasharray="2,2" /><circle cy={histYScale(hoveredHistPoint.totalCombined)} r="4" fill="#6366f1" stroke="#ffffff" strokeWidth="2" /></g>}
+                    {hoveredHistPoint && <g transform={`translate(${histXScale(hoveredHistPoint.ageSelf)}, 0)`}><line y2={innerHeight} stroke={cp.hoverCrosshair} strokeWidth="1" strokeDasharray="2,2" /><circle cy={histYScale(hoveredHistPoint.totalCombined)} r="4" fill={cp.historicalHoverFill} stroke={cp.hoverDotStroke} strokeWidth="2" /></g>}
                   </g>
                 </svg>
                 {hoveredHistPoint && (
-                  <div className="absolute top-4 left-24 bg-white/95 border border-slate-200 p-3 rounded-xl shadow-lg text-xs space-y-1 backdrop-blur-md pointer-events-none">
+                  <div className="absolute top-4 left-24 bg-surface/95 border border-slate-200 p-3 rounded-xl shadow-lg text-xs space-y-1 backdrop-blur-md pointer-events-none">
                     <div className="font-bold text-slate-800 border-b border-slate-100 pb-1 flex justify-between gap-4"><span>Age {hoveredHistPoint.ageSelf} (Simulated {hoveredHistPoint.histYear ?? 'beyond data'})</span><span className="text-slate-500">Plan Year: {hoveredHistPoint.year}</span></div>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-1 font-mono">
                       <div className="text-indigo-600 font-bold">Total Pot: {formatGBP(hoveredHistPoint.totalCombined)}</div>
@@ -2909,7 +2974,7 @@ export default function App() {
 
         {/* TAB 6: AUDIT */}
         {activeTab === 'audit' && (
-          <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+          <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
               <div><h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Table className="w-4 h-4 text-blue-600" /> Year-by-Year Cash Flow &amp; Wrapper Ledger</h2><span className="text-xs text-slate-500">Expected-return path: contributions, guaranteed income, decumulation waterfall, tax and wrapper balances (end of year).</span></div>
               <button onClick={handleExportCSV} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all border border-slate-200 cursor-pointer self-start sm:self-auto"><FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" /> Export CSV Spreadsheet</button>
@@ -2941,7 +3006,7 @@ export default function App() {
         {/* TAB 7: DOCS */}
         {activeTab === 'docs' && (
           <div className="space-y-6">
-            <div id="doc-tournament" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+            <div id="doc-tournament" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Zap className="w-4 h-4 text-indigo-600" /> Automated Strategy Tournament &amp; Optimization Methodology</h2>
               <p className="text-xs text-slate-600 leading-relaxed">The tournament compares six ways of splitting the same annual take-home budget between S&amp;S ISAs and pensions. Every player is run on the same {TOURNAMENT_TRIALS.toLocaleString()} market paths (common random numbers), so the ranking reflects the strategies rather than sampling luck.</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
@@ -2952,7 +3017,7 @@ export default function App() {
               </div>
             </div>
 
-            <div id="doc-decumulation" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+            <div id="doc-decumulation" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Sliders className="w-4 h-4 text-blue-600" /> Decumulation Policies &amp; Pension Drawdown Strategies</h2>
               <p className="text-xs text-slate-600 leading-relaxed">How money is withdrawn across wrappers changes lifetime tax and the size of the pot left at the end; it changes the probability of maintaining your living costs far less than the spend level, asset allocation and the pre-access bridge do.</p>
               <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1.5">
@@ -2964,7 +3029,7 @@ export default function App() {
               </ul>
             </div>
 
-            <div id="doc-salary-sacrifice" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+            <div id="doc-salary-sacrifice" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Zap className="w-4 h-4 text-indigo-600" /> Salary Sacrifice vs S&amp;S ISAs</h2>
               <p className="text-xs text-slate-600 leading-relaxed">Salary sacrifice redirects gross earnings into your pension before income tax and employee NIC are deducted. Relief is calculated from the salary you enter, so it correctly reflects the {Math.round(P.basicRate * 100)}% + {Math.round(P.nicMain * 100)}% basic-rate band, the {Math.round(P.higherRate * 100)}% + {Math.round(P.nicUpper * 100)}% higher-rate band, and the {Math.round((P.higherRate + P.nicUpper) * 100 + P.higherRate * 100 * P.taperRate)}% effective rate where the personal allowance is tapered (£{P.thr.toLocaleString()}–£{Math.round(P.taperEnd).toLocaleString()}).</p>
               <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
@@ -2974,7 +3039,7 @@ export default function App() {
               </ul>
             </div>
 
-            <div id="doc-taper" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+            <div id="doc-taper" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><HelpCircle className="w-4 h-4 text-blue-600" /> Lifestyle Spending Tapers</h2>
               <p className="text-xs text-slate-600 leading-relaxed">Retirement spending rarely stays constant. Research into spending curves suggests three phases:</p>
               <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
@@ -2985,7 +3050,7 @@ export default function App() {
               <p className="text-xs text-slate-600 leading-relaxed">Taper 2 applies to the post-Taper 1 figure: £40,000 with a 10% Taper 1 becomes £36,000, and a 10% Taper 2 then reduces that to £32,400. Tapers key off "Myself" ages.</p>
             </div>
 
-            <div id="doc-risk-profiles" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+            <div id="doc-risk-profiles" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-blue-600" /> Asset Allocations, Return Bounds &amp; Volatility (σ)</h2>
               <p className="text-xs text-slate-600 leading-relaxed">Each wrapper is assigned a risk tier with an expected real return (treated as the median annual rate), lucky/unlucky bounds for the deterministic chart, and a volatility used by the Monte Carlo. All wrappers move together (one market factor scaled by each tier's σ); the historical backtest blends real US equity and bond returns by the tier's equity weight ({Object.entries(E.RISK_EQUITY_WEIGHTS).map(([k, v]) => `${k.replace(' Risk', '')} ${Math.round(v * 100)}%`).join(', ')}).</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
@@ -2995,7 +3060,7 @@ export default function App() {
               </div>
             </div>
 
-            <div id="doc-one-off-deposits" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+            <div id="doc-one-off-deposits" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Plus className="w-4 h-4 text-blue-600" /> One-Off Deposits &amp; Multi-Year Staging</h2>
               <p className="text-xs text-slate-600 leading-relaxed">A one-off deposit is a lump sum paid into a chosen wrapper in a chosen year. Because ISAs and pensions are capped each tax year, the engine checks the deposit against that year's remaining allowance before it lands.</p>
 
@@ -3024,7 +3089,7 @@ export default function App() {
               <p className="text-xs text-slate-500 leading-relaxed"><strong>Assumption:</strong> allowances are held fixed in real terms at the figures in Config ({formatGBP(P.isaAllowance)} ISA, {formatGBP(P.pensionAllowance)} pension, {formatGBP(P.pensionNoEarningsLimit)} with no earnings). Any future increase in these limits is <strong>not</strong> modelled, so a long staging schedule is a cautious estimate — if allowances do rise, the money would move across in fewer years than shown. You can edit the figures in Config to test a different assumption.</p>
             </div>
 
-            <div id="doc-cgt" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+            <div id="doc-cgt" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Wallet className="w-4 h-4 text-blue-600" /> Capital Gains Tax on Other Investments (GIA)</h2>
               <p className="text-xs text-slate-600 leading-relaxed">Pensions and ISAs shelter growth, but a general investment account does not. When CGT is switched on in Config, the engine tracks the <strong>cost basis</strong> of each person's GIA and charges tax on gains as they are realised.</p>
 
@@ -3045,7 +3110,7 @@ export default function App() {
               <p className="text-xs text-slate-500 leading-relaxed"><strong>Deliberate omissions:</strong> gains are wiped by the uplift on death, so nothing is charged on whatever remains at the terminal age — a real reason to spend other wrappers first. Dividends and interest inside the GIA are not modelled separately, share pooling and the 30-day rule are ignored, and the exempt amount and rates are held flat in real terms at the Config figures.</p>
             </div>
 
-            <div id="doc-one-offs" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+            <div id="doc-one-offs" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Coins className="w-4 h-4 text-blue-600" /> One-Off Cost Liquidation Hierarchy</h2>
               <p className="text-xs text-slate-600 leading-relaxed">When a one-off capital cost is scheduled, the engine liquidates assets in this order:</p>
               <ol className="list-decimal pl-5 text-xs text-slate-600 space-y-1">
