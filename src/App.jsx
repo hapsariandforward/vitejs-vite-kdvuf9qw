@@ -1356,6 +1356,79 @@ function applyAllocationToPlan(plan, ctx, alloc, { contribByYear = null, transfe
 }
 
 /*
+ * Total net take-home cost of the regular contribution schedule across each owner's accumulation years.
+ * Pension contributions are held gross, so they are priced at their net cost; ISA, GIA and cash are
+ * already net. `rateOverride` re-prices the same year-0 amounts under a different escalation.
+ */
+function accumulationOutlay(rawPlan, rateOverride = null) {
+  const ctx = rawPlan && rawPlan.P ? rawPlan : buildContext(rawPlan);
+  const cfg = ctx.plan.config;
+  let net = 0;
+  ctx.owners.forEach(o => {
+    const yrs = Math.max(0, o.retireAge - o.age0);
+    CATEGORIES.forEach(cat => {
+      const a = ctx.acc[o.ids[cat]];
+      if (!a) return;
+      for (let t = 0; t < yrs; t++) {
+        let c;
+        if (rateOverride === null) c = contribAtYear(a, t);
+        else {
+          const raw = a.contribByYear ? a.contribByYear[t] : a.contrib;
+          // a pre-built schedule already carries the account's own escalation; strip it before re-applying
+          const stripped = (a.contribByYear && a.growth > -0.999) ? raw / Math.pow(1 + a.growth, t) : raw;
+          c = stripped * Math.pow(1 + rateOverride, t);
+        }
+        if (!(c > 0)) continue;
+        net += cat === 'pen' ? netCostOfPensionContrib(c, o.salary, cfg) : c;
+      }
+    });
+  });
+  return net;
+}
+
+/*
+ * Every strategy inherits the user's per-wrapper escalation, so shifting money into a faster-escalating
+ * wrapper quietly raises total lifetime contributions — the tournament would then reward paying in more
+ * rather than allocating better (measured at up to +44% of outlay). This solves for the single escalation
+ * that holds a strategy's total net outlay equal to the current plan's, so "same take-home cost" is true
+ * across the whole accumulation period and not just in year one.
+ */
+function solveEscalation(planState, targetOutlay, { tol = 1, maxIter = 60 } = {}) {
+  const before = accumulationOutlay(planState);
+  if (!(targetOutlay > 0) || !(before > 0)) return { rate: null, before, after: before };
+  const at = (r) => accumulationOutlay(planState, r);
+  let lo = -0.9, hi = 1.0;
+  // outlay rises monotonically with the escalation rate, so bisection is sound
+  if (at(lo) > targetOutlay || at(hi) < targetOutlay) return { rate: null, before, after: before };
+  for (let i = 0; i < maxIter; i++) {
+    const mid = (lo + hi) / 2;
+    if (at(mid) < targetOutlay) lo = mid; else hi = mid;
+    if (Math.abs(at(mid) - targetOutlay) <= tol) { lo = hi = mid; break; }
+  }
+  // round to the precision the plan actually stores (0.01pp) and re-price there, so the figure reported
+  // to the user is the one the projection runs on — at 0.1pp the rounding alone drifts ~0.5% of outlay
+  const rate = Math.round(((lo + hi) / 2) * 10000) / 10000;
+  return { rate, before, after: at(rate) };
+}
+
+// Rewrite a plan's contribution escalation to a single rate, rescaling any pre-built yearly schedule.
+function applyEscalationToPlan(plan, rate) {
+  const out = normalizePlan(JSON.parse(JSON.stringify(plan)));
+  out.accounts.forEach(a => {
+    const old = clamp(num(a.growth, 0), -100, 100) / 100;
+    if (Array.isArray(a.contribByYear)) {
+      a.contribByYear = a.contribByYear.map((v, t) => {
+        const stripped = old > -0.999 ? v / Math.pow(1 + old, t) : v;
+        return Math.round(stripped * Math.pow(1 + rate, t));
+      });
+      a.contrib = a.contribByYear[0] || 0;
+    }
+    a.growth = Math.round(rate * 10000) / 100;
+  });
+  return out;
+}
+
+/*
  * Reports what a tournament strategy actually changes versus the baseline plan, by diffing the two
  * plan states account by account. Figures keep their native units — pension contributions are gross,
  * ISA and GIA contributions net — so a shift of take-home from ISA to pension shows a larger rise
@@ -1542,6 +1615,25 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
           : 'No pre-SIPP access gap, so this collapses to Relief-First (shown for completeness).',
       blended, { phase: { switchYears, yearsToFirstRetire, early: reliefAlloc, late: isaAlloc }, planOpts: { contribByYear } }));
   }
+
+  // Hold every player to the baseline's total accumulation outlay. Without this, reallocating towards a
+  // faster-escalating wrapper compounds a bigger base and the strategy wins by spending more, not by
+  // allocating better — so the "same take-home budget" the tournament advertises only held in year one.
+  const baselineOutlay = accumulationOutlay(ctx);
+  meta.baselineOutlay = baselineOutlay;
+  const normalise = (planState) => {
+    const solved = solveEscalation(planState, baselineOutlay);
+    if (solved.rate === null) return { planState, escalation: null };
+    return {
+      planState: applyEscalationToPlan(planState, solved.rate),
+      escalation: { rate: solved.rate, before: solved.before, after: solved.after, target: baselineOutlay }
+    };
+  };
+  strategies.forEach(s => {
+    if (s.id === 'baseline') return;
+    if (s.candidates) { s.candidates = s.candidates.map(c => ({ ...c, ...normalise(c.planState) })); return; }
+    if (s.planState) Object.assign(s, normalise(s.planState));
+  });
   return { ctx, meta, strategies };
 }
 
@@ -1591,8 +1683,8 @@ function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
 }
 
 // Namespace used by the UI (mirrors the modular engine.js exports)
-const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, employeeNIC, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, diffStrategyPlans, resolveSurvivalMaximizer, buildTournament, buildPolicyCandidates, pickBest };
-export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans, buildPolicyCandidates, pickBest };
+const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, employeeNIC, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSurvivalMaximizer, buildTournament, buildPolicyCandidates, pickBest };
+export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans, buildPolicyCandidates, pickBest, accumulationOutlay, solveEscalation, applyEscalationToPlan };
 
 
 const STORAGE_KEY = 'rp_plan_full_v28';          // unchanged: old saved plans are migrated by normalizePlan
@@ -1762,6 +1854,15 @@ function summarizeStrategyChange(res, baselinePlayer, { isCouple = false, meta =
     if (overflowed) lines.push('The GIA overflow is budget that no longer fits inside the ISA and pension allowances.');
   }
 
+  // the tournament re-prices escalation to hold every player to the same total outlay; say so, or the
+  // contribution figures look inconsistent with the escalation % still shown on the plan inputs
+  const esc = res.escalation;
+  if (esc && Math.abs(esc.before - esc.target) >= Math.max(500, esc.target * 0.01)) {
+    const pct = esc.target > 0 ? Math.abs(esc.before - esc.target) / esc.target * 100 : 0;
+    const dearer = esc.before > esc.target;
+    lines.push(`Contribution escalation re-set to ${(esc.rate * 100).toFixed(2)}%/yr so the total you pay in over the accumulation years still comes to ${formatGBP(esc.after)}. Left on your own escalation this split would have ${dearer ? 'cost' : 'been'} ${formatGBP(esc.before)} — ${dearer ? 'paying in' : 'paying in'} ${pct.toFixed(0)}% ${dearer ? 'more' : 'less'} than your current plan.`);
+  }
+
   // described separately from the annual figures because it is capital, not a yearly flow
   if (src && dest) {
     lines.push(`One-off: ${formatGBP(Math.abs(src.delta))} of existing ${WRAPPER_WORD[src.cat]} capital moves into the ${WRAPPER_WORD[dest.cat]}, becoming ${formatGBP(dest.delta)} after basic-rate relief${refund ? `, with ${formatGBP(refund.delta)} of higher-rate relief refunded to cash` : ''}.`);
@@ -1811,7 +1912,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
           s = {
             ...s, chosenShare: best.share,
             searchResults: evaluated.map(e => ({ share: e.share, successRate: e.stats.successRate, preAccess: e.stats.preNmpaFailRate, p10: e.stats.p10Terminal, median: e.stats.medianTerminal })),
-            isaContrib: best.alloc.isaContrib, penContrib: best.alloc.penContrib, giaContrib: best.alloc.giaContrib, taxReliefSaved: best.alloc.taxReliefSaved, planState: best.planState,
+            isaContrib: best.alloc.isaContrib, penContrib: best.alloc.penContrib, giaContrib: best.alloc.giaContrib, taxReliefSaved: best.alloc.taxReliefSaved, planState: best.planState, escalation: best.escalation,
             description: `Searched every ISA/pension split of the same budget; best survival at ${Math.round(best.share * 100)}% ISA / ${Math.round((1 - best.share) * 100)}% pension (bridge-risk cap ${preAccessCap === 'any' ? 'none' : preAccessCap + '%'}).`
           };
         }
