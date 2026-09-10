@@ -66,7 +66,7 @@ const DEFAULT_RISK_PROFILES = {
   'Medium Risk': { label: 'Medium — 40–60% Equities', real: 3.00, unlucky: 1.10, lucky: 4.95, nominal: 5.58, volatility: 8.0 },
   'Medium/Low Risk': { label: 'Medium/Low — 20–40% Equities', real: 2.28, unlucky: 0.82, lucky: 3.77, nominal: 4.84, volatility: 5.5 },
   'Low Risk': { label: 'Low — High interest Cash Savings, Fixed Income, Bonds', real: 1.56, unlucky: 0.54, lucky: 2.59, nominal: 4.10, volatility: 3.0 },
-  'Cash Equivalents': { label: 'instant cash savings/money market', real: -0.50, unlucky: -1.00, lucky: 0.00, nominal: 1.99, volatility: 0.5 }
+  'Cash Equivalents': { label: 'Instant cash savings/money market', real: -0.50, unlucky: -1.00, lucky: 0.00, nominal: 1.99, volatility: 0.5 }
 };
 
 // ---------------------------------------------------------------- plan shape & defaults
@@ -2621,7 +2621,7 @@ export default function App() {
                 <div>
                   <label className="text-slate-600 font-semibold block mb-1">Minimum pot at age {terminalAge} (£)</label>
                   <input type="number" min="0" step="5000" placeholder="0" onFocus={handleFocus} value={plan?.config?.solvencyFloor ?? ''} onChange={(e) => updateConfig('solvencyFloor', e.target.value)} className={`${inputCls} text-amber-700`} />
-                  <span className="text-[10px] text-slate-400 mt-1 block">Bequest floor, tested at the terminal age only.</span>
+                  <span className="text-[10px] text-slate-400 mt-1 block">Bequest floor in today's money, tested at the terminal age only. The whole projection is in real terms, so £100,000 here means £100,000 of today's purchasing power — no need to gross it up for inflation.</span>
                 </div>
               </div>
 
@@ -2646,6 +2646,11 @@ export default function App() {
                 </button>
                 {showAdvanced && (
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-xs mt-3">
+                    <div>
+                      <label className="text-slate-600 font-semibold block mb-1">Cash buffer kept from surplus income (months)</label>
+                      <input type="number" min="0" step="1" placeholder="6" onFocus={handleFocus} value={plan?.config?.cashBufferMonths ?? ''} onChange={(e) => updateConfig('cashBufferMonths', e.target.value)} className={inputCls} />
+                      <span className="text-[10px] text-slate-400 mt-1 block">Months of spending held back in cash before surplus income is swept into the ISA.</span>
+                    </div>
                     {ctx.owners.map(o => (
                       <div key={`cf_${o.key}`}>
                         <label className="text-slate-600 font-semibold block mb-1">Pension allowance carried forward ({o.label} £)</label>
@@ -2784,15 +2789,21 @@ export default function App() {
                     {plan.oneOffContributions.map(c => {
                       const st = ctx.oneOffStaging.get(c.id);
                       const isExpanded = expandedOneOff.has(c.id);
+                      // the engine drops any deposit whose year will not parse, so flag it rather than
+                      // letting it silently vanish from the projection
+                      const depYear = c.date ? parseInt(String(c.date).slice(0, 4)) : E.num(c.year, NaN);
+                      const missingDate = !Number.isFinite(depYear);
+                      const missingDest = !c.category;
+                      const incomplete = missingDate || missingDest;
                       return (
-                        <div key={c.id} className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
+                        <div key={c.id} className={`p-2.5 rounded-xl text-xs space-y-2 border ${incomplete ? 'bg-rose-50/70 border-rose-300' : 'bg-slate-50 border-slate-200'}`}>
                           <div className="flex flex-wrap items-center gap-2">
-                            <input type="date" value={c.date || (c.year ? `${c.year}-01-01` : '')} onChange={(e) => { const d = e.target.value; updateListItem('oneOffContributions', c.id, { date: d, year: parseInt(d.slice(0, 4)) || '' }); }} className="p-1 bg-surface border border-slate-300 rounded font-mono text-slate-800 text-xs" />
+                            <input type="date" value={c.date || (c.year ? `${c.year}-01-01` : '')} onChange={(e) => { const d = e.target.value; updateListItem('oneOffContributions', c.id, { date: d, year: parseInt(d.slice(0, 4)) || '' }); }} className={`p-1 bg-surface border rounded font-mono text-slate-800 text-xs ${missingDate ? 'border-rose-400 ring-1 ring-rose-300' : 'border-slate-300'}`} />
                             {isCouple ? (
                               <select value={c.owner} onChange={(e) => updateListItem('oneOffContributions', c.id, { owner: e.target.value })} className="p-1 bg-surface border border-slate-300 rounded text-slate-700"><option value="Myself">Myself</option><option value="Partner">Partner</option></select>
                             ) : <span className="text-slate-500 font-semibold px-1">Myself</span>}
                             <div className="flex flex-col gap-0.5">
-                              <span className="text-[9px] text-slate-400 leading-none">New capital or internal transfer?</span>
+                              <span className="text-[9px] text-slate-400 leading-none">Funding source — new capital or internal transfer?</span>
                               <select value={c.transferredFrom} onChange={(e) => updateListItem('oneOffContributions', c.id, { transferredFrom: e.target.value })} className="p-1 bg-surface border border-slate-300 rounded text-slate-700" title="Transferred from">
                                 <option value="External">External (New Capital)</option>
                                 {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
@@ -2800,7 +2811,7 @@ export default function App() {
                             </div>
                             <div className="flex flex-col gap-0.5">
                               <span className="text-[9px] text-slate-400 leading-none">Funding destination</span>
-                              <select value={c.category} onChange={(e) => { const category = e.target.value; const patch = { category }; if (c.stagedTargetWrapper === c.category) patch.stagedTargetWrapper = category; updateListItem('oneOffContributions', c.id, patch); }} className="p-1 bg-surface border border-slate-300 rounded text-blue-700 font-semibold">
+                              <select value={c.category} onChange={(e) => { const category = e.target.value; const patch = { category }; if (c.stagedTargetWrapper === c.category) patch.stagedTargetWrapper = category; updateListItem('oneOffContributions', c.id, patch); }} className={`p-1 bg-surface border rounded text-blue-700 font-semibold ${missingDest ? 'border-rose-400 ring-1 ring-rose-300' : 'border-slate-300'}`}>
                                 {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
                               </select>
                             </div>
@@ -2810,6 +2821,12 @@ export default function App() {
                             )}
                             <button onClick={() => deleteOneOffContrib(c.id)} className="p-1 ml-auto text-slate-400 hover:text-rose-600 cursor-pointer transition-colors"><Trash2 className="w-4 h-4" /></button>
                           </div>
+                          {incomplete && (
+                            <div className="flex items-start gap-1.5 text-[11px] text-rose-700 font-semibold">
+                              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-rose-600" />
+                              <span>{missingDate ? 'Add a date' : ''}{missingDate && missingDest ? ' and a destination wrapper' : missingDest ? 'Choose a destination wrapper' : ''} — this deposit is excluded from the projection until you do.</span>
+                            </div>
+                          )}
                           {st && (
                             <div className="flex flex-wrap items-center gap-2">
                               {st.direct ? (
@@ -2971,7 +2988,6 @@ export default function App() {
                 <div><label className="text-slate-600 font-semibold block mb-1">Headline Inflation CPI (% pa)</label><input type="number" step="0.1" placeholder="2.5" onFocus={handleFocus} value={plan?.config?.inflation ?? ''} onChange={(e) => updateConfig('inflation', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Only used for the nominal display series.</span></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">Personal Pension Access Age (NMPA)</label><input type="number" min="0" max="120" placeholder="58" onFocus={handleFocus} value={plan?.demographics?.privatePensionAge ?? ''} onChange={(e) => updateDemographics('privatePensionAge', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Statutory NMPA is 55 today and 57 from April 2028.</span></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">State Pension Start Age</label><input type="number" min="0" max="120" placeholder="68" onFocus={handleFocus} value={plan?.demographics?.statePensionAge ?? ''} onChange={(e) => updateDemographics('statePensionAge', e.target.value)} className={inputCls} /></div>
-                <div><label className="text-slate-600 font-semibold block mb-1">Cash buffer kept from surplus income (months)</label><input type="number" min="0" step="1" placeholder="6" onFocus={handleFocus} value={plan?.config?.cashBufferMonths ?? ''} onChange={(e) => updateConfig('cashBufferMonths', e.target.value)} className={inputCls} /></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">Tournament bridge safety margin (%)</label><input type="number" min="0" step="5" placeholder="30" onFocus={handleFocus} value={plan?.config?.bridgeSafetyMargin ?? ''} onChange={(e) => updateConfig('bridgeSafetyMargin', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Uplift on the pre-SIPP access reserve, assuming 0% real growth.</span></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">Pension death-tax haircut (%)</label><input type="number" min="0" max="100" step="5" placeholder="0" onFocus={handleFocus} value={plan?.config?.pensionDeathTaxRate ?? ''} onChange={(e) => updateConfig('pensionDeathTaxRate', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Applied to pension left at age {terminalAge} for the "net" pot figures only (IHT from April 2027 / beneficiary income tax).</span></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">Monte Carlo seed</label><div className="flex gap-1"><input type="number" value={mcSeed} onChange={(e) => setMcSeed(Math.max(1, parseInt(e.target.value) || 1))} className={inputCls} /><button type="button" onClick={() => setMcSeed(Math.floor(Math.random() * 1e9) + 1)} className="px-2 bg-slate-100 border border-slate-300 rounded-lg text-[11px] font-semibold cursor-pointer hover:bg-slate-200">Reseed</button></div><span className="text-[10px] text-slate-400 mt-1 block">Same seed = same market paths (reproducible, fair comparisons).</span></div>
@@ -3234,7 +3250,7 @@ export default function App() {
                   </div>
                   <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 w-full lg:w-auto text-xs border-t lg:border-t-0 border-slate-200/80 pt-3 lg:pt-0">
                     <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Survival Rate</span><span className={`text-base font-black font-mono ${simResult.successRate >= 90 ? 'text-emerald-700' : simResult.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}`}>{simResult.successRate.toFixed(1)}%</span></div>
-                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Age of Failure</span><span className={`text-base font-black font-mono ${!simResult.medianFailAge ? 'text-emerald-700' : simResult.medianFailAge < nmpa ? 'text-rose-700' : 'text-amber-700'}`}>{simResult.medianFailAge ? `Age ${simResult.medianFailAge}` : 'None'}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono truncate">{simResult.medianFailAge ? `Median of failures (earliest ${simResult.earliestFailAge})` : '100% Solvency'}</span></div>
+                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Age of Failure</span><span className={`text-base font-black font-mono ${!simResult.medianFailAge ? 'text-emerald-700' : simResult.medianFailAge < nmpa ? 'text-rose-700' : 'text-amber-700'}`}>{simResult.medianFailAge ? `Age ${simResult.medianFailAge}` : 'None'}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono truncate">{simResult.medianFailAge ? `Median age of failed scenarios (earliest ${simResult.earliestFailAge})` : '100% Solvency'}</span></div>
                     <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Pre-SIPP access failures</span><span className={`text-base font-black font-mono ${simResult.preNmpaFailRate > 5 ? 'text-rose-700' : 'text-slate-700'}`}>{simResult.preNmpaFailRate.toFixed(1)}%</span></div>
                     <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">10th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-rose-700">{formatGBP(simResult.p10Terminal)}</span></div>
                     <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Median Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-blue-700">{formatGBP(simResult.medianTerminal)}</span>{ctx.pensionDeathTaxRate > 0 && <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">net of pension death tax {formatGBP(simResult.medianTerminalNet)}</span>}</div>
