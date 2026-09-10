@@ -1,11 +1,250 @@
 <!DOCTYPE html>
 <html lang="en">
   <head>
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('rp_theme_v1');
+          var theme = (t === 'classic' || t === 'light' || t === 'dark') ? t : 'classic';
+          document.documentElement.setAttribute('data-theme', theme);
+          if (theme === 'dark') document.documentElement.classList.add('dark');
+        } catch (e) {}
+      })();
+    </script>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: { extend: {
+          colors: {
+            slate:   { 50:'rgb(var(--slate-50)/<alpha-value>)', 100:'rgb(var(--slate-100)/<alpha-value>)', 200:'rgb(var(--slate-200)/<alpha-value>)', 300:'rgb(var(--slate-300)/<alpha-value>)', 400:'rgb(var(--slate-400)/<alpha-value>)', 500:'rgb(var(--slate-500)/<alpha-value>)', 600:'rgb(var(--slate-600)/<alpha-value>)', 700:'rgb(var(--slate-700)/<alpha-value>)', 800:'rgb(var(--slate-800)/<alpha-value>)', 900:'rgb(var(--slate-900)/<alpha-value>)' },
+            surface: { DEFAULT: 'rgb(var(--surface)/<alpha-value>)' },
+            blue:    { 50:'rgb(var(--blue-50)/<alpha-value>)', 100:'rgb(var(--blue-100)/<alpha-value>)', 200:'rgb(var(--blue-200)/<alpha-value>)', 500:'rgb(var(--blue-500)/<alpha-value>)', 600:'rgb(var(--blue-600)/<alpha-value>)', 700:'rgb(var(--blue-700)/<alpha-value>)', 800:'rgb(var(--blue-800)/<alpha-value>)', 950:'rgb(var(--blue-950)/<alpha-value>)' },
+            indigo:  { 50:'rgb(var(--indigo-50)/<alpha-value>)', 100:'rgb(var(--indigo-100)/<alpha-value>)', 200:'rgb(var(--indigo-200)/<alpha-value>)', 500:'rgb(var(--indigo-500)/<alpha-value>)', 600:'rgb(var(--indigo-600)/<alpha-value>)', 700:'rgb(var(--indigo-700)/<alpha-value>)', 800:'rgb(var(--indigo-800)/<alpha-value>)', 900:'rgb(var(--indigo-900)/<alpha-value>)', 950:'rgb(var(--indigo-950)/<alpha-value>)' },
+            emerald: { 50:'rgb(var(--emerald-50)/<alpha-value>)', 100:'rgb(var(--emerald-100)/<alpha-value>)', 200:'rgb(var(--emerald-200)/<alpha-value>)', 300:'rgb(var(--emerald-300)/<alpha-value>)', 600:'rgb(var(--emerald-600)/<alpha-value>)', 700:'rgb(var(--emerald-700)/<alpha-value>)', 800:'rgb(var(--emerald-800)/<alpha-value>)' },
+            rose:    { 50:'rgb(var(--rose-50)/<alpha-value>)', 100:'rgb(var(--rose-100)/<alpha-value>)', 200:'rgb(var(--rose-200)/<alpha-value>)', 300:'rgb(var(--rose-300)/<alpha-value>)', 400:'rgb(var(--rose-400)/<alpha-value>)', 600:'rgb(var(--rose-600)/<alpha-value>)', 700:'rgb(var(--rose-700)/<alpha-value>)', 800:'rgb(var(--rose-800)/<alpha-value>)', 950:'rgb(var(--rose-950)/<alpha-value>)' },
+            amber:   { 50:'rgb(var(--amber-50)/<alpha-value>)', 100:'rgb(var(--amber-100)/<alpha-value>)', 200:'rgb(var(--amber-200)/<alpha-value>)', 300:'rgb(var(--amber-300)/<alpha-value>)', 500:'rgb(var(--amber-500)/<alpha-value>)', 600:'rgb(var(--amber-600)/<alpha-value>)', 700:'rgb(var(--amber-700)/<alpha-value>)', 800:'rgb(var(--amber-800)/<alpha-value>)', 900:'rgb(var(--amber-900)/<alpha-value>)' },
+            sky:     { 600:'rgb(var(--sky-600)/<alpha-value>)', 700:'rgb(var(--sky-700)/<alpha-value>)' },
+            teal:    { 600:'rgb(var(--teal-600)/<alpha-value>)', 700:'rgb(var(--teal-700)/<alpha-value>)' },
+            purple:  { 700:'rgb(var(--purple-700)/<alpha-value>)' },
+          },
+          fontFamily: {
+            sans: ['"IBM Plex Sans"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+            mono: ['"IBM Plex Mono"', 'ui-monospace', 'SFMono-Regular', 'monospace'],
+            display: ['"Newsreader"', 'ui-serif', 'Georgia', 'serif'],
+          },
+          boxShadow: {
+            '2xs': '0 1px 1px 0 rgb(var(--shadow-c) / var(--shadow-a2))',
+            xs:    '0 1px 2px 0 rgb(var(--shadow-c) / var(--shadow-a))',
+            lg:    '0 10px 25px -5px rgb(var(--shadow-c) / var(--shadow-a-lg)), 0 8px 10px -6px rgb(var(--shadow-c) / var(--shadow-a-lg))',
+          },
+        } },
+      };
+    </script>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Retirement Planning Studio</title>  </head>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&family=Newsreader:ital,wght@1,600;1,700&display=swap" rel="stylesheet">
+    <style>
+      :root {
+        /* classic — the original stock-Tailwind look, kept as an opt-in third theme */
+        --slate-50: 248 250 252;
+        --slate-100: 241 245 249;
+        --slate-200: 226 232 240;
+        --slate-300: 203 213 225;
+        --slate-400: 148 163 184;
+        --slate-500: 100 116 139;
+        --slate-600: 71 85 105;
+        --slate-700: 51 65 85;
+        --slate-800: 30 41 59;
+        --slate-900: 15 23 42;
+        --surface: 255 255 255;
+        --blue-50: 239 246 255;
+        --blue-100: 219 234 254;
+        --blue-200: 191 219 254;
+        --blue-500: 59 130 246;
+        --blue-600: 37 99 235;
+        --blue-700: 29 78 216;
+        --blue-800: 30 64 175;
+        --blue-950: 23 37 84;
+        --indigo-50: 238 242 255;
+        --indigo-100: 224 231 255;
+        --indigo-200: 199 210 254;
+        --indigo-500: 99 102 241;
+        --indigo-600: 79 70 229;
+        --indigo-700: 67 56 202;
+        --indigo-800: 55 48 163;
+        --indigo-900: 49 46 129;
+        --indigo-950: 30 27 75;
+        --emerald-50: 236 253 245;
+        --emerald-100: 209 250 229;
+        --emerald-200: 167 243 208;
+        --emerald-300: 110 231 183;
+        --emerald-600: 5 150 105;
+        --emerald-700: 4 120 87;
+        --emerald-800: 6 95 70;
+        --rose-50: 255 241 242;
+        --rose-100: 255 228 230;
+        --rose-200: 254 205 211;
+        --rose-300: 253 164 175;
+        --rose-400: 251 113 133;
+        --rose-600: 225 29 72;
+        --rose-700: 190 18 60;
+        --rose-800: 159 18 57;
+        --rose-950: 76 5 25;
+        --amber-50: 255 251 235;
+        --amber-100: 254 243 199;
+        --amber-200: 253 230 138;
+        --amber-300: 252 211 77;
+        --amber-500: 245 158 11;
+        --amber-600: 217 119 6;
+        --amber-700: 180 83 9;
+        --amber-800: 146 64 14;
+        --amber-900: 120 53 15;
+        --sky-600: 2 132 199;
+        --sky-700: 3 105 161;
+        --teal-600: 13 148 136;
+        --teal-700: 15 118 110;
+        --purple-700: 126 34 206;
+        --shadow-c: 0 0 0;
+        --shadow-a: .05;
+        --shadow-a2: .04;
+        --shadow-a-lg: .1;
+      }
+      html[data-theme="light"] {
+        /* Riviera Ledger */
+        --slate-50: 230 232 222;
+        --slate-100: 220 223 210;
+        --slate-200: 201 205 189;
+        --slate-300: 163 169 156;
+        --slate-400: 138 144 152;
+        --slate-500: 113 121 127;
+        --slate-600: 92 107 114;
+        --slate-700: 69 82 90;
+        --slate-800: 46 57 68;
+        --slate-900: 31 42 60;
+        --surface: 251 250 244;
+        --blue-50: 231 238 245;
+        --blue-100: 207 224 238;
+        --blue-200: 169 198 221;
+        --blue-500: 62 118 173;
+        --blue-600: 44 92 143;
+        --blue-700: 32 69 104;
+        --blue-800: 23 50 77;
+        --blue-950: 14 29 46;
+        --indigo-50: 251 243 225;
+        --indigo-100: 243 228 190;
+        --indigo-200: 230 204 138;
+        --indigo-500: 196 151 46;
+        --indigo-600: 169 120 31;
+        --indigo-700: 133 93 24;
+        --indigo-800: 100 69 18;
+        --indigo-900: 74 51 16;
+        --indigo-950: 46 31 9;
+        --emerald-50: 231 243 236;
+        --emerald-100: 203 231 215;
+        --emerald-200: 160 210 183;
+        --emerald-300: 111 182 144;
+        --emerald-600: 47 122 79;
+        --emerald-700: 34 96 60;
+        --emerald-800: 23 71 44;
+        --rose-50: 247 233 231;
+        --rose-100: 239 208 205;
+        --rose-200: 223 169 163;
+        --rose-300: 203 126 118;
+        --rose-400: 190 92 82;
+        --rose-600: 179 59 59;
+        --rose-700: 142 46 46;
+        --rose-800: 107 35 35;
+        --rose-950: 51 16 16;
+        --amber-50: 251 237 224;
+        --amber-100: 245 216 184;
+        --amber-200: 235 183 125;
+        --amber-300: 222 151 80;
+        --amber-500: 199 122 46;
+        --amber-600: 176 99 30;
+        --amber-700: 138 76 23;
+        --amber-800: 102 56 16;
+        --amber-900: 74 41 12;
+        --sky-600: 2 132 199;
+        --sky-700: 2 101 145;
+        --teal-600: 13 148 136;
+        --teal-700: 10 114 104;
+        --purple-700: 109 40 217;
+        --shadow-c: 31 42 60;
+        --shadow-a: .06;
+        --shadow-a2: .04;
+        --shadow-a-lg: .16;
+      }
+      html[data-theme="dark"] {
+        /* Control Room */
+        --slate-50: 11 13 16;
+        --slate-100: 17 20 24;
+        --slate-200: 27 31 37;
+        --slate-300: 38 43 51;
+        --slate-400: 58 64 72;
+        --slate-500: 86 96 105;
+        --slate-600: 138 147 155;
+        --slate-700: 174 182 188;
+        --slate-800: 205 211 215;
+        --slate-900: 231 236 239;
+        --surface: 20 23 27;
+        --blue-50: 14 20 31;
+        --blue-100: 22 35 58;
+        --blue-200: 34 55 86;
+        --blue-500: 111 160 255;
+        --blue-600: 61 116 232;
+        --blue-700: 138 180 255;
+        --blue-800: 185 211 255;
+        --blue-950: 228 238 255;
+        --indigo-50: 31 23 8;
+        --indigo-100: 46 34 9;
+        --indigo-200: 71 53 13;
+        --indigo-500: 199 154 62;
+        --indigo-600: 212 165 55;
+        --indigo-700: 226 188 94;
+        --indigo-800: 237 206 133;
+        --indigo-900: 245 223 169;
+        --indigo-950: 250 235 201;
+        --emerald-50: 10 31 22;
+        --emerald-100: 15 46 32;
+        --emerald-200: 23 71 47;
+        --emerald-300: 34 104 70;
+        --emerald-600: 63 214 140;
+        --emerald-700: 114 224 170;
+        --emerald-800: 163 235 199;
+        --rose-50: 32 13 13;
+        --rose-100: 51 19 19;
+        --rose-200: 77 28 28;
+        --rose-300: 110 40 40;
+        --rose-400: 155 59 59;
+        --rose-600: 255 107 107;
+        --rose-700: 255 148 148;
+        --rose-800: 255 187 187;
+        --rose-950: 255 228 228;
+        --amber-50: 36 20 7;
+        --amber-100: 58 32 10;
+        --amber-200: 88 51 15;
+        --amber-300: 125 74 23;
+        --amber-500: 214 138 62;
+        --amber-600: 232 154 74;
+        --amber-700: 240 180 117;
+        --amber-800: 246 206 159;
+        --amber-900: 250 224 192;
+        --sky-600: 79 195 240;
+        --sky-700: 126 212 245;
+        --teal-600: 63 219 199;
+        --teal-700: 116 230 216;
+        --purple-700: 139 124 246;
+        --shadow-c: 0 0 0;
+        --shadow-a: .5;
+        --shadow-a2: .35;
+        --shadow-a-lg: .6;
+      }
+    </style>
+    <title>Monte-Carlo Retirement Planner</title>  </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>

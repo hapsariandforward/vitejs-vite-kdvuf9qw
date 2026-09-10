@@ -3,14 +3,14 @@ import * as d3 from 'd3';
 import {
   TrendingUp, Layers, Check, RotateCcw, Dices, Zap, ShieldCheck, Target, Sliders, Download, Upload, Users, Wallet, Coins,
   Settings, Plus, Trash2, Table, FileSpreadsheet, CheckCircle2, AlertTriangle, Pencil, HelpCircle, BookOpen, History, Bookmark,
-  Save, Sparkles, ArrowUpRight, ArrowDownRight, Trophy, Info
+  Save, Sparkles, ArrowUpRight, ArrowDownRight, Trophy, Info, Sun, Moon, Monitor
 } from 'lucide-react';
 // ============================================================================================
-// Retirement Planning Studio v3.4 — single-file build (engine + UI).
+// Monte-Carlo Retirement Planner v3.4 — single-file build (engine + UI).
 // The engine section is framework-free and unit-tested; the UI section starts at "export default function App".
 // ============================================================================================
 /* =====================================================================================
-   Retirement Planning Studio — projection engine (pure, framework-free, unit-testable)
+   Monte-Carlo Retirement Planner — projection engine (pure, framework-free, unit-testable)
    -------------------------------------------------------------------------------------
    Everything in this section is deterministic given its inputs. No React, no DOM, no
    randomness other than the explicitly seeded generator used by the Monte Carlo runner.
@@ -61,11 +61,11 @@ const RISK_EQUITY_WEIGHTS = {
 };
 
 const DEFAULT_RISK_PROFILES = {
-  'High Risk': { label: '80–100% Equities', real: 4.44, unlucky: 1.66, lucky: 7.31, nominal: 7.05, volatility: 15.5 },
-  'Medium/High Risk': { label: '60–80% Equities', real: 3.72, unlucky: 1.38, lucky: 6.13, nominal: 6.31, volatility: 11.5 },
-  'Medium Risk': { label: '40–60% Equities', real: 3.00, unlucky: 1.10, lucky: 4.95, nominal: 5.58, volatility: 8.0 },
-  'Medium/Low Risk': { label: '20–40% Equities', real: 2.28, unlucky: 0.82, lucky: 3.77, nominal: 4.84, volatility: 5.5 },
-  'Low Risk': { label: 'High interest Cash Savings, Fixed Income, Bonds', real: 1.56, unlucky: 0.54, lucky: 2.59, nominal: 4.10, volatility: 3.0 },
+  'High Risk': { label: 'Highest — 80–100% Equities', real: 4.44, unlucky: 1.66, lucky: 7.31, nominal: 7.05, volatility: 15.5 },
+  'Medium/High Risk': { label: 'High — 60–80% Equities', real: 3.72, unlucky: 1.38, lucky: 6.13, nominal: 6.31, volatility: 11.5 },
+  'Medium Risk': { label: 'Medium — 40–60% Equities', real: 3.00, unlucky: 1.10, lucky: 4.95, nominal: 5.58, volatility: 8.0 },
+  'Medium/Low Risk': { label: 'Medium/Low — 20–40% Equities', real: 2.28, unlucky: 0.82, lucky: 3.77, nominal: 4.84, volatility: 5.5 },
+  'Low Risk': { label: 'Low — High interest Cash Savings, Fixed Income, Bonds', real: 1.56, unlucky: 0.54, lucky: 2.59, nominal: 4.10, volatility: 3.0 },
   'Cash Equivalents': { label: 'instant cash savings/money market', real: -0.50, unlucky: -1.00, lucky: 0.00, nominal: 1.99, volatility: 0.5 }
 };
 
@@ -73,8 +73,18 @@ const DEFAULT_RISK_PROFILES = {
 const OWNERS = ['self', 'part'];
 const OWNER_LABEL = { self: 'Myself', part: 'Partner' };
 const CATEGORIES = ['pen', 'isa', 'other', 'cash'];
-const CATEGORY_LABEL = { pen: 'Pensions', isa: 'S&S ISAs', other: 'Other Investments', cash: 'Cash Savings' };
+const CATEGORY_LABEL = { pen: 'Pensions', isa: 'S&S ISAs', other: 'Other Investments (e.g. GIA)', cash: 'Cash Savings' };
 const accountId = (cat, owner) => `${cat}_${owner}`;
+
+// Income stream types. `taxable` drives income tax; `relevantEarnings` drives the pension annual-allowance
+// earnings test — under UK rules only employment/self-employment income supports pension contributions,
+// so DB pensions, annuities, rent, dividends and interest are taxed but do not raise the pension limit.
+const INCOME_TYPES = {
+  earnings: { label: 'Earnings (employment / self-employment)', taxable: true, relevantEarnings: true },
+  otherTaxable: { label: 'Other taxable income (e.g. DB pensions, annuities)', taxable: true, relevantEarnings: false },
+  taxFree: { label: 'Tax-free income', taxable: false, relevantEarnings: false }
+};
+const incomeTypeOf = (key) => INCOME_TYPES[key] || INCOME_TYPES.otherTaxable;
 
 const DEFAULT_CONFIG = {
   valuationDate: '',                 // '' => today (resolved at run time)
@@ -102,6 +112,13 @@ const DEFAULT_CONFIG = {
   // Annual wrapper allowances (per person)
   isaAnnualAllowance: 20000,
   pensionAnnualAllowance: 60000,
+  pensionNoEarningsLimit: 3600,      // gross pension contribution allowed with no relevant UK earnings
+  mpaaLimit: 10000,                  // money purchase annual allowance once a pension is flexibly accessed
+  // Capital gains tax on the GIA (realisation-based; gains are wiped on death so nothing is charged at the terminal age)
+  cgtEnabled: true,
+  cgtAnnualExempt: 3000,
+  cgtBasicRate: 18,
+  cgtHigherRate: 24,
   // Behavioural / modelling assumptions
   cashBufferMonths: 6,               // months of spending kept in cash before surplus income is swept to ISA
   harvestPersonalAllowance: true,    // in retirement draw pension to fill unused 0% allowance and move it to ISA
@@ -113,11 +130,11 @@ const DEFAULT_CONFIG = {
 const defaultAccounts = () => [
   { id: 'pen_self', owner: 'Myself', category: 'Pensions', balance: '', contrib: '', growth: '', risk: 'High Risk' },
   { id: 'isa_self', owner: 'Myself', category: 'S&S ISAs', balance: '', contrib: '', growth: '', risk: 'High Risk' },
-  { id: 'other_self', owner: 'Myself', category: 'Other Investments', balance: '', contrib: '', growth: '', risk: 'Low Risk' },
+  { id: 'other_self', owner: 'Myself', category: 'Other Investments (e.g. GIA)', balance: '', contrib: '', growth: '', risk: 'Low Risk', unrealisedGain: '' },
   { id: 'cash_self', owner: 'Myself', category: 'Cash Savings', balance: '', contrib: '', growth: '', risk: 'Low Risk' },
   { id: 'pen_part', owner: 'Partner', category: 'Pensions', balance: '', contrib: '', growth: '', risk: 'High Risk' },
   { id: 'isa_part', owner: 'Partner', category: 'S&S ISAs', balance: '', contrib: '', growth: '', risk: 'High Risk' },
-  { id: 'other_part', owner: 'Partner', category: 'Other Investments', balance: '', contrib: '', growth: '', risk: 'Low Risk' },
+  { id: 'other_part', owner: 'Partner', category: 'Other Investments (e.g. GIA)', balance: '', contrib: '', growth: '', risk: 'Low Risk', unrealisedGain: '' },
   { id: 'cash_part', owner: 'Partner', category: 'Cash Savings', balance: '', contrib: '', growth: '', risk: 'Low Risk' }
 ];
 
@@ -128,6 +145,10 @@ const BLANK_PLAN = Object.freeze({
     currentAgeSelf: '', currentAgePart: '',
     retireAgeSelf: '', retireAgePart: '',
     salarySelf: '', salaryPart: '',
+    cgtGainsUsedSelf: '', cgtGainsUsedPart: '',
+    cfBroughtForwardSelf: '', cfBroughtForwardPart: '',
+    // derived by resolveMpaa from the projection, not user-editable
+    mpaaAgeSelf: '', mpaaAgePart: '',
     statePensionAge: 68, privatePensionAge: 58,
     statePensionSelf: '', statePensionPart: '',
     terminalAge: 100
@@ -185,8 +206,23 @@ function normalizePlan(raw) {
     spending: { ...BLANK_PLAN.spending, ...s },
     accounts: [],
     riskProfiles: {},
-    otherIncomes: Array.isArray(src.otherIncomes) ? src.otherIncomes.filter(isPlainObject).map(i => ({ id: String(i.id || 'inc_' + Math.random().toString(36).slice(2)), name: i.name ?? '', owner: i.owner === 'Partner' ? 'Partner' : 'Myself', startAge: i.startAge ?? '', endAge: i.endAge ?? '', amount: i.amount ?? '', taxTreatment: i.taxTreatment === 'Tax-free' ? 'Tax-free' : 'Taxable', notes: i.notes ?? '' })) : [],
-    oneOffContributions: Array.isArray(src.oneOffContributions) ? src.oneOffContributions.filter(isPlainObject).map(x => ({ id: String(x.id || 'c_' + Math.random().toString(36).slice(2)), date: x.date || (x.year ? `${x.year}-01-01` : ''), year: num(x.year, x.date ? parseInt(String(x.date).slice(0, 4)) : ''), owner: x.owner === 'Partner' ? 'Partner' : 'Myself', category: Object.values(CATEGORY_LABEL).includes(x.category) ? x.category : 'Pensions', amount: x.amount ?? '', desc: x.desc ?? '' })) : [],
+    // legacy plans carried taxTreatment: 'Taxable' | 'Tax-free'; 'Taxable' migrates to otherTaxable so an
+    // upgrade can never silently raise someone's pension headroom.
+    otherIncomes: Array.isArray(src.otherIncomes) ? src.otherIncomes.filter(isPlainObject).map(i => ({ id: String(i.id || 'inc_' + Math.random().toString(36).slice(2)), name: i.name ?? '', owner: i.owner === 'Partner' ? 'Partner' : 'Myself', startAge: i.startAge ?? '', endAge: i.endAge ?? '', amount: i.amount ?? '', incomeType: INCOME_TYPES[i.incomeType] ? i.incomeType : (i.taxTreatment === 'Tax-free' ? 'taxFree' : 'otherTaxable'), notes: i.notes ?? '' })) : [],
+    oneOffContributions: Array.isArray(src.oneOffContributions) ? src.oneOffContributions.filter(isPlainObject).map(x => {
+      const category = Object.values(CATEGORY_LABEL).includes(x.category) ? x.category : 'Pensions';
+      return {
+        id: String(x.id || 'c_' + Math.random().toString(36).slice(2)),
+        date: x.date || (x.year ? `${x.year}-01-01` : ''),
+        year: num(x.year, x.date ? parseInt(String(x.date).slice(0, 4)) : ''),
+        owner: x.owner === 'Partner' ? 'Partner' : 'Myself',
+        category,
+        amount: x.amount ?? '',
+        desc: x.desc ?? '',
+        transferredFrom: ['External', ...Object.values(CATEGORY_LABEL)].includes(x.transferredFrom) ? x.transferredFrom : 'External',
+        stagedTargetWrapper: Object.values(CATEGORY_LABEL).includes(x.stagedTargetWrapper) ? x.stagedTargetWrapper : category
+      };
+    }) : [],
     oneOffCosts: Array.isArray(src.oneOffCosts) ? src.oneOffCosts.filter(isPlainObject).map(x => ({ id: String(x.id || 'cost_' + Math.random().toString(36).slice(2)), date: x.date || (x.year ? `${x.year}-01-01` : ''), year: num(x.year, x.date ? parseInt(String(x.date).slice(0, 4)) : ''), owner: x.owner === 'Partner' ? 'Partner' : 'Myself', amount: x.amount ?? '', desc: x.desc ?? '' })) : [],
     config: { ...DEFAULT_CONFIG, ...c }
   };
@@ -204,7 +240,8 @@ function normalizePlan(raw) {
     const found = rawAccounts.find(a => a.id === def.id);
     if (!found) return def;
     const merged = { ...def, ...found, id: def.id, owner: def.owner, category: def.category };
-    ['balance', 'contrib', 'growth'].forEach(k => { const v = merged[k]; if (v === null || v === undefined || typeof v === 'object' || typeof v === 'boolean') merged[k] = ''; });
+    ['balance', 'contrib', 'growth', 'unrealisedGain'].forEach(k => { const v = merged[k]; if (v === null || v === undefined || typeof v === 'object' || typeof v === 'boolean') merged[k] = ''; });
+    if (!def.id.startsWith('other_')) delete merged.unrealisedGain; // only the GIA carries a cost basis
     if (typeof merged.risk !== 'string') merged.risk = def.risk;
     if (Array.isArray(found.contribByYear)) merged.contribByYear = found.contribByYear.map(v => num(v, 0));
     else delete merged.contribByYear;
@@ -241,12 +278,18 @@ function taxParams(cfgIn) {
   const lsa = Math.max(0, num(cfg.pclsMaxCap, DEFAULT_CONFIG.pclsMaxCap));
   const isaAllowance = Math.max(0, num(cfg.isaAnnualAllowance, DEFAULT_CONFIG.isaAnnualAllowance));
   const pensionAllowance = Math.max(0, num(cfg.pensionAnnualAllowance, DEFAULT_CONFIG.pensionAnnualAllowance));
+  const pensionNoEarningsLimit = clamp(num(cfg.pensionNoEarningsLimit, DEFAULT_CONFIG.pensionNoEarningsLimit), 0, pensionAllowance);
+  const mpaaLimit = clamp(num(cfg.mpaaLimit, DEFAULT_CONFIG.mpaaLimit), 0, pensionAllowance);
+  const cgtEnabled = cfg.cgtEnabled === undefined ? DEFAULT_CONFIG.cgtEnabled : !!cfg.cgtEnabled;
+  const cgtAnnualExempt = Math.max(0, num(cfg.cgtAnnualExempt, DEFAULT_CONFIG.cgtAnnualExempt));
+  const cgtBasicRate = clamp(num(cfg.cgtBasicRate, DEFAULT_CONFIG.cgtBasicRate), 0, 99) / 100;
+  const cgtHigherRate = clamp(num(cfg.cgtHigherRate, DEFAULT_CONFIG.cgtHigherRate), 0, 99) / 100;
   // allowance remaining at a given income
   const paAt = (income) => taperRate > 0 && income > thr ? Math.max(0, pa - (income - thr) * taperRate) : pa;
   const basicWidth = Math.max(0, basicLimit - pa);                 // basic band measured in taxable income
   const higherTop = Math.max(basicWidth, higherLimit - paAt(higherLimit)); // higher band upper limit in taxable income
   const taperEnd = taperRate > 0 ? thr + pa / taperRate : Infinity;
-  return { __isParams: true, pa, thr, taperRate, basicLimit, higherLimit, basicRate, higherRate, addRate, nicPT, nicUEL, nicMain, nicUpper, erNic, erPass, pclsProp, lsa, isaAllowance, pensionAllowance, paAt, basicWidth, higherTop, taperEnd };
+  return { __isParams: true, pa, thr, taperRate, basicLimit, higherLimit, basicRate, higherRate, addRate, nicPT, nicUEL, nicMain, nicUpper, erNic, erPass, pclsProp, lsa, isaAllowance, pensionAllowance, pensionNoEarningsLimit, mpaaLimit, cgtEnabled, cgtAnnualExempt, cgtBasicRate, cgtHigherRate, paAt, basicWidth, higherTop, taperEnd };
 }
 
 function incomeTax(gross, cfg) {
@@ -478,6 +521,8 @@ function buildContext(rawPlan) {
     return {
       id: a.id, cat, owner, ownerLabel: a.owner,
       balance: Math.max(0, num(a.balance, 0)),
+      // embedded gain in today's GIA balance; blank means the balance is treated as all cost
+      unrealisedGain: clamp(num(a.unrealisedGain, 0), 0, Math.max(0, num(a.balance, 0))),
       contrib: Math.max(0, num(a.contrib, 0)),
       growth: clamp(num(a.growth, 0), -100, 100) / 100,
       contribByYear: Array.isArray(a.contribByYear) ? a.contribByYear.map(v => Math.max(0, num(v, 0))) : null,
@@ -497,6 +542,11 @@ function buildContext(rawPlan) {
     age0: o === 'self' ? ageSelf0 : agePart0,
     retireAge: o === 'self' ? retireSelf : retirePart,
     salary: Math.max(0, num(o === 'self' ? d.salarySelf : d.salaryPart, 0)),
+    cgtGainsUsed: Math.max(0, num(o === 'self' ? d.cgtGainsUsedSelf : d.cgtGainsUsedPart, 0)),
+    // unused annual allowance from the three tax years before the projection starts
+    cfBroughtForward: Math.max(0, num(o === 'self' ? d.cfBroughtForwardSelf : d.cfBroughtForwardPart, 0)),
+    // age from which the MPAA applies; NaN when the owner has not flexibly accessed a pension
+    mpaaAge: num(o === 'self' ? d.mpaaAgeSelf : d.mpaaAgePart, NaN),
     statePension: Math.max(0, num(o === 'self' ? d.statePensionSelf : d.statePensionPart, 0)),
     ids: { pen: accountId('pen', o), isa: accountId('isa', o), other: accountId('other', o), cash: accountId('cash', o) }
   }));
@@ -505,6 +555,15 @@ function buildContext(rawPlan) {
     if (pen && pen.contrib > P.pensionAllowance) warnings.push(`${o.label}: pension contribution £${Math.round(pen.contrib).toLocaleString()} exceeds the annual allowance £${P.pensionAllowance.toLocaleString()}.`);
     if (isa && isa.contrib > P.isaAllowance) warnings.push(`${o.label}: ISA contribution £${Math.round(isa.contrib).toLocaleString()} exceeds the ISA allowance £${P.isaAllowance.toLocaleString()}.`);
     if (o.salary > 0 && pen && pen.contrib > o.salary) warnings.push(`${o.label}: pension contribution exceeds salary.`);
+    const gia = acc[o.ids.other];
+    if (P.cgtEnabled && gia && gia.balance > 0 && isBlank(plan.accounts.find(a => a.id === o.ids.other)?.unrealisedGain)) {
+      warnings.push(`${o.label}: no unrealised gain entered for Other Investments, so the £${Math.round(gia.balance).toLocaleString()} balance is treated as all cost and only future growth is taxed. Set it under Advanced inputs if the holding has an embedded gain.`);
+    }
+    // the plan draws taxable pension income while still paying in, so the MPAA bites and the excess
+    // would face an annual allowance charge (which the model does not itself levy)
+    if (Number.isFinite(o.mpaaAge) && pen && pen.contrib > P.mpaaLimit && o.mpaaAge < o.retireAge) {
+      warnings.push(`${o.label}: the plan draws taxable pension income from age ${o.mpaaAge} while still contributing £${Math.round(pen.contrib).toLocaleString()}/yr, which permanently cuts the annual allowance to £${P.mpaaLimit.toLocaleString()} (the money purchase annual allowance). Contributions above that would face an annual allowance charge.`);
+    }
     if (o.retireAge < o.age0 && o.age0 < 120) { /* already retired: fine */ }
   });
   if (isCouple) {
@@ -518,20 +577,97 @@ function buildContext(rawPlan) {
     startAge: Math.max(0, num(i.startAge, 0)),
     endAge: isBlank(i.endAge) ? terminalAge : num(i.endAge, terminalAge),
     amount: Math.max(0, num(i.amount, 0)),
-    taxFree: i.taxTreatment === 'Tax-free'
+    taxFree: !incomeTypeOf(i.incomeType).taxable,
+    isEarnings: incomeTypeOf(i.incomeType).relevantEarnings
   }));
   const yearOf = (x) => x.date ? parseInt(String(x.date).slice(0, 4)) : num(x.year, NaN);
   const oneOffContribs = new Map();
-  plan.oneOffContributions.forEach(x => {
-    if (!isCouple && x.owner === 'Partner') return;
-    const y = yearOf(x); if (!Number.isFinite(y)) return;
-    const cat = Object.keys(CATEGORY_LABEL).find(k => CATEGORY_LABEL[k] === x.category) || 'pen';
-    const id = accountId(cat, x.owner === 'Partner' ? 'part' : 'self');
-    const amt = Math.max(0, num(x.amount, 0));
-    if (amt <= 0) return;
-    if (!oneOffContribs.has(y)) oneOffContribs.set(y, []);
-    oneOffContribs.get(y).push({ id, amount: amt });
-  });
+  const oneOffDeductions = new Map();
+  const stagedTransfers = new Map();
+  const oneOffStaging = new Map();
+  {
+    // Shared per-owner/wrapper/year claim ledger: every deposit and staged drip tranche competes for the
+    // same headroom, so two deposits for the same owner/wrapper can never double-claim one year's allowance.
+    const claimed = new Map(); // `${ownerKey}|${cat}|${t}` -> £ already claimed this pass
+    const headroomCtx = { P, owners, acc, otherIncomes };
+    const claim = (ownerKey, cat, t, want) => {
+      const key = `${ownerKey}|${cat}|${t}`;
+      const already = claimed.get(key) || 0;
+      const avail = Math.max(0, wrapperHeadroomAtYear(headroomCtx, ownerKey, cat, t) - already);
+      const take = Math.min(want, avail);
+      claimed.set(key, already + take);
+      return take;
+    };
+
+    const ordered = plan.oneOffContributions
+      .filter(x => isCouple || x.owner !== 'Partner')
+      .map((x, i) => ({ x, i, y: yearOf(x) }))
+      .filter(e => Number.isFinite(e.y))
+      .sort((a, b) => (a.y - b.y) || (a.i - b.i));
+
+    ordered.forEach(({ x, y }) => {
+      const t = y - baseYear;
+      const ownerKey = x.owner === 'Partner' ? 'part' : 'self';
+      const targetCat = Object.keys(CATEGORY_LABEL).find(k => CATEGORY_LABEL[k] === x.category) || 'pen';
+      const targetId = accountId(targetCat, ownerKey);
+      const otherId = accountId('other', ownerKey);
+      const amt = Math.max(0, num(x.amount, 0));
+      if (amt <= 0) return;
+
+      // source deduction (independent of staging outcome; deducts the full deposit amount D)
+      if (x.transferredFrom && x.transferredFrom !== 'External') {
+        const srcCat = Object.keys(CATEGORY_LABEL).find(k => CATEGORY_LABEL[k] === x.transferredFrom);
+        if (srcCat) {
+          const sourceId = accountId(srcCat, ownerKey);
+          if (!oneOffDeductions.has(y)) oneOffDeductions.set(y, []);
+          oneOffDeductions.get(y).push({ id: sourceId, amount: amt });
+          if (t === 0) {
+            const startBal = acc[sourceId] ? acc[sourceId].balance : 0;
+            if (amt > startBal) warnings.push(
+              `${OWNER_LABEL[ownerKey]}: one-off deposit of £${Math.round(amt).toLocaleString()} exceeds available ${CATEGORY_LABEL[srcCat]} balance (£${Math.round(startBal).toLocaleString()}); the deduction will be capped to the available balance.`
+            );
+          }
+        }
+      }
+
+      // headroom resolution: direct deposit if within headroom, otherwise stage the surplus (Option A)
+      // yearHeadroom is this year's raw allowance (before other deposits' claims), shown on the row
+      const yearHeadroom = wrapperHeadroomAtYear(headroomCtx, ownerKey, targetCat, t);
+      const H0 = claim(ownerKey, targetCat, t, amt);
+      if (!oneOffContribs.has(y)) oneOffContribs.set(y, []);
+      if (amt <= H0 + 1e-6) {
+        oneOffContribs.get(y).push({ id: targetId, amount: amt });
+        oneOffStaging.set(x.id, { direct: true, targetId, otherId, stagedId: targetId, amount: amt, H0: amt, yearHeadroom, surplus0: 0, tranches: [], unresolvedRemainder: 0 });
+        return;
+      }
+
+      const surplus0 = amt - H0;
+      if (H0 > 0) oneOffContribs.get(y).push({ id: targetId, amount: H0 });
+      oneOffContribs.get(y).push({ id: otherId, amount: surplus0 });
+
+      const stagedCat = Object.keys(CATEGORY_LABEL).find(k => CATEGORY_LABEL[k] === x.stagedTargetWrapper) || targetCat;
+      const stagedId = accountId(stagedCat, ownerKey);
+      const tranches = [];
+      let remaining = surplus0;
+      if (stagedCat !== 'other') {
+        for (let dt = t + 1; dt <= totalYears && remaining > 0.005; dt++) {
+          const tranche = claim(ownerKey, stagedCat, dt, remaining);
+          if (tranche <= 0) continue;
+          const dy = baseYear + dt;
+          if (!stagedTransfers.has(dy)) stagedTransfers.set(dy, []);
+          stagedTransfers.get(dy).push({ fromId: otherId, toId: stagedId, amount: tranche });
+          tranches.push({ year: dy, amount: tranche });
+          remaining -= tranche;
+        }
+      } else {
+        remaining = 0;
+      }
+      if (remaining > 0.005) warnings.push(
+        `${OWNER_LABEL[ownerKey]}: £${Math.round(remaining).toLocaleString()} of the ${y} one-off deposit could not be fully staged into ${CATEGORY_LABEL[stagedCat]} within the plan horizon and will remain in Other Investments.`
+      );
+      oneOffStaging.set(x.id, { direct: false, targetId, otherId, stagedId, amount: amt, H0, yearHeadroom, surplus0, tranches, unresolvedRemainder: Math.max(0, remaining) });
+    });
+  }
   const oneOffCosts = new Map();
   plan.oneOffCosts.forEach(x => {
     const y = yearOf(x); if (!Number.isFinite(y)) return;
@@ -552,7 +688,7 @@ function buildContext(rawPlan) {
     solvencyFloor: Math.max(0, num(c.solvencyFloor, 0)),
     inflation: clamp(num(c.inflation, 2.5), -50, 100) / 100,
     yf, baseYear, valuationDate,
-    otherIncomes, oneOffContribs, oneOffCosts
+    otherIncomes, oneOffContribs, oneOffCosts, oneOffDeductions, stagedTransfers, oneOffStaging
   };
   return ctx;
 }
@@ -568,7 +704,23 @@ function spendTargetAtAge(ctx, ageSelf) {
 const freshState = (ctx) => {
   const pots = {};
   ctx.accounts.forEach(a => { pots[a.id] = a.balance; });
-  return { pots, cumPcls: { self: 0, part: 0 }, lumpSumTaken: { self: false, part: false } };
+  // GIA cost basis is path-dependent (it falls as units are sold), so it lives in per-trial state
+  const giaBasis = { self: 0, part: 0 };
+  ctx.accounts.forEach(a => { if (a.cat === 'other') giaBasis[a.owner] = Math.max(0, a.balance - a.unrealisedGain); });
+  // gains realised while settling a CGT bill are taxed the following year, so they carry forward
+  return { pots, giaBasis, cgtCarry: { self: 0, part: 0 }, cumPcls: { self: 0, part: 0 }, lumpSumTaken: { self: false, part: false } };
+};
+
+// Money paid into the GIA is added at cost, so it creates no gain.
+const giaAddBasis = (state, ownerKey, amount) => { if (amount > 0) state.giaBasis[ownerKey] += amount; };
+
+// A disposal realises gain pro-rata against the whole holding and reduces basis by the cost portion.
+const giaDispose = (state, balanceBefore, ownerKey, amount) => {
+  if (amount <= 0 || balanceBefore <= 0) return 0;
+  const basis = state.giaBasis[ownerKey] || 0;
+  const gain = amount * (Math.max(0, balanceBefore - basis) / balanceBefore);
+  state.giaBasis[ownerKey] = Math.max(0, basis - (amount - gain));
+  return gain;
 };
 
 /*
@@ -592,18 +744,65 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
   const anyAccess = owners.some(o => access[o.key]);
   const anyRetired = owners.some(o => !working[o.key]);
 
-  // 1. one-off deposits (dated: not pro-rated)
+  // Gains realised during this tax year, per owner (GIA disposals only), opening with anything
+  // carried over from settling last year's bill. Charged at year end.
+  const realisedGains = { self: state.cgtCarry.self, part: state.cgtCarry.part };
+  state.cgtCarry = { self: 0, part: 0 };
+  const cgtOn = P.cgtEnabled;
+  const ownerOfId = (id) => (String(id).endsWith('_part') ? 'part' : 'self');
+  // Sell `amount` from an owner's GIA, booking the pro-rata gain. Returns what was actually sold.
+  const sellGia = (id, amount) => {
+    const before = pots[id] || 0;
+    const sold = Math.min(before, Math.max(0, amount));
+    if (sold <= 0) return 0;
+    pots[id] = before - sold;
+    if (cgtOn) realisedGains[ownerOfId(id)] += giaDispose(state, before, ownerOfId(id), sold);
+    return sold;
+  };
+
+  // 0. one-off deposit source-pot deductions (full D, this year only; internal-source deposits)
+  let oneOffDeductionShortfall = 0;
+  const deductions = ctx.oneOffDeductions.get(year);
+  if (deductions) deductions.forEach(x => {
+    if (pots[x.id] === undefined) return;
+    let take;
+    if (x.id.startsWith('other_')) {
+      take = sellGia(x.id, x.amount); // funding a deposit out of the GIA is a disposal
+    } else {
+      take = Math.min(pots[x.id], x.amount);
+      pots[x.id] -= take;
+    }
+    oneOffDeductionShortfall += Math.max(0, x.amount - take);
+  });
+
+  // 1. one-off deposits (dated: not pro-rated) — includes staged deposits' year-0 immediate tranche + parked surplus
   const deposits = ctx.oneOffContribs.get(year);
-  if (deposits) deposits.forEach(x => { if (pots[x.id] !== undefined) pots[x.id] += x.amount; });
+  if (deposits) deposits.forEach(x => {
+    if (pots[x.id] === undefined) return;
+    pots[x.id] += x.amount;
+    if (cgtOn && x.id.startsWith('other_')) giaAddBasis(state, ownerOfId(x.id), x.amount);
+  });
+
+  // 1.5 staged multi-year drip transfers (t>=1): drain GIA into the (possibly redirected) staged target,
+  // capped at whatever remains in GIA — this naturally handles a market-crash-depleted GIA.
+  // Moving out of the GIA is a real disposal (Bed & ISA), so it realises gain pro-rata.
+  const drips = ctx.stagedTransfers.get(year);
+  if (drips) drips.forEach(x => {
+    const move = sellGia(x.fromId, x.amount);
+    if (move <= 0) return;
+    pots[x.toId] = (pots[x.toId] || 0) + move;
+    if (cgtOn && x.toId.startsWith('other_')) giaAddBasis(state, ownerOfId(x.toId), move);
+  });
 
   // 2. regular contributions while the owner works (year 0 pro-rated)
   const contribThisYear = { self: 0, part: 0 };
   const isaContribThisYear = { self: 0, part: 0 };
   ctx.accounts.forEach(a => {
     if (!working[a.owner]) return;
-    const amt = a.contribByYear ? (a.contribByYear[t] || 0) : a.contrib * Math.pow(1 + a.growth, t);
+    const amt = contribAtYear(a, t);
     if (amt > 0) {
       pots[a.id] += amt * frac;
+      if (cgtOn && a.cat === 'other') giaAddBasis(state, a.owner, amt * frac);
       contribThisYear[a.owner] += amt * frac;
       if (a.cat === 'isa') isaContribThisYear[a.owner] += amt * frac;
     }
@@ -643,7 +842,7 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
     owners.forEach(o => {
       if (!working[o.key] || o.salary <= 0) return;
       const pen = acc[o.ids.pen];
-      const penContrib = pen ? (pen.contribByYear ? (pen.contribByYear[t] || 0) : pen.contrib * Math.pow(1 + pen.growth, t)) : 0;
+      const penContrib = pen ? contribAtYear(pen, t) : 0;
       const sacrifice = Math.min(o.salary, penContrib / (1 + P.erNic * P.erPass));
       const takeHome = o.salary - sacrifice - calculateUKTaxAndNIC(o.salary - sacrifice, P);
       const nonPensionContribs = (contribThisYear[o.key] / frac) - penContrib;
@@ -652,6 +851,8 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
   }
 
   let drawdownPensions = 0;
+  // taxable pension income per owner — the MPAA trigger is personal, so it cannot use the combined figure
+  const taxablePensionDrawn = { self: 0, part: 0 };
   let harvested = 0;
   const pclsHeadroom = (o) => Math.max(0, P.lsa - state.cumPcls[o]);
   const ownerByKey = {}; owners.forEach(o => { ownerByKey[o.key] = o; });
@@ -673,6 +874,7 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
     const taxFree = fully ? 0 : Math.min(gross * P.pclsProp, headroom);
     state.cumPcls[oKey] += taxFree;
     const taxablePart = gross - taxFree;
+    taxablePensionDrawn[oKey] += taxablePart;
     const before = calculateUKNetIncome(taxable[oKey], P);
     taxable[oKey] += taxablePart;
     const after = calculateUKNetIncome(taxable[oKey], P);
@@ -680,6 +882,8 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
   };
   const drawPot = (id, need) => {
     if (need <= 0) return 0;
+    // GIA draws are disposals, so they book a gain and reduce the cost basis
+    if (id.startsWith('other_')) return sellGia(id, need);
     const pull = Math.min(pots[id] || 0, need);
     if (pull <= 0) return 0;
     pots[id] -= pull;
@@ -764,7 +968,37 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
     });
   }
 
-  const unmetDemand = owners.reduce((s, o) => s + Math.max(0, demand[o.key]), 0) + unmetCost;
+  // 7c. capital gains tax on the year's GIA disposals. Gains stack on top of income for the band split.
+  // The bill is settled from cash -> GIA -> ISA -> accessible pension, mirroring one-off costs. A sale made
+  // to pay the bill books its own gain, which falls into next year's tally (CGT is due the following January).
+  let cgtPaid = 0;
+  let unmetCgt = 0;
+  if (cgtOn) {
+    owners.forEach(o => {
+      const exempt = Math.max(0, P.cgtAnnualExempt - (t === 0 ? o.cgtGainsUsed : 0));
+      const taxableGain = Math.max(0, realisedGains[o.key] - exempt);
+      if (taxableGain <= 0) return;
+      // Unused personal allowance cannot be set against capital gains, so the band available to gains is
+      // the basic-rate width less TAXABLE income (income after PA) — never the full gross-income headroom.
+      const taxableIncome = Math.max(0, taxable[o.key] - P.paAt(taxable[o.key]));
+      const basicRoom = Math.max(0, P.basicWidth - taxableIncome);
+      const atBasic = Math.min(taxableGain, basicRoom);
+      const bill = atBasic * P.cgtBasicRate + (taxableGain - atBasic) * P.cgtHigherRate;
+      if (bill <= 0) return;
+      cgtPaid += bill;
+      const gainsBeforeSettling = realisedGains[o.key];
+      let rem = bill;
+      for (const cat of ['cash', 'other', 'isa']) { if (rem > 0) rem -= drawPot(o.ids[cat], rem); }
+      for (const x of owners) { if (rem > 0) rem -= drawPot(x.ids.cash, rem); }
+      if (rem > 0) rem -= drawPension(o.key, rem);
+      unmetCgt += Math.max(0, rem);
+      // selling to pay the bill realises further gain — defer it to next year rather than recursing
+      state.cgtCarry[o.key] += realisedGains[o.key] - gainsBeforeSettling;
+      realisedGains[o.key] = gainsBeforeSettling;
+    });
+  }
+
+  const unmetDemand = owners.reduce((s, o) => s + Math.max(0, demand[o.key]), 0) + unmetCost + oneOffDeductionShortfall + unmetCgt;
   const lockedPensionWealth = owners.reduce((s, o) => s + (access[o.key] ? 0 : (pots[o.ids.pen] || 0)), 0);
   const preNmpaInsolvent = unmetDemand > 1 && (!anyAccess || lockedPensionWealth > 0);
 
@@ -801,7 +1035,8 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
     pots: { ...pots },
     pensions: byCat.pen, isas: byCat.isa, other: byCat.other, cash: byCat.cash,
     preNmpaLiquid: byCat.isa + byCat.other + byCat.cash,
-    drawdownPensions, harvested, taxPaid,
+    drawdownPensions, taxablePensionSelf: taxablePensionDrawn.self, taxablePensionPart: taxablePensionDrawn.part, harvested, taxPaid, cgtPaid,
+    realisedGains: realisedGains.self + realisedGains.part,
     preNmpaInsolvent, unmetDemand
   };
 }
@@ -813,6 +1048,25 @@ function simulateDeterministic(planOrCtx, regime = 'expected') {
   const rows = [];
   for (let t = 0; t <= ctx.totalYears; t++) rows.push(stepYear(ctx, state, t, regime));
   return rows;
+}
+
+/*
+ * The MPAA trigger is a consequence of the plan rather than an input: it starts the first year an owner
+ * takes taxable pension income (tax-free cash alone does not count). Resolved once on the expected path
+ * and written back into the plan, so headroom, staging, Monte Carlo and the backtest all agree.
+ * Single pass by design — staged pension deposits are sized by headroom, so iterating could oscillate,
+ * and the trigger year is driven by retirement age and spending rather than by deposit staging.
+ */
+function resolveMpaa(plan) {
+  const ctx0 = buildContext(plan);
+  if (!ctx0.P.mpaaLimit) return plan;
+  const rows = simulateDeterministic(ctx0, 'expected');
+  const demographics = { ...ctx0.plan.demographics };
+  ctx0.owners.forEach(o => {
+    const hit = rows.find(r => (o.key === 'self' ? r.taxablePensionSelf : r.taxablePensionPart) > 0);
+    demographics[o.key === 'self' ? 'mpaaAgeSelf' : 'mpaaAgePart'] = hit ? (o.key === 'self' ? hit.ageSelf : hit.agePart) : '';
+  });
+  return { ...ctx0.plan, demographics };
 }
 
 function simulateHistorical(planOrCtx, startYear) {
@@ -840,7 +1094,7 @@ function evaluateRows(ctx, rows) {
     terminalPension: Math.max(0, terminal.pensions),
     terminalPotNet: Math.max(0, terminal.totalCombined - terminal.pensions * ctx.pensionDeathTaxRate),
     minPot: Math.min(...rows.map(r => r.totalCombined)),
-    lifetimeTax: rows.reduce((s, r) => s + r.taxPaid, 0)
+    lifetimeTax: rows.reduce((s, r) => s + r.taxPaid + (r.cgtPaid || 0), 0)
   };
 }
 
@@ -851,7 +1105,7 @@ function runTrial(ctx, zs, spendOverride = null) {
   let terminalRow = null;
   for (let t = 0; t <= ctx.totalYears; t++) {
     const row = stepYear(ctx, state, t, { z: zs[t] }, spendOverride);
-    lifetimeTax += row.taxPaid;
+    lifetimeTax += row.taxPaid + (row.cgtPaid || 0);
     if (row.totalCombined < minPot) minPot = row.totalCombined;
     if (!failed && (row.unmetDemand > FAIL_TOLERANCE || row.preNmpaInsolvent)) {
       failed = true; failAge = row.ageSelf; preNmpaFailed = row.preNmpaInsolvent || !ctx.owners.some(o => (o.key === 'self' ? row.ageSelf : row.agePart) >= ctx.nmpa);
@@ -910,7 +1164,7 @@ function optimizeSpend(planOrCtx, { targetRate = 90, seed = 12345, searchTrials 
   const paths = pathsForSeed(seed, searchTrials, ctx.totalYears);
   const rateAt = (spend) => { let s = 0; for (const zs of paths) if (runTrial(ctx, zs, spend).survived) s++; return (s / searchTrials) * 100; };
   let low = 0;
-  if (rateAt(0) < targetRate) return { spend: 0, ...monteCarlo(ctx, { trials: finalTrials, seed: seed + 1, spendOverride: 0 }), note: 'Even zero spending fails the target (pre-access gap or one-off costs).' };
+  if (rateAt(0) < targetRate) return { spend: 0, ...monteCarlo(ctx, { trials: finalTrials, seed: seed + 1, spendOverride: 0 }), note: 'Even zero spending fails the target (pre-SIPP access gap or one-off costs).' };
   let high = Math.max(20000, ctx.targetSpend * 2, 150000);
   let guard = 0;
   while (rateAt(high) >= targetRate && guard++ < 8) { low = high; high *= 2; }
@@ -944,6 +1198,66 @@ function bridgeRequirement(ctx) {
   return { gapYears: years, netNeeded: needed };
 }
 
+// Regular-contribution amount for account `a` in projection-year index t (post-escalation, or a phased schedule).
+function contribAtYear(a, t) {
+  return a.contribByYear ? (a.contribByYear[t] || 0) : a.contrib * Math.pow(1 + a.growth, t);
+}
+
+// Relevant UK earnings for pension purposes in projection-year t: salary while still working, plus any
+// earnings-type income streams active at that age. Pension income, annuities and rent do not count.
+function relevantEarningsAtYear(ctx, o, t) {
+  const age = o.age0 + t;
+  const salary = age < o.retireAge ? o.salary : 0;
+  return (ctx.otherIncomes || []).reduce((s, i) =>
+    (i.owner === o.key && i.isEarnings && age >= i.startAge && age <= i.endAge) ? s + i.amount : s, salary);
+}
+
+// Money Purchase Annual Allowance. Flexibly accessing a pension (drawing taxable income, as opposed to
+// taking only tax-free cash or buying an annuity) permanently cuts the DC allowance, with no carry-forward.
+// The trigger is a real-world event, so the age is declared per owner rather than inferred.
+function mpaaAppliesAtYear(P, o, t) {
+  return P.mpaaLimit > 0 && Number.isFinite(o.mpaaAge) && (o.age0 + t) >= o.mpaaAge;
+}
+
+// Unused annual allowance carried forward from the previous three tax years. Years inside the projection
+// are computed from the contribution schedule; years before it come from the declared opening figure,
+// which decays out of the three-year window as the projection advances. Not consumed when used — see docs.
+function carryForwardAtYear(ctx, o, t) {
+  const { P, acc } = ctx;
+  const a = acc[o.ids.pen];
+  let total = 0;
+  for (let k = 1; k <= 3; k++) {
+    const j = t - k;
+    if (j < 0) { total += o.cfBroughtForward / 3; continue; }
+    const contributed = ((o.age0 + j) < o.retireAge && a) ? contribAtYear(a, j) : 0;
+    total += Math.max(0, P.pensionAllowance - contributed);
+  }
+  return total;
+}
+
+// Remaining annual ISA/pension headroom for `ownerKey` in year index t, net of that owner's own regular
+// (escalating) contribution to the same wrapper. Other Investments / Cash Savings have no HMRC cap.
+function wrapperHeadroomAtYear(ctx, ownerKey, category, t) {
+  const { P, acc, owners } = ctx;
+  if (category === 'other' || category === 'cash') return Infinity;
+  const o = owners.find(x => x.key === ownerKey);
+  if (!o) return 0;
+  const a = acc[o.ids[category]];
+  // regular contributions stop at retirement (mirrors stepYear), so they only consume headroom while working
+  const retired = (o.age0 + t) >= o.retireAge;
+  const regContrib = (a && !retired) ? contribAtYear(a, t) : 0;
+  if (category === 'isa') return Math.max(0, P.isaAllowance - regContrib);
+  const earnings = relevantEarningsAtYear(ctx, o, t);
+  // carry forward is unavailable against the MPAA, and never lifts the relevant-earnings limit
+  const mpaa = mpaaAppliesAtYear(P, o, t);
+  const allowance = mpaa ? P.mpaaLimit : P.pensionAllowance + carryForwardAtYear(ctx, o, t);
+  // a blank salary while still working means "earnings unknown" — leave the allowance unconstrained
+  const cap = (!retired && o.salary <= 0 && earnings <= 0)
+    ? allowance
+    : Math.min(allowance, Math.max(P.pensionNoEarningsLimit, earnings));
+  return Math.max(0, cap - regContrib);
+}
+
 /*
  * Allocate a net take-home budget between ISA (net) and pension (grossed up per owner, capped by the annual
  * allowance and by salary where known). Overflow beyond caps cascades ISA -> pension -> GIA so that the
@@ -974,7 +1288,10 @@ function allocateBudget(ctx, netBudget, isaShare, { isaMin = 0, balance = 'propo
   const penGross = owners.map(() => 0);
   const penNetUsed = owners.map(() => 0);
   const passFactor = 1 + P.erNic * P.erPass;
-  const capOf = (o) => Math.min(P.pensionAllowance, o.salary > 0 ? o.salary * passFactor : P.pensionAllowance);
+  const capOf = (o) => Math.min(
+    mpaaAppliesAtYear(P, o, 0) ? P.mpaaLimit : P.pensionAllowance,
+    o.salary > 0 ? o.salary * passFactor : P.pensionAllowance
+  );
   let penNetRemaining = penNet;
   const order = owners.map((o, i) => i).sort((a, b) => penW[b] - penW[a]);
   // price every top-up at the owner's marginal rate given what is already going into that pension
@@ -1036,6 +1353,37 @@ function applyAllocationToPlan(plan, ctx, alloc, { contribByYear = null, transfe
     });
   }
   return cloned;
+}
+
+/*
+ * Reports what a tournament strategy actually changes versus the baseline plan, by diffing the two
+ * plan states account by account. Figures keep their native units — pension contributions are gross,
+ * ISA and GIA contributions net — so a shift of take-home from ISA to pension shows a larger rise
+ * than fall, the difference being tax and NIC relief.
+ */
+function diffStrategyPlans(basePlan, strategyPlan, { threshold = 50 } = {}) {
+  const byId = (p) => { const m = {}; (p?.accounts || []).forEach(a => { m[a.id] = a; }); return m; };
+  const base = byId(basePlan), next = byId(strategyPlan);
+  const contribDeltas = [], balanceDeltas = [], byCat = {};
+  Object.keys(next).forEach(id => {
+    const b = base[id], n = next[id];
+    if (!b || !n) return;
+    const [cat, ownerKey] = id.split('_');
+    const from = num(b.contrib, 0), to = num(n.contrib, 0);
+    const balFrom = num(b.balance, 0), balTo = num(n.balance, 0);
+    const cd = to - from, bd = balTo - balFrom;
+    byCat[cat] = byCat[cat] || { contrib: 0, balance: 0, owners: [] };
+    if (Math.abs(cd) >= threshold) {
+      contribDeltas.push({ id, cat, ownerKey, from, to, delta: cd });
+      byCat[cat].contrib += cd;
+      byCat[cat].owners.push(ownerKey);
+    }
+    if (Math.abs(bd) >= threshold) {
+      balanceDeltas.push({ id, cat, ownerKey, from: balFrom, to: balTo, delta: bd });
+      byCat[cat].balance += bd;
+    }
+  });
+  return { contribDeltas, balanceDeltas, byCat, hasChange: contribDeltas.length > 0 || balanceDeltas.length > 0 };
 }
 
 // Evaluate the Survival Maximizer's candidate grid and return the winner as a fully-formed strategy.
@@ -1139,7 +1487,7 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
       }
     }
     strategies.push(mk('relief', 'Relief-First' + (transfer ? ' + Bed & SIPP' : ''),
-      'Routes the budget to pension first (subject to the pre-access bridge minimum) to capture maximum upfront tax and NIC relief' + (transfer ? '; also moves spare ISA capital into the pension.' : '.'),
+      'Routes the budget to pension first (subject to the pre-SIPP access bridge minimum) to capture maximum upfront tax and NIC relief' + (transfer ? '; also moves spare ISA capital into the pension.' : '.'),
       alloc, { transferNet: transfer ? Math.round(transfer.net) : 0, transferGross: transfer ? Math.round(transfer.gross) : 0, taxReliefSaved: alloc.taxReliefSaved + reliefExtra, planOpts: { transfer } }));
   }
   // 5 bracket-smoothed pension sizing
@@ -1188,13 +1536,45 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
     };
     strategies.push(mk('phased', 'Relief-First, Bridge-Last',
       switchYears > 0
-        ? `Pension-max for ${yearsToFirstRetire - switchYears} years so the tax uplift compounds longest, then ISA-max for the final ${switchYears} years to build the pre-access bridge.`
+        ? `Pension-max for ${yearsToFirstRetire - switchYears} years so the tax uplift compounds longest, then ISA-max for the final ${switchYears} years to build the pre-SIPP access bridge.`
         : bridge.gapYears > 0
           ? 'Existing liquid assets already cover the bridge reserve, so this collapses to Relief-First (shown for completeness).'
-          : 'No pre-access gap, so this collapses to Relief-First (shown for completeness).',
+          : 'No pre-SIPP access gap, so this collapses to Relief-First (shown for completeness).',
       blended, { phase: { switchYears, yearsToFirstRetire, early: reliefAlloc, late: isaAlloc }, planOpts: { contribByYear } }));
   }
   return { ctx, meta, strategies };
+}
+
+/*
+ * Every meaningful combination of the three decumulation methodology settings, each as a ready-to-run
+ * plan. The harvest flag only bites on policies that declare `harvest`, so policies that ignore it
+ * (Sequential) emit a single variant instead of a duplicate pair that would waste a simulation and
+ * show up as a phantom tie.
+ */
+function buildPolicyCandidates(rawPlan) {
+  const plan = normalizePlan(rawPlan);
+  const out = [];
+  Object.entries(DECUMULATION_POLICIES).forEach(([policyKey, policy]) => {
+    ['Phased Drawdown', 'Full 25% Lump Sum'].forEach(drawdownStrategy => {
+      // harvest-off first so that an exact tie leaves the simpler setting alone rather than
+      // switching on a behaviour that showed no measured benefit
+      (policy.harvest ? [false, true] : [false]).forEach(harvest => {
+        out.push({
+          id: `${policyKey}|${drawdownStrategy}|${harvest ? 'h1' : 'h0'}`,
+          decumulationPolicy: policyKey,
+          drawdownStrategy,
+          harvestPersonalAllowance: harvest,
+          harvestApplies: !!policy.harvest,
+          planState: {
+            ...plan,
+            spending: { ...plan.spending, decumulationPolicy: policyKey, drawdownStrategy },
+            config: { ...plan.config, harvestPersonalAllowance: harvest }
+          }
+        });
+      });
+    });
+  });
+  return out;
 }
 
 // Pick the best candidate: respect the pre-access risk cap where possible, then highest success (within noise),
@@ -1211,27 +1591,57 @@ function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
 }
 
 // Namespace used by the UI (mirrors the modular engine.js exports)
-const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, employeeNIC, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, allocateBudget, applyAllocationToPlan, resolveSurvivalMaximizer, buildTournament, pickBest };
-export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament };
+const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, employeeNIC, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, diffStrategyPlans, resolveSurvivalMaximizer, buildTournament, buildPolicyCandidates, pickBest };
+export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans, buildPolicyCandidates, pickBest };
 
 
 const STORAGE_KEY = 'rp_plan_full_v28';          // unchanged: old saved plans are migrated by normalizePlan
 const SCENARIOS_STORAGE_KEY = 'rp_saved_scenarios_v3';
+const THEME_STORAGE_KEY = 'rp_theme_v1';
 const APP_VERSION = 'v3.4';
 const MC_TRIALS = 5000;
 const TOURNAMENT_TRIALS = 1500;
 const SEARCH_TRIALS = 400;
 
+// Three themes: 'classic' (the original stock look, kept as an opt-in third option),
+// 'light' (Riviera Ledger) and 'dark' (Control Room).
 const SERIES_CONFIG = [
-  { id: 'lucky', label: 'Lucky (90th %ile)', color: '#059669', strokeWidth: 2.5, dash: 'none', defaultActive: true },
-  { id: 'expected', label: 'Expected (Real)', color: '#2563eb', strokeWidth: 3, dash: 'none', defaultActive: true },
-  { id: 'unlucky', label: 'Unlucky (10th %ile)', color: '#dc2626', strokeWidth: 2.5, dash: '5,4', defaultActive: true },
-  { id: 'nominal', label: 'Combined (Nominal)', color: '#7c3aed', strokeWidth: 2, dash: '4,3', defaultActive: false },
-  { id: 'pensions', label: 'Combined Pensions', color: '#0284c7', strokeWidth: 2, dash: 'none', defaultActive: true },
-  { id: 'isas', label: 'Combined ISAs', color: '#0d9488', strokeWidth: 2, dash: 'none', defaultActive: true },
-  { id: 'other', label: 'Combined Other', color: '#d97706', strokeWidth: 1.5, dash: 'none', defaultActive: false },
-  { id: 'cash', label: 'Combined Cash', color: '#475569', strokeWidth: 1.5, dash: '3,3', defaultActive: false }
+  { id: 'lucky', label: 'Lucky (90th %ile)', colors: { classic: '#059669', light: '#2F7A4F', dark: '#3FD68C' }, strokeWidth: 2.5, dash: 'none', defaultActive: true },
+  { id: 'expected', label: 'Expected (Real)', colors: { classic: '#2563eb', light: '#2C5C8F', dark: '#3D74E8' }, strokeWidth: 3, dash: 'none', defaultActive: true },
+  { id: 'unlucky', label: 'Unlucky (10th %ile)', colors: { classic: '#dc2626', light: '#B33B3B', dark: '#FF6B6B' }, strokeWidth: 2.5, dash: '5,4', defaultActive: true },
+  { id: 'nominal', label: 'Combined (Nominal)', colors: { classic: '#7c3aed', light: '#6D28D9', dark: '#8B7CF6' }, strokeWidth: 2, dash: '4,3', defaultActive: false },
+  { id: 'pensions', label: 'Combined Pensions', colors: { classic: '#0284c7', light: '#0284C7', dark: '#4FC3F0' }, strokeWidth: 2, dash: 'none', defaultActive: true },
+  { id: 'isas', label: 'Combined ISAs', colors: { classic: '#0d9488', light: '#0D9488', dark: '#3FDBC7' }, strokeWidth: 2, dash: 'none', defaultActive: true },
+  { id: 'other', label: 'Combined Other', colors: { classic: '#d97706', light: '#B0631E', dark: '#E89A4A' }, strokeWidth: 1.5, dash: 'none', defaultActive: false },
+  { id: 'cash', label: 'Combined Cash', colors: { classic: '#475569', light: '#5C6B72', dark: '#8A939B' }, strokeWidth: 1.5, dash: '3,3', defaultActive: false }
 ];
+
+const CHART_PALETTE = {
+  classic: { gridMajor: '#f1f5f9', gridMinor: '#f8fafc', axisText: '#64748b', hoverCrosshair: '#94a3b8', sandboxDash: '#f59e0b', historicalLine: '#6366f1', trajectoryHoverFill: '#2563eb', historicalHoverFill: '#6366f1', hoverDotStroke: '#ffffff' },
+  light:   { gridMajor: '#DCDFD2', gridMinor: '#E6E8DE', axisText: '#5C6B72', hoverCrosshair: '#8A9098', sandboxDash: '#B0631E', historicalLine: '#A9781F', trajectoryHoverFill: '#2C5C8F', historicalHoverFill: '#A9781F', hoverDotStroke: '#FBFAF4' },
+  dark:    { gridMajor: '#1e232b', gridMinor: '#171b21', axisText: '#8a939b', hoverCrosshair: '#5b636c', sandboxDash: '#e89a4a', historicalLine: '#8b7cf6', trajectoryHoverFill: '#3D74E8', historicalHoverFill: '#8b7cf6', hoverDotStroke: '#14171B' },
+};
+
+const MARKER_PALETTE = {
+  classic: {
+    retireSelf: { line: '#f59e0b', fill: '#fef3c7', stroke: '#fde68a', text: '#b45309' },
+    retirePart: { line: '#d97706', fill: '#fef3c7', stroke: '#fde68a', text: '#b45309' },
+    nmpa: { line: '#0284c7', fill: '#e0f2fe', stroke: '#bae6fd', text: '#0369a1' },
+    statePension: { line: '#059669', fill: '#d1fae5', stroke: '#a7f3d0', text: '#065f46' },
+  },
+  light: {
+    retireSelf: { line: '#A9781F', fill: '#F3E9CE', stroke: '#D9C48A', text: '#6B4E12' },
+    retirePart: { line: '#855D18', fill: '#F3E9CE', stroke: '#D9C48A', text: '#6B4E12' },
+    nmpa: { line: '#2C5C8F', fill: '#DCE6EF', stroke: '#AFC2D6', text: '#1B3A57' },
+    statePension: { line: '#2F7A4F', fill: '#DCEEE1', stroke: '#A9D3B8', text: '#1F5636' },
+  },
+  dark: {
+    retireSelf: { line: '#D4A537', fill: '#2E2209', stroke: '#47350D', text: '#F5DFA9' },
+    retirePart: { line: '#E2BC5E', fill: '#2E2209', stroke: '#47350D', text: '#F5DFA9' },
+    nmpa: { line: '#3D74E8', fill: '#16233A', stroke: '#223756', text: '#B9D3FF' },
+    statePension: { line: '#3FD68C', fill: '#0F2E20', stroke: '#17472F', text: '#A3EBC7' },
+  },
+};
 
 const HISTORICAL_PRESETS = [
   { label: '1929 Crash (Great Depression)', year: 1929 },
@@ -1269,8 +1679,8 @@ async function runMonteCarloAsync(ctx, { trials, seed, spendOverride = null, onP
   return { ...E.summarizeTrials(results), spend: spendOverride !== null ? spendOverride : ctx.targetSpend };
 }
 
-const inputCls = 'w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none';
-const smallInputCls = 'w-full p-2 bg-slate-50 border border-slate-300 rounded font-bold text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none';
+const inputCls = 'w-full p-2 bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none';
+const smallInputCls = 'w-full p-2 bg-slate-50 border border-slate-300 rounded font-bold text-slate-900 focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none';
 
 function ProgressBar({ value, label }) {
   return (
@@ -1295,129 +1705,70 @@ function WarningsBanner({ warnings }) {
   );
 }
 
-// ---------------------------------------------------------------- Salary sacrifice vs ISA ratio optimizer
-function SalarySacrificeOptimizer({ plan, ctx, onSalaryChange, onApplyToSandbox, onApplyToPlan, onNavigateDocs }) {
-  const P = ctx.P;
-  const salary = E.num(plan?.demographics?.salarySelf, 0);
-  const accounts = plan?.accounts || [];
-  const currentPen = E.num(accounts.find(a => a.id === 'pen_self')?.contrib, 0);
-  const currentIsa = E.num(accounts.find(a => a.id === 'isa_self')?.contrib, 0);
-  const totalExistingInvested = currentPen + currentIsa;
-  const penAccount = ctx.acc.pen_self;
-  const realRate = penAccount ? penAccount.real : 0.04;
+// ---------------------------------------------------------------- Strategy tournament
+const WRAPPER_WORD = { pen: 'pension', isa: 'S&S ISA', other: 'GIA', cash: 'cash' };
+const joinClauses = (parts) => parts.length <= 1 ? (parts[0] || '') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+const sentenceCase = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 
-  const currentNetCostOfPension = E.netCostOfPensionContrib(currentPen, salary, P);
-  const currentTotalTakeHomeCost = currentIsa + currentNetCostOfPension;
-  const baselineRatio = currentTotalTakeHomeCost > 0 ? Math.round((currentNetCostOfPension / currentTotalTakeHomeCost) * 100) : 50;
-  const [pensionPercent, setPensionPercent] = useState(baselineRatio);
-  const [touched, setTouched] = useState(false);
-  useEffect(() => { if (!touched) setPensionPercent(baselineRatio); }, [baselineRatio, touched]);
+/*
+ * Plain-English description of what a tournament strategy moves relative to the current plan.
+ * Every strategy spends the same net budget, so the reconciliation clause matters: pension figures
+ * are gross and ISA figures net, which is why the rise and the fall do not match pound for pound.
+ */
+function summarizeStrategyChange(res, baselinePlayer, { isCouple = false, meta = null, threshold = 50 } = {}) {
+  if (!res) return [];
+  if (res.id === 'baseline') return ['Your plan exactly as entered — the benchmark every other strategy is measured against.'];
+  if (!res.planState || !baselinePlayer?.planState) return [];
+  const diff = E.diffStrategyPlans(baselinePlayer.planState, res.planState, { threshold });
+  const lines = [];
+  const plural = (n) => n === 1 ? '' : 's';
 
-  let newPensionContrib = currentPen, newIsaContrib = currentIsa;
-  const selfOwner = ctx.owners[0];
-  const penCap = Math.min(P.pensionAllowance, salary > 0 ? salary * (1 + P.erNic * P.erPass) : P.pensionAllowance);
-  if (currentTotalTakeHomeCost > 0) {
-    const targetNetPension = currentTotalTakeHomeCost * (pensionPercent / 100);
-    newPensionContrib = Math.max(0, E.grossUpNet(targetNetPension, salary, P, penCap));
-    const netUsed = E.netCostOfPensionContrib(newPensionContrib, salary, P);
-    newIsaContrib = Math.max(0, currentTotalTakeHomeCost - netUsed);
+  // one-off capital move (Bed & SIPP): its relief is bundled into taxReliefSaved, so it has to come
+  // back out before the annual figure can be quoted as a per-year number
+  const src = diff.balanceDeltas.find(d => d.delta < 0);
+  const dest = diff.balanceDeltas.find(d => d.delta > 0 && d.cat !== 'cash');
+  const refund = diff.balanceDeltas.find(d => d.cat === 'cash' && d.delta > 0);
+  const oneOffRelief = (src && dest) ? (dest.delta - Math.abs(src.delta) + (refund ? refund.delta : 0)) : 0;
+
+  const earlyYears = res.phase ? res.phase.yearsToFirstRetire - res.phase.switchYears : 0;
+  if (res.phase && res.phase.switchYears > 0 && earlyYears > 0) {
+    // contrib on the plan holds year-1 (early phase) only, so describe both phases explicitly
+    lines.push(`Two phases: pension-max for ${earlyYears} year${plural(earlyYears)} (pension ${formatGBP(res.phase.early.penContrib)}/yr, S&S ISA ${formatGBP(res.phase.early.isaContrib)}/yr), then ISA-max for the final ${res.phase.switchYears} year${plural(res.phase.switchYears)} before retirement (S&S ISA ${formatGBP(res.phase.late.isaContrib)}/yr, pension ${formatGBP(res.phase.late.penContrib)}/yr).`);
+  } else if (!diff.contribDeltas.length) {
+    lines.push('Effectively the same contribution split as your current plan — nothing material moves.');
+  } else {
+    const parts = [];
+    let overflowed = false;
+    ['pen', 'isa', 'other', 'cash'].forEach(cat => {
+      const c = diff.byCat[cat];
+      if (!c || Math.abs(c.contrib) < threshold) return;
+      const word = WRAPPER_WORD[cat];
+      // only one owner moving needs calling out; both moving is the unremarkable case
+      const only = (isCouple && c.owners.length === 1) ? ` (${E.OWNER_LABEL[c.owners[0]] || ''} only)` : '';
+      const amt = formatGBP(Math.abs(c.contrib));
+      // money appearing in the GIA from nothing is budget spilling past full allowances, not a choice
+      const fromNothing = diff.contribDeltas.filter(d => d.cat === cat).every(d => d.from < threshold);
+      if (cat === 'other' && c.contrib > 0 && fromNothing) { parts.push(`${amt}/yr now overflows into your GIA${only}`); overflowed = true; }
+      else parts.push(`your ${word} contributions ${c.contrib > 0 ? 'rise' : 'fall'} by ${amt}/yr${only}`);
+    });
+    const reliefDelta = E.num(res.taxReliefSaved, 0) - E.num(baselinePlayer.taxReliefSaved, 0) - oneOffRelief;
+    // an overridden budget means the strategies do not cost what the current plan costs, so the
+    // usual "same take-home cost" reconciliation would be a lie
+    const overridden = meta && Math.abs(E.num(meta.netBudget, 0) - E.num(meta.derivedBudget, 0)) >= threshold;
+    let tail = overridden ? ` — on the ${formatGBP(meta.netBudget)}/yr take-home budget you set, against ${formatGBP(meta.derivedBudget)}/yr in your plan today` : ' — the same take-home cost';
+    if (reliefDelta >= threshold) tail += `, with ${formatGBP(reliefDelta)}/yr more tax and NIC relief`;
+    else if (reliefDelta <= -threshold) tail += `, giving up ${formatGBP(Math.abs(reliefDelta))}/yr of tax and NIC relief`;
+    lines.push(`${sentenceCase(joinClauses(parts))}${tail}.`);
+    if (overflowed) lines.push('The GIA overflow is budget that no longer fits inside the ISA and pension allowances.');
   }
-  const relief = E.calculateMarginalRelief(salary, newPensionContrib / (1 + P.erNic * P.erPass), P);
-  const newTotalNominal = newPensionContrib + newIsaContrib;
-  const dayOneDelta = newTotalNominal - totalExistingInvested;
-  const dayOnePercentBoost = totalExistingInvested > 0 ? (dayOneDelta / totalExistingInvested) * 100 : 0;
-  // exit factor derived from config: 25% tax-free, remainder at the basic rate
-  const exitFactorBasic = 1 - (1 - P.pclsProp) * P.basicRate;
-  const exitFactorHigher = 1 - (1 - P.pclsProp) * P.higherRate;
-  const multiple = (exit) => currentTotalTakeHomeCost > 0 ? (newIsaContrib + newPensionContrib * exit) / currentTotalTakeHomeCost : 1;
-  const grossUpFactor = currentTotalTakeHomeCost > 0 && newPensionContrib > 0 ? newPensionContrib / Math.max(1, E.netCostOfPensionContrib(newPensionContrib, salary, P)) : 1 / (1 - (P.higherRate + P.nicUpper));
-  const breakevenExitTax = Math.max(0, 1 - 1 / grossUpFactor) * 100;
-  const isaOverAllowance = newIsaContrib > P.isaAllowance + 0.5;
-  const nmpa = ctx.nmpa;
 
-  return (
-    <div className="p-4 sm:p-5 bg-gradient-to-br from-indigo-50/90 via-blue-50/50 to-slate-50 border border-indigo-100 rounded-2xl shadow-xs space-y-4">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-indigo-100/70">
-        <div className="flex items-center gap-2">
-          <div className="p-1.5 bg-indigo-600 text-white rounded-lg"><Zap className="w-4 h-4 fill-amber-300 text-amber-300" /></div>
-          <div>
-            <h4 className="text-xs font-bold text-indigo-950 uppercase tracking-wider">Salary Sacrifice &amp; Wrapper Optimizer (Myself)</h4>
-            <span className="text-[11px] text-slate-500">Rebalance your existing investment budget between S&amp;S ISA and pre-tax pension salary sacrifice at the same take-home cost.</span>
-          </div>
-        </div>
-        <button type="button" onClick={onNavigateDocs} className="text-xs text-indigo-600 hover:text-indigo-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer self-start sm:self-auto">
-          <HelpCircle className="w-3.5 h-3.5" /> How pre-tax salary sacrifice works &rarr;
-        </button>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-sans items-start">
-        <div>
-          <label className="text-slate-700 font-semibold block mb-1">Gross Annual Salary — Myself (£)</label>
-          <input type="number" min="0" placeholder={`blank = assume ${Math.round((P.higherRate + P.nicUpper) * 100)}% relief`} value={plan?.demographics?.salarySelf ?? ''} onChange={(e) => onSalaryChange(e.target.value)}
-            className="w-full p-2 bg-white border border-slate-300 rounded-xl font-mono text-slate-900 font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
-          <p className="text-[11px] text-slate-500 mt-1 leading-normal">
-            Saved with the plan (Plan Inputs → Demographics). Marginal relief at this salary: <strong className="text-indigo-700 font-mono">{relief.reliefRate.toFixed(1)}%</strong>
-            {relief.assumed ? ' (assumed — enter a salary for an exact figure)' : ''}{relief.capped ? ' — sacrifice capped at salary' : ''}.
-            {P.erPass > 0 ? ` Employer NIC pass-through ${Math.round(P.erPass * 100)}% included.` : ''}
-          </p>
-        </div>
-        <div className="bg-white/80 p-3.5 rounded-xl border border-indigo-100 space-y-2">
-          <div className="flex justify-between items-center">
-            <span className="text-slate-600 font-semibold">Allocation of take-home budget:</span>
-            <span className="text-xs font-bold text-indigo-700 font-mono">{100 - pensionPercent}% ISA / {pensionPercent}% Pension</span>
-          </div>
-          <input type="range" min="0" max="100" step="1" value={pensionPercent} onChange={(e) => { setTouched(true); setPensionPercent(Number(e.target.value)); }} className="w-full accent-indigo-600 cursor-pointer" />
-          <div className="flex justify-between text-[10px] text-slate-500 font-mono">
-            <span>100% ISA (£0 Pen)</span>
-            <button type="button" onClick={() => { setTouched(false); setPensionPercent(baselineRatio); }} className="text-indigo-600 font-bold hover:underline cursor-pointer">Base: {baselineRatio}% Pen</button>
-            <span>100% Pen (£0 ISA)</span>
-          </div>
-          <div className="pt-1 border-t border-slate-100 text-[11px] text-slate-600 flex justify-between font-mono">
-            <span>Current Total: <strong>£{Math.round(totalExistingInvested).toLocaleString()}/yr</strong></span>
-            <span className="text-indigo-700 font-bold">New Total: £{Math.round(newTotalNominal).toLocaleString()}/yr</span>
-          </div>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-1 text-xs">
-        <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
-          <span className="text-[10px] text-slate-500 uppercase font-bold block">Day-1 Capital Boost</span>
-          <span className={`text-base font-black font-mono ${dayOneDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{dayOneDelta >= 0 ? '+' : ''}£{Math.round(dayOneDelta).toLocaleString()}</span>
-          <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">{dayOnePercentBoost >= 0 ? '+' : ''}{dayOnePercentBoost.toFixed(1)}% invested for the same take-home</span>
-        </div>
-        <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
-          <span className="text-[10px] text-slate-500 uppercase font-bold block">Net wealth multiple (basic-rate exit)</span>
-          <span className="text-base font-black font-mono text-indigo-700">{multiple(exitFactorBasic).toFixed(2)}x</span>
-          <span className="text-[10px] text-slate-400 block mt-0.5">vs 100% ISA; {Math.round(P.pclsProp * 100)}% tax-free, rest at {Math.round(P.basicRate * 100)}%</span>
-        </div>
-        <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
-          <span className="text-[10px] text-slate-500 uppercase font-bold block">Net wealth multiple (higher-rate exit)</span>
-          <span className="text-base font-black font-mono text-indigo-700">{multiple(exitFactorHigher).toFixed(2)}x</span>
-          <span className="text-[10px] text-slate-400 block mt-0.5">if withdrawals are taxed at {Math.round(P.higherRate * 100)}%</span>
-        </div>
-        <div className="p-3 bg-white/90 border border-indigo-100 rounded-xl">
-          <span className="text-[10px] text-slate-500 uppercase font-bold block">Break-even exit tax</span>
-          <span className="text-base font-black font-mono text-indigo-700">{breakevenExitTax.toFixed(0)}%</span>
-          <span className="text-[10px] text-slate-400 block mt-0.5">pension beats ISA below this average exit rate (same growth, locked until {nmpa})</span>
-        </div>
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-indigo-100/70">
-        <div className="text-[11px] text-slate-600">
-          Resulting Contributions: <strong className="text-teal-700 font-mono">£{Math.round(newIsaContrib).toLocaleString()}/yr ISA</strong> + <strong className="text-blue-700 font-mono">£{Math.round(newPensionContrib).toLocaleString()}/yr Pension</strong> (take-home cost: £{Math.round(currentTotalTakeHomeCost).toLocaleString()}/yr)
-          {isaOverAllowance && <span className="block text-rose-600 font-semibold">ISA amount exceeds the £{P.isaAllowance.toLocaleString()} annual allowance.</span>}
-          {newPensionContrib >= penCap - 0.5 && pensionPercent > baselineRatio && <span className="block text-amber-700 font-semibold">Pension capped at £{Math.round(penCap).toLocaleString()} (annual allowance / salary).</span>}
-        </div>
-        <div className="flex items-center gap-2">
-          <button type="button" onClick={() => onApplyToSandbox(Math.round(newPensionContrib), Math.round(newIsaContrib))} className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold border border-indigo-200 transition-all cursor-pointer">Apply to Sandbox Below</button>
-          <button type="button" onClick={() => onApplyToPlan(Math.round(newPensionContrib), Math.round(newIsaContrib))} className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-xs transition-all cursor-pointer">Apply to Plan Inputs</button>
-        </div>
-      </div>
-    </div>
-  );
+  // described separately from the annual figures because it is capital, not a yearly flow
+  if (src && dest) {
+    lines.push(`One-off: ${formatGBP(Math.abs(src.delta))} of existing ${WRAPPER_WORD[src.cat]} capital moves into the ${WRAPPER_WORD[dest.cat]}, becoming ${formatGBP(dest.delta)} after basic-rate relief${refund ? `, with ${formatGBP(refund.delta)} of higher-rate relief refunded to cash` : ''}.`);
+  }
+  return lines;
 }
 
-// ---------------------------------------------------------------- Strategy tournament
 function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, onNavigateDocs }) {
   const P = ctx.P;
   const isCouple = ctx.isCouple;
@@ -1432,7 +1783,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
   const cancelRef = useRef(false);
 
   const preview = useMemo(() => {
-    try { return E.buildTournament(plan, { emergencyFloor: E.num(emergencyFloor, 0), scope, netBudgetOverride: budgetOverride === '' ? null : budgetOverride, balance }); }
+    try { return E.buildTournament(E.resolveMpaa(plan), { emergencyFloor: E.num(emergencyFloor, 0), scope, netBudgetOverride: budgetOverride === '' ? null : budgetOverride, balance }); }
     catch (e) { return null; }
   }, [plan, emergencyFloor, scope, budgetOverride, balance]);
   const meta = preview?.meta;
@@ -1480,9 +1831,10 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
   };
 
   const se = results && results.players.length ? results.players[0].stats.standardError : 0;
+  const baselinePlayer = results ? results.players.find(p => p.id === 'baseline') : null;
 
   return (
-    <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+    <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
         <div>
           <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
@@ -1501,12 +1853,12 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
         <div>
           <label className="text-slate-700 font-semibold block mb-1">Annual take-home budget (£ net)</label>
           <input type="number" min="0" step="250" value={budgetOverride} placeholder={meta ? `${Math.round(meta.derivedBudget).toLocaleString()} (from plan)` : ''} onChange={(e) => setBudgetOverride(e.target.value)}
-            className="w-full p-2 bg-white border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none" />
+            className="w-full p-2 bg-surface border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none" />
           <span className="text-[10px] text-slate-500 block mt-1">Derived from current ISA + net cost of pension contributions{salaryMissing.length ? ` (salary missing for ${salaryMissing.join(', ')} — ${Math.round((P.higherRate + P.nicUpper) * 100)}% relief assumed)` : ''}.</span>
         </div>
         <div>
           <label className="text-slate-700 font-semibold block mb-1">Optimization scope</label>
-          <select value={scope} onChange={(e) => setScope(e.target.value)} className="w-full p-2 bg-white border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer">
+          <select value={scope} onChange={(e) => setScope(e.target.value)} className="w-full p-2 bg-surface border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer">
             <option value="contributions">Contributions only (rebalance future deposits)</option>
             <option value="full">Full reallocation (+ Bed &amp; SIPP transfer of spare ISA)</option>
           </select>
@@ -1520,8 +1872,8 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
         </div>
         <div>
           <label className="text-slate-700 font-semibold block mb-1">Bridge-risk cap (Survival Maximizer)</label>
-          <select value={preAccessCap} onChange={(e) => setPreAccessCap(e.target.value === 'any' ? 'any' : Number(e.target.value))} className="w-full p-2 bg-white border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer">
-            <option value={0}>0% pre-access failures</option>
+          <select value={preAccessCap} onChange={(e) => setPreAccessCap(e.target.value === 'any' ? 'any' : Number(e.target.value))} className="w-full p-2 bg-surface border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer">
+            <option value={0}>0% pre-SIPP access failures</option>
             <option value={2}>≤ 2%</option>
             <option value={5}>≤ 5%</option>
             <option value={10}>≤ 10%</option>
@@ -1530,7 +1882,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
         </div>
         <div>
           <label className="text-slate-700 font-semibold block mb-1">Owner split of new money</label>
-          <select value={balance} disabled={!isCouple} onChange={(e) => setBalance(e.target.value)} className="w-full p-2 bg-white border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer disabled:opacity-50">
+          <select value={balance} disabled={!isCouple} onChange={(e) => setBalance(e.target.value)} className="w-full p-2 bg-surface border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer disabled:opacity-50">
             <option value="proportional">Keep current Myself/Partner ratio</option>
             <option value="balanced">Balance pensions between partners</option>
           </select>
@@ -1540,7 +1892,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
       {meta && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-[11px] font-mono">
           <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Net budget tested</span><strong>£{Math.round(meta.netBudget).toLocaleString()}/yr</strong></div>
-          <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Pre-access gap</span><strong>{meta.bridge.gapYears} yr{meta.bridge.gapYears === 1 ? '' : 's'}</strong></div>
+          <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Pre-SIPP access gap</span><strong>{meta.bridge.gapYears} yr{meta.bridge.gapYears === 1 ? '' : 's'}</strong></div>
           <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Bridge reserve target (+{Math.round(E.num(plan?.config?.bridgeSafetyMargin, 30))}%)</span><strong>{fmtK(meta.bridgeCapital)}</strong></div>
           <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Liquid today above buffer</span><strong>{fmtK(Math.max(0, meta.liquidToday - E.num(emergencyFloor, 0)))}</strong></div>
         </div>
@@ -1549,8 +1901,8 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
       <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between">
         {progress ? <div className="flex-1"><ProgressBar value={progress.value} label={progress.label} /></div> : <span className="text-[11px] text-slate-400">Seed {seed} — change it in Config to test a different set of market paths.</span>}
         <button type="button" onClick={handleRun} disabled={isEvaluating || !preview || (meta && meta.netBudget <= 0)}
-          className="px-4 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
-          <Zap className="w-3.5 h-3.5 fill-amber-300 text-amber-300" />
+          className="px-4 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 dark:from-[#A9781F] dark:to-[#2C5C8F] dark:hover:from-[#855D18] dark:hover:to-[#204568] text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
+          <Zap className="w-3.5 h-3.5 fill-amber-300 text-amber-300 dark:fill-[#FCD34D] dark:text-[#FCD34D]" />
           {isEvaluating ? 'Evaluating…' : '⚡ Run Strategy Tournament'}
         </button>
       </div>
@@ -1565,14 +1917,20 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
             {results.players.map((res) => {
               const isBest = res.id === results.bestId;
               const st = res.stats;
+              const summaryLines = summarizeStrategyChange(res, baselinePlayer, { isCouple, meta: results.meta });
               return (
-                <div key={res.id} className={`p-4 rounded-2xl border flex flex-col justify-between space-y-3 ${isBest ? 'bg-emerald-50/60 border-emerald-300 shadow-sm' : res.id === 'baseline' ? 'bg-slate-50 border-slate-200' : 'bg-white border-indigo-100 shadow-xs'}`}>
+                <div key={res.id} className={`p-4 rounded-2xl border flex flex-col justify-between space-y-3 ${isBest ? 'bg-emerald-50/60 border-emerald-300 shadow-sm' : res.id === 'baseline' ? 'bg-slate-50 border-slate-200' : 'bg-surface border-indigo-100 shadow-xs'}`}>
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-xs font-bold text-slate-900 leading-tight flex items-center gap-1">{isBest && <Trophy className="w-3.5 h-3.5 text-emerald-600" />}{res.name}</span>
                       <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${st.successRate >= 90 ? 'bg-emerald-100 text-emerald-800' : st.successRate >= 75 ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-800'}`}>{st.successRate.toFixed(1)}% Safe</span>
                     </div>
                     <p className="text-[11px] text-slate-500 leading-normal">{res.description}</p>
+                    {summaryLines.length > 0 && (
+                      <div className="border-l-2 border-indigo-300 pl-2.5 space-y-1">
+                        {summaryLines.map((line, i) => <p key={i} className="text-[11px] leading-snug text-slate-700">{line}</p>)}
+                      </div>
+                    )}
                     <div className="pt-2 border-t border-slate-100 space-y-1 text-[11px] font-mono">
                       <div className="flex justify-between"><span className="text-slate-500">S&amp;S ISA:</span><strong className="text-teal-700">£{Math.round(res.isaContrib || 0).toLocaleString()}/yr{res.phase && res.phase.switchYears > 0 ? ' avg' : ''}</strong></div>
                       <div className="flex justify-between"><span className="text-slate-500">Pension:</span><strong className="text-blue-700">£{Math.round(res.penContrib || 0).toLocaleString()}/yr{res.phase && res.phase.switchYears > 0 ? ' avg' : ''}</strong></div>
@@ -1584,7 +1942,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
                       <div className="flex justify-between"><span className="text-slate-500 font-sans">10th %ile pot:</span><span className="font-bold text-slate-800">{fmtK(st.p10Terminal)}</span></div>
                       {ctx.pensionDeathTaxRate > 0 && <div className="flex justify-between"><span className="text-slate-500 font-sans">Median pot net of pension death tax:</span><span className="font-bold text-slate-800">{fmtK(st.medianTerminalNet)}</span></div>}
                       <div className="flex justify-between"><span className="text-slate-500 font-sans">Median failure age:</span><span className={`font-bold ${st.preNmpaFailRate > 5 ? 'text-rose-600' : 'text-slate-700'}`}>{st.medianFailAge ? `Age ${st.medianFailAge}` : 'None'}</span></div>
-                      <div className="flex justify-between"><span className="text-slate-500 font-sans">Pre-access (bridge) failures:</span><span className={`font-bold ${st.preNmpaFailRate > 5 ? 'text-rose-600' : 'text-slate-700'}`}>{st.preNmpaFailRate.toFixed(1)}%</span></div>
+                      <div className="flex justify-between"><span className="text-slate-500 font-sans">Pre-SIPP access (bridge) failures:</span><span className={`font-bold ${st.preNmpaFailRate > 5 ? 'text-rose-600' : 'text-slate-700'}`}>{st.preNmpaFailRate.toFixed(1)}%</span></div>
                     </div>
                     {res.searchResults && (
                       <details className="text-[10px] text-slate-500">
@@ -1610,10 +1968,22 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
 
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('trajectory');
+  const [activeTab, setActiveTab] = useState('inputs');
   const [isEditingRisk, setIsEditingRisk] = useState(false);
   const [selectedHistoricalYear, setSelectedHistoricalYear] = useState(1965);
   const [mcSeed, setMcSeed] = useState(12345);
+
+  // Theme: 'classic' (original stock look, the default), 'light' (Riviera Ledger), 'dark' (Control Room).
+  const [theme, setTheme] = useState(() => {
+    const saved = safeStorageGet(THEME_STORAGE_KEY);
+    if (saved === 'classic' || saved === 'light' || saved === 'dark') return saved;
+    return 'classic';
+  });
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    safeStorageSet(THEME_STORAGE_KEY, theme);
+  }, [theme]);
 
   const [plan, setPlan] = useState(() => E.normalizePlan(safeStorageGet(STORAGE_KEY) ? (() => { try { return JSON.parse(safeStorageGet(STORAGE_KEY)); } catch (e) { return null; } })() : null));
 
@@ -1638,9 +2008,16 @@ export default function App() {
     (p?.accounts || []).forEach(a => { init[a.id] = { contrib: E.num(a.contrib, 0), growth: E.num(a.growth, 0) }; });
     return init;
   };
+  // Retirement-age overrides mirror the engine's blank-input fallback so the sandbox starts on the modelled age.
+  const sandboxRetireFromPlan = (p) => ({
+    self: E.clamp(E.num(p?.demographics?.retireAgeSelf, 60), 0, 120),
+    part: E.clamp(E.num(p?.demographics?.retireAgePart, 60), 0, 120)
+  });
   const [sandboxCustomized, setSandboxCustomized] = useState(false);
   const [sandboxAccounts, setSandboxAccounts] = useState(() => sandboxFromPlan(plan));
+  const [sandboxRetire, setSandboxRetire] = useState(() => sandboxRetireFromPlan(plan));
   useEffect(() => { if (!sandboxCustomized) setSandboxAccounts(sandboxFromPlan(plan)); }, [plan?.accounts, sandboxCustomized]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!sandboxCustomized) setSandboxRetire(sandboxRetireFromPlan(plan)); }, [plan?.demographics?.retireAgeSelf, plan?.demographics?.retireAgePart, sandboxCustomized]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { safeStorageSet(STORAGE_KEY, JSON.stringify(plan)); }, [plan]);
   useEffect(() => { safeStorageSet(SCENARIOS_STORAGE_KEY, JSON.stringify(scenarios)); }, [scenarios]);
@@ -1649,7 +2026,9 @@ export default function App() {
   const isCouple = plan?.demographics?.planningMode !== 'single';
 
   // ------------------------------------------------------------ engine context & projections
-  const ctx = useMemo(() => E.buildContext(plan), [plan]);
+  // MPAA is derived from the projection, so resolve it once and let everything downstream read the result
+  const resolvedPlan = useMemo(() => E.resolveMpaa(plan), [plan]);
+  const ctx = useMemo(() => E.buildContext(resolvedPlan), [resolvedPlan]);
   const P = ctx.P;
   const terminalAge = ctx.terminalAge;
   const currentAge = ctx.ageSelf0;
@@ -1670,6 +2049,13 @@ export default function App() {
   const [simProgress, setSimProgress] = useState(null);
   const [isSimulating, setIsSimulating] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
+  const [policyResults, setPolicyResults] = useState(null);
+  const [policyProgress, setPolicyProgress] = useState(null);
+  const [isPolicySearching, setIsPolicySearching] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showAdvancedConfig, setShowAdvancedConfig] = useState(false);
+  const [expandedOneOff, setExpandedOneOff] = useState(() => new Set());
+  const toggleOneOffExpand = (id) => setExpandedOneOff(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
 
   const handleFocus = (e) => e.target.select();
   const activeRiskMatrix = plan?.riskProfiles || E.DEFAULT_RISK_PROFILES;
@@ -1684,8 +2070,11 @@ export default function App() {
   }, [ctx]);
   const deterministicVerdict = useMemo(() => E.evaluateRows(ctx, timelineData), [ctx, timelineData]);
 
-  const sandboxPlan = useMemo(() => ({
+
+  // resolved separately: changing retirement ages here moves when pension income starts, and so the trigger
+  const sandboxPlan = useMemo(() => E.resolveMpaa({
     ...plan,
+    demographics: { ...plan?.demographics, retireAgeSelf: sandboxRetire.self, retireAgePart: sandboxRetire.part },
     accounts: (plan?.accounts || []).map(acc => {
       const sb = sandboxAccounts[acc.id];
       if (!sb) return acc;
@@ -1694,35 +2083,41 @@ export default function App() {
       if (sb.contribByYear) out.contribByYear = sb.contribByYear; else delete out.contribByYear;
       return out;
     })
-  }), [plan, sandboxAccounts]);
+  }), [plan, sandboxAccounts, sandboxRetire]);
   const sandboxCtx = useMemo(() => E.buildContext(sandboxPlan), [sandboxPlan]);
-  const isSandboxModified = useMemo(() => (plan?.accounts || []).some(acc => {
+  const isRetireModified = useMemo(() => {
+    const base = sandboxRetireFromPlan(plan);
+    return base.self !== sandboxRetire.self || (isCouple && base.part !== sandboxRetire.part);
+  }, [plan?.demographics?.retireAgeSelf, plan?.demographics?.retireAgePart, sandboxRetire, isCouple]); // eslint-disable-line react-hooks/exhaustive-deps
+  const isSandboxModified = useMemo(() => isRetireModified || (plan?.accounts || []).some(acc => {
     const sb = sandboxAccounts[acc.id];
     if (!sb) return false;
     return E.num(acc.contrib, 0) !== E.num(sb.contrib, 0) || E.num(acc.growth, 0) !== E.num(sb.growth, 0) || (sb.balance !== undefined && E.num(acc.balance, 0) !== E.num(sb.balance, 0)) || !!sb.contribByYear;
-  }), [plan?.accounts, sandboxAccounts]);
+  }), [plan?.accounts, sandboxAccounts, isRetireModified]);
   const sandboxTimeline = useMemo(() => E.simulateDeterministic(sandboxCtx, 'expected'), [sandboxCtx]);
 
   const sandboxMetrics = useMemo(() => {
     if (!timelineData.length || !sandboxTimeline.length) return null;
     const baseTerminal = timelineData[timelineData.length - 1]?.totalCombined || 0;
     const sbTerminal = sandboxTimeline[sandboxTimeline.length - 1]?.totalCombined || 0;
-    const retAge = ctx.owners[0].retireAge;
-    const baseRetRow = timelineData.find(r => r.ageSelf === retAge) || timelineData[0];
-    const sbRetRow = sandboxTimeline.find(r => r.ageSelf === retAge) || sandboxTimeline[0];
-    let cumulativeExtraCapital = 0;
-    const accumYears = Math.max(0, retAge - currentAge);
-    ctx.accounts.forEach(a => {
-      const sbAcc = sandboxCtx.acc[a.id];
-      for (let t = 0; t < accumYears; t++) {
-        const baseThisYr = a.contribByYear ? (a.contribByYear[t] || 0) : a.contrib * Math.pow(1 + a.growth, t);
-        const sbThisYr = sbAcc ? (sbAcc.contribByYear ? (sbAcc.contribByYear[t] || 0) : sbAcc.contrib * Math.pow(1 + sbAcc.growth, t)) : 0;
-        cumulativeExtraCapital += (sbThisYr - baseThisYr);
-      }
-    });
+    // Each scenario is measured at its own retirement age: retiring later means a longer accumulation run.
+    const baseRetAge = ctx.owners[0].retireAge;
+    const sbRetAge = sandboxCtx.owners[0].retireAge;
+    const baseRetRow = timelineData.find(r => r.ageSelf === baseRetAge) || timelineData[0];
+    const sbRetRow = sandboxTimeline.find(r => r.ageSelf === sbRetAge) || sandboxTimeline[0];
+    // Contributions stop at each owner's own retirement age, so total them per owner rather than off a single age.
+    const totalPlannedContribs = (c) => c.accounts.reduce((sum, a) => {
+      const o = c.owners.find(x => x.key === a.owner);
+      if (!o) return sum;
+      const yrs = Math.max(0, Math.round(o.retireAge - o.age0));
+      let acct = 0;
+      for (let t = 0; t < yrs; t++) acct += E.contribAtYear(a, t);
+      return sum + acct;
+    }, 0);
+    const cumulativeExtraCapital = totalPlannedContribs(sandboxCtx) - totalPlannedContribs(ctx);
     const terminalDelta = sbTerminal - baseTerminal;
-    return { baseTerminal, sbTerminal, terminalDelta, baseRetirement: baseRetRow?.totalCombined || 0, sbRetirement: sbRetRow?.totalCombined || 0, retirementDelta: (sbRetRow?.totalCombined || 0) - (baseRetRow?.totalCombined || 0), cumulativeExtraCapital, multiplier: cumulativeExtraCapital !== 0 ? terminalDelta / cumulativeExtraCapital : 0 };
-  }, [timelineData, sandboxTimeline, ctx, sandboxCtx, currentAge]);
+    return { baseTerminal, sbTerminal, terminalDelta, baseRetAge, sbRetAge, baseRetirement: baseRetRow?.totalCombined || 0, sbRetirement: sbRetRow?.totalCombined || 0, retirementDelta: (sbRetRow?.totalCombined || 0) - (baseRetRow?.totalCombined || 0), cumulativeExtraCapital, multiplier: cumulativeExtraCapital !== 0 ? terminalDelta / cumulativeExtraCapital : 0 };
+  }, [timelineData, sandboxTimeline, ctx, sandboxCtx]);
 
   const historicalTimeline = useMemo(() => E.simulateHistorical(ctx, activeHistoricalStartYear), [ctx, activeHistoricalStartYear]);
   const historicalMetrics = useMemo(() => {
@@ -1773,9 +2168,9 @@ export default function App() {
   const updateSpending = (field, value) => setPlan(prev => ({ ...prev, spending: { ...(prev.spending || {}), [field]: (field === 'drawdownStrategy' || field === 'decumulationPolicy') ? value : parseInputNumber(value) } }));
   const updateConfig = (field, value) => setPlan(prev => ({ ...prev, config: { ...(prev.config || {}), [field]: (field === 'valuationDate' || typeof value === 'boolean') ? value : parseInputNumber(value) } }));
   const updateListItem = (listKey, id, patch) => setPlan(p => ({ ...p, [listKey]: (p[listKey] || []).map(i => i.id === id ? { ...i, ...patch } : i) }));
-  const addOtherIncome = () => setPlan(prev => ({ ...prev, otherIncomes: [...(prev.otherIncomes || []), { id: 'inc_' + Date.now(), name: '', owner: 'Myself', startAge: '', endAge: '', amount: '', taxTreatment: 'Taxable', notes: '' }] }));
+  const addOtherIncome = () => setPlan(prev => ({ ...prev, otherIncomes: [...(prev.otherIncomes || []), { id: 'inc_' + Date.now(), name: '', owner: 'Myself', startAge: '', endAge: '', amount: '', incomeType: 'otherTaxable', notes: '' }] }));
   const deleteOtherIncome = (id) => setPlan(prev => ({ ...prev, otherIncomes: (prev.otherIncomes || []).filter(i => i.id !== id) }));
-  const addOneOffContrib = () => { const y = new Date().getFullYear() + 1; setPlan(prev => ({ ...prev, oneOffContributions: [...(prev.oneOffContributions || []), { id: 'c_' + Date.now(), date: `${y}-01-01`, year: y, owner: 'Myself', category: 'Pensions', amount: '', desc: '' }] })); };
+  const addOneOffContrib = () => { const y = new Date().getFullYear() + 1; setPlan(prev => ({ ...prev, oneOffContributions: [...(prev.oneOffContributions || []), { id: 'c_' + Date.now(), date: `${y}-01-01`, year: y, owner: 'Myself', category: 'Pensions', amount: '', desc: '', transferredFrom: 'External', stagedTargetWrapper: 'Pensions' }] })); };
   const deleteOneOffContrib = (id) => setPlan(prev => ({ ...prev, oneOffContributions: (prev.oneOffContributions || []).filter(c => c.id !== id) }));
   const addOneOffCost = () => { const y = new Date().getFullYear() + 1; setPlan(prev => ({ ...prev, oneOffCosts: [...(prev.oneOffCosts || []), { id: 'cost_' + Date.now(), date: `${y}-06-01`, year: y, owner: 'Myself', amount: '', desc: '' }] })); };
   const deleteOneOffCost = (id) => setPlan(prev => ({ ...prev, oneOffCosts: (prev.oneOffCosts || []).filter(c => c.id !== id) }));
@@ -1796,7 +2191,7 @@ export default function App() {
     const selected = scenarios.find(s => s.id === id);
     if (!selected) return;
     const data = E.normalizePlan(selected.data);
-    setSandboxCustomized(false); setActiveScenarioId(id); setPlan(data); setSimResult(null); setSandboxAccounts(sandboxFromPlan(data));
+    setSandboxCustomized(false); setActiveScenarioId(id); setPlan(data); setSimResult(null); setSandboxAccounts(sandboxFromPlan(data)); setSandboxRetire(sandboxRetireFromPlan(data));
   };
   const handleDeleteScenario = (idToDelete) => {
     if (scenarios.length <= 1) { window.alert('At least one scenario must be retained.'); return; }
@@ -1810,6 +2205,7 @@ export default function App() {
     setSandboxCustomized(false);
     setPlan(prev => ({
       ...prev,
+      demographics: { ...prev.demographics, retireAgeSelf: sandboxRetire.self, ...(isCouple ? { retireAgePart: sandboxRetire.part } : {}) },
       accounts: (prev.accounts || []).map(acc => {
         const sb = sandboxAccounts[acc.id];
         if (!sb) return acc;
@@ -1821,7 +2217,15 @@ export default function App() {
     }));
     flash('Sandbox applied to plan inputs');
   };
-  const handleResetSandbox = () => { setSandboxCustomized(false); setSandboxAccounts(sandboxFromPlan(plan)); };
+  const handleResetSandbox = () => { setSandboxCustomized(false); setSandboxAccounts(sandboxFromPlan(plan)); setSandboxRetire(sandboxRetireFromPlan(plan)); };
+  const updateSandboxRetire = (key, value) => {
+    setSandboxCustomized(true);
+    setSandboxRetire(prev => ({ ...prev, [key]: E.clamp(E.num(value, prev[key]), 0, 120) }));
+  };
+  const adjustSandboxRetire = (key, delta) => {
+    setSandboxCustomized(true);
+    setSandboxRetire(prev => ({ ...prev, [key]: E.clamp(E.num(prev[key], 60) + delta, 0, 120) }));
+  };
   const updateSandboxField = (id, field, value) => {
     setSandboxCustomized(true);
     setSandboxAccounts(prev => { const cur = { ...(prev[id] || {}) }; delete cur.contribByYear; return { ...prev, [id]: { ...cur, [field]: parseInputNumber(value) } }; });
@@ -1829,16 +2233,6 @@ export default function App() {
   const adjustSandboxContrib = (id, delta) => {
     setSandboxCustomized(true);
     setSandboxAccounts(prev => { const cur = { ...(prev[id] || {}) }; delete cur.contribByYear; return { ...prev, [id]: { ...cur, contrib: Math.max(0, E.num(cur.contrib, 0) + delta) } }; });
-  };
-  const handleApplyOptimizerToSandbox = (grossPensionAnnual, netIsaAnnual) => {
-    setSandboxCustomized(true);
-    setSandboxAccounts(prev => ({ ...prev, pen_self: { ...(prev.pen_self || {}), contrib: grossPensionAnnual, contribByYear: undefined }, isa_self: { ...(prev.isa_self || {}), contrib: netIsaAnnual, contribByYear: undefined } }));
-    flash('Salary sacrifice applied to Sandbox');
-  };
-  const handleApplyOptimizerToPlan = (grossPensionAnnual, netIsaAnnual) => {
-    setSandboxCustomized(false);
-    setPlan(prev => ({ ...prev, accounts: (prev.accounts || []).map(acc => acc.id === 'pen_self' ? { ...acc, contrib: grossPensionAnnual, contribByYear: undefined } : acc.id === 'isa_self' ? { ...acc, contrib: netIsaAnnual, contribByYear: undefined } : acc) }));
-    flash('Salary sacrifice saved to Plan Inputs');
   };
   const handleApplyStrategyToSandbox = (strategy) => {
     setSandboxCustomized(true);
@@ -1879,8 +2273,8 @@ export default function App() {
   };
   const handleExportCSV = () => {
     if (!timelineData.length) return;
-    const headers = ['Year', 'Age (Myself)', 'Age (Partner)', 'Working (Myself)', 'Working (Partner)', 'Target Spend (£)', 'Net Guaranteed Income (£)', 'Working Partner Take-home (£)', 'State Pension (Myself £)', 'State Pension (Partner £)', 'Net Drawdown Demand (£)', 'Pension Withdrawals Gross (£)', 'PA Harvested (£)', 'Income Tax (£)', 'Pensions (£)', 'ISAs (£)', 'Other Investments (£)', 'Cash Savings (£)', 'Total Combined Pot (£)', 'Pre-access Liquid (£)', 'Unmet (£)', 'Status'];
-    const rows = timelineData.map(r => [r.year, r.ageSelf, isCouple ? r.agePart : 'N/A', r.workingSelf ? 'Yes' : 'No', isCouple ? (r.workingPart ? 'Yes' : 'No') : 'N/A', r.targetSpend.toFixed(0), r.netGuaranteed.toFixed(0), r.workingTakeHome.toFixed(0), r.spSelf.toFixed(0), isCouple ? r.spPart.toFixed(0) : '0', r.netDrawdown.toFixed(0), r.drawdownPensions.toFixed(0), r.harvested.toFixed(0), r.taxPaid.toFixed(0), r.pensions.toFixed(0), r.isas.toFixed(0), r.other.toFixed(0), r.cash.toFixed(0), r.totalCombined.toFixed(0), r.preNmpaLiquid.toFixed(0), r.unmetDemand.toFixed(0), r.preNmpaInsolvent ? 'Pre-access gap' : r.unmetDemand > E.FAIL_TOLERANCE ? 'Shortfall' : 'Solvent']);
+    const headers = ['Year', 'Age (Myself)', 'Age (Partner)', 'Working (Myself)', 'Working (Partner)', 'Target Spend (£)', 'Net Guaranteed Income (£)', 'Working Partner Take-home (£)', 'State Pension (Myself £)', 'State Pension (Partner £)', 'Net Drawdown Demand (£)', 'Pension Withdrawals Gross (£)', 'PA Harvested (£)', 'Income Tax (£)', 'CGT (£)', 'Realised Gains (£)', 'Pensions (£)', 'ISAs (£)', 'Other Investments (£)', 'Cash Savings (£)', 'Total Combined Pot (£)', 'Pre-SIPP access Liquid (£)', 'Unmet (£)', 'Status'];
+    const rows = timelineData.map(r => [r.year, r.ageSelf, isCouple ? r.agePart : 'N/A', r.workingSelf ? 'Yes' : 'No', isCouple ? (r.workingPart ? 'Yes' : 'No') : 'N/A', r.targetSpend.toFixed(0), r.netGuaranteed.toFixed(0), r.workingTakeHome.toFixed(0), r.spSelf.toFixed(0), isCouple ? r.spPart.toFixed(0) : '0', r.netDrawdown.toFixed(0), r.drawdownPensions.toFixed(0), r.harvested.toFixed(0), r.taxPaid.toFixed(0), (r.cgtPaid || 0).toFixed(0), (r.realisedGains || 0).toFixed(0), r.pensions.toFixed(0), r.isas.toFixed(0), r.other.toFixed(0), r.cash.toFixed(0), r.totalCombined.toFixed(0), r.preNmpaLiquid.toFixed(0), r.unmetDemand.toFixed(0), r.preNmpaInsolvent ? 'Pre-SIPP access gap' : r.unmetDemand > E.FAIL_TOLERANCE ? 'Shortfall' : 'Solvent']);
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
     const link = document.createElement('a'); link.setAttribute('href', encodeURI(csvContent)); link.setAttribute('download', `retirement_audit_${new Date().toISOString().slice(0, 10)}.csv`);
     document.body.appendChild(link); link.click(); link.remove();
@@ -1903,7 +2297,7 @@ export default function App() {
       const rateAt = (spend) => { let s = 0; for (const zs of paths) if (E.runTrial(ctx, zs, spend).survived) s++; return (s / SEARCH_TRIALS) * 100; };
       let low = 0, result;
       if (rateAt(0) < targetConfidence) {
-        result = { spend: 0, note: 'Even zero spending fails the target — check the pre-access gap, one-off costs or the bequest floor.' };
+        result = { spend: 0, note: 'Even zero spending fails the target — check the pre-SIPP access gap, one-off costs or the bequest floor.' };
       } else {
         let high = Math.max(20000, ctx.targetSpend * 2, 150000), guard = 0;
         while (rateAt(high) >= targetConfidence && guard++ < 8) { low = high; high *= 2; }
@@ -1921,9 +2315,56 @@ export default function App() {
     } finally { setIsOptimizing(false); setSimProgress(null); }
   };
 
+  // ------------------------------------------------------------ decumulation policy auto-pick
+  // Every policy combination is scored on the same seed (common random numbers), so the differences
+  // between them are far more reliable than each one's absolute sampling error.
+  const POLICY_SHORT = { 'Bracket Fill Basic': 'Tax Smoothing', 'Bracket Fill': 'UK FIRE Bracket Fill', 'Sequential': 'Sequential' };
+  const policyRowLabel = (c) => `${POLICY_SHORT[c.decumulationPolicy] || c.decumulationPolicy} · ${c.drawdownStrategy === 'Full 25% Lump Sum' ? 'Lump Sum' : 'Phased'}${c.harvestApplies ? (c.harvestPersonalAllowance ? ' · harvest on' : ' · harvest off') : ''}`;
+  // nothing to decumulate means every policy scores identically, so the sweep would be meaningless
+  const policySweepReady = useMemo(() => {
+    const funded = (ctx.accounts || []).reduce((s, a) => s + a.balance + a.contrib, 0);
+    return funded > 0 && ctx.targetSpend > 0;
+  }, [ctx]);
+
+  const handleFindBestPolicy = async () => {
+    setIsPolicySearching(true); setPolicyResults(null);
+    setPolicyProgress({ label: 'Preparing policy combinations…', value: 0 });
+    await tick();
+    try {
+      const candidates = E.buildPolicyCandidates(plan);
+      const out = [];
+      for (let i = 0; i < candidates.length; i++) {
+        const c = candidates[i];
+        const label = policyRowLabel(c);
+        setPolicyProgress({ label: `Testing ${i + 1}/${candidates.length}: ${label}`, value: i / candidates.length });
+        await tick();
+        // resolve MPAA per candidate: the policies differ in when taxable pension income starts
+        const cctx = E.buildContext(E.resolveMpaa(c.planState));
+        const stats = await runMonteCarloAsync(cctx, {
+          trials: TOURNAMENT_TRIALS, seed: mcSeed,
+          onProgress: (f) => setPolicyProgress({ label: `Testing ${i + 1}/${candidates.length}: ${label}`, value: (i + f) / candidates.length })
+        });
+        out.push({ ...c, label, stats });
+      }
+      const best = E.pickBest(out);
+      setPlan(prev => ({
+        ...prev,
+        spending: { ...(prev.spending || {}), decumulationPolicy: best.decumulationPolicy, drawdownStrategy: best.drawdownStrategy },
+        config: { ...(prev.config || {}), harvestPersonalAllowance: best.harvestPersonalAllowance }
+      }));
+      const rows = [...out].sort((a, b) =>
+        (a.id === best.id ? -1 : b.id === best.id ? 1 : 0) ||
+        (b.stats.successRate - a.stats.successRate) ||
+        (b.stats.p10Terminal - a.stats.p10Terminal) ||
+        (b.stats.medianTerminal - a.stats.medianTerminal));
+      setPolicyResults({ rows, bestId: best.id, seed: mcSeed, trials: TOURNAMENT_TRIALS });
+      flash(`Applied "${best.label}" — highest survival of ${candidates.length} policy combinations`, 4000);
+    } finally { setIsPolicySearching(false); setPolicyProgress(null); }
+  };
+
   const displayedAccounts = isCouple ? (plan?.accounts || []) : (plan?.accounts || []).filter(a => a.owner === 'Myself');
   const tabBtn = (id, Icon, label, accent = 'blue') => (
-    <button key={id} onClick={() => setActiveTab(id)} className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${activeTab === id ? (accent === 'indigo' ? 'bg-white text-indigo-600 shadow-xs' : 'bg-white text-blue-600 shadow-xs') : 'text-slate-600 hover:text-slate-900'}`}>
+    <button key={id} onClick={() => setActiveTab(id)} className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${activeTab === id ? (accent === 'indigo' ? 'bg-surface text-indigo-600 shadow-xs' : 'bg-surface text-blue-600 shadow-xs') : 'text-slate-600 hover:text-slate-900'}`}>
       <Icon className="w-3.5 h-3.5" /> {label}
     </button>
   );
@@ -1934,45 +2375,68 @@ export default function App() {
       <text y={y + 14} textAnchor="middle" fill={textColor} fontSize="10" fontWeight="bold">{label} ({shownAge})</text>
     </g>
   ) : null;
+  const mp = MARKER_PALETTE[theme];
+  const cp = CHART_PALETTE[theme];
+  const themedSeries = useMemo(() => SERIES_CONFIG.map(s => ({ ...s, color: s.colors[theme] })), [theme]);
   const markers = (scale) => (
     <>
-      {ageMarker(ctx.owners[0].retireAge, 'Retire M', '#f59e0b', '#fef3c7', '#fde68a', '#b45309', 10, scale)}
-      {isCouple && ageMarker(ctx.owners[1].retireAge + (currentAge - ctx.agePart0), 'Retire P', '#d97706', '#fef3c7', '#fde68a', '#b45309', 32, scale, ctx.owners[1].retireAge)}
-      {ageMarker(nmpa, 'NMPA', '#0284c7', '#e0f2fe', '#bae6fd', '#0369a1', 54, scale)}
-      {ageMarker(ctx.spa, 'State Pen', '#059669', '#d1fae5', '#a7f3d0', '#065f46', 76, scale)}
+      {ageMarker(ctx.owners[0].retireAge, 'Retire M', mp.retireSelf.line, mp.retireSelf.fill, mp.retireSelf.stroke, mp.retireSelf.text, 10, scale)}
+      {isCouple && ageMarker(ctx.owners[1].retireAge + (currentAge - ctx.agePart0), 'Retire P', mp.retirePart.line, mp.retirePart.fill, mp.retirePart.stroke, mp.retirePart.text, 32, scale, ctx.owners[1].retireAge)}
+      {ageMarker(nmpa, 'NMPA', mp.nmpa.line, mp.nmpa.fill, mp.nmpa.stroke, mp.nmpa.text, 54, scale)}
+      {ageMarker(ctx.spa, 'State Pen', mp.statePension.line, mp.statePension.fill, mp.statePension.stroke, mp.statePension.text, 76, scale)}
     </>
   );
 
+
+  const themeOptions = [
+    { id: 'classic', Icon: Monitor, title: 'Classic theme (original look)' },
+    { id: 'light', Icon: Sun, title: 'Riviera Ledger (light)' },
+    { id: 'dark', Icon: Moon, title: 'Control Room (dark)' },
+  ];
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 p-4 sm:p-6 lg:p-8 font-sans">
       <div className="max-w-7xl mx-auto space-y-6">
 
         {/* Header Bar */}
-        <div className="bg-white border border-slate-200/90 rounded-2xl p-5 shadow-xs flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-          <div>
-            <div className="flex items-center gap-2.5">
-              <div className="p-2 bg-blue-50 text-blue-600 rounded-xl border border-blue-100"><TrendingUp className="w-5 h-5" /></div>
-              <h1 className="text-xl font-bold tracking-tight text-slate-900">Retirement Planning Studio</h1>
-              <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 font-semibold border border-blue-100">{APP_VERSION}</span>
+        <div className="bg-surface border border-slate-200/90 rounded-2xl p-5 shadow-xs">
+          <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+            <div>
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-blue-50 text-blue-600 rounded-xl border border-blue-100"><TrendingUp className="w-5 h-5" /></div>
+                <h1 className="text-xl font-bold tracking-tight text-slate-900 font-display italic">Monte-Carlo Retirement Planner</h1>
+                <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 font-semibold border border-blue-100">{APP_VERSION}</span>
+              </div>
+              <p className="text-xs text-slate-500 mt-1 max-w-3xl leading-relaxed">
+                UK multi-wrapper drawdown model, Monte Carlo &amp; historical backtesting. <strong className="text-slate-700 font-semibold">For educational &amp; illustrative purposes only — this is not financial advice.</strong> Please complete <span className="font-semibold text-blue-700">Plan Inputs</span> first; Config changes are optional.
+              </p>
             </div>
-            <p className="text-xs text-slate-500 mt-1 max-w-3xl leading-relaxed">
-              UK multi-wrapper drawdown model, Monte Carlo &amp; historical backtesting. <strong className="text-slate-700 font-semibold">For educational &amp; illustrative purposes only — this is not financial advice.</strong> Please complete <span className="font-semibold text-blue-700">Plan Inputs</span> first; Config changes are optional.
-            </p>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex items-center gap-1 bg-slate-100 p-1.5 rounded-xl border border-slate-200/80 flex-wrap">
+                {tabBtn('inputs', Sliders, 'Plan Inputs')}
+                {tabBtn('config', Settings, 'Config & Assumptions')}
+                {tabBtn('trajectory', Layers, 'Portfolio Trajectory')}
+                {tabBtn('simulation', Dices, 'Monte Carlo Simulation', 'indigo')}
+                {tabBtn('historical', History, 'Historical Backtest', 'indigo')}
+                {tabBtn('audit', Table, 'Audit Data Table')}
+                {tabBtn('docs', BookOpen, 'Documentation')}
+              </div>
+              <div className="flex items-center gap-0.5 bg-slate-100 p-1 rounded-xl border border-slate-200/80">
+                {themeOptions.map(({ id, Icon, title }) => (
+                  <button key={id} type="button" onClick={() => setTheme(id)} title={title}
+                    className={`p-1.5 rounded-lg transition-all cursor-pointer ${theme === id ? 'bg-surface text-indigo-600 shadow-xs' : 'text-slate-500 hover:text-slate-800'}`}>
+                    <Icon className="w-4 h-4" />
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
-          <div className="flex items-center gap-1 bg-slate-100 p-1.5 rounded-xl border border-slate-200/80 flex-wrap">
-            {tabBtn('inputs', Sliders, 'Plan Inputs')}
-            {tabBtn('config', Settings, 'Config & Assumptions')}
-            {tabBtn('trajectory', Layers, 'Portfolio Trajectory')}
-            {tabBtn('simulation', Dices, 'Monte Carlo Simulation', 'indigo')}
-            {tabBtn('historical', History, 'Historical Backtest', 'indigo')}
-            {tabBtn('audit', Table, 'Audit Data Table')}
-            {tabBtn('docs', BookOpen, 'Documentation')}
-          </div>
+          <div className="h-px bg-indigo-600/60 mt-4" />
+          <div className="h-px bg-indigo-600/25 mt-[3px]" />
         </div>
 
         {/* Scenario Toolbar */}
-        <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
+        <div className="bg-surface border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3 flex-wrap">
             <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700"><Bookmark className="w-4 h-4 text-blue-600" /><span>Active Scenario:</span></div>
             <div className="flex items-center gap-1.5">
@@ -1985,7 +2449,7 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-2 flex-wrap ml-auto">
-            <input type="text" placeholder="Scenario name (optional)" value={scenarioNameInput} onChange={(e) => setScenarioNameInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleSaveScenario(); }} className="p-1.5 px-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 w-48 sm:w-56" />
+            <input type="text" placeholder="Scenario name (optional)" value={scenarioNameInput} onChange={(e) => setScenarioNameInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleSaveScenario(); }} className="p-1.5 px-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium text-slate-900 placeholder:text-slate-400 focus:bg-surface focus:outline-none focus:ring-2 focus:ring-blue-500 w-48 sm:w-56" />
             <button onClick={handleSaveScenario} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95"><Save className="w-3.5 h-3.5" /> Save</button>
             <button onClick={handleSaveAsNewScenario} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all border border-slate-200 cursor-pointer"><Plus className="w-3.5 h-3.5 text-slate-600" /> Save as New Scenario</button>
             {saveSuccessMsg && <span className="text-xs font-bold text-emerald-700 flex items-center gap-1 bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-200"><Check className="w-3 h-3 text-emerald-600" /> {saveSuccessMsg}</span>}
@@ -1997,7 +2461,7 @@ export default function App() {
         {/* TAB 1: PLAN INPUTS */}
         {activeTab === 'inputs' && (
           <div className="space-y-6">
-            <div className="flex flex-wrap items-center justify-between gap-3 bg-white border border-slate-200/90 p-4 rounded-2xl shadow-xs">
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-surface border border-slate-200/90 p-4 rounded-2xl shadow-xs">
               <div>
                 <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider">User Inputs &amp; Wrapper Portfolios</h2>
                 <p className="text-xs text-slate-500">Press <kbd className="px-1.5 py-0.5 bg-slate-100 border border-slate-300 rounded text-[10px] font-mono">Tab</kbd> to move between fields. All amounts are in today's money (real terms).</p>
@@ -2011,15 +2475,15 @@ export default function App() {
             </div>
 
             {/* Demographics & Targets */}
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Users className="w-4 h-4 text-blue-600" /> 1. Demographics, Salaries &amp; Retirement Targets</h3>
                   <span className="text-xs text-slate-500">Choose whether this plan is for an individual or a couple.</span>
                 </div>
                 <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200 text-xs">
-                  <button type="button" onClick={() => updateDemographics('planningMode', 'single')} className={`px-3 py-1 rounded-lg font-bold transition-all cursor-pointer ${!isCouple ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>Single</button>
-                  <button type="button" onClick={() => updateDemographics('planningMode', 'couple')} className={`px-3 py-1 rounded-lg font-bold transition-all cursor-pointer ${isCouple ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>With Partner</button>
+                  <button type="button" onClick={() => updateDemographics('planningMode', 'single')} className={`px-3 py-1 rounded-lg font-bold transition-all cursor-pointer ${!isCouple ? 'bg-surface text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>Single</button>
+                  <button type="button" onClick={() => updateDemographics('planningMode', 'couple')} className={`px-3 py-1 rounded-lg font-bold transition-all cursor-pointer ${isCouple ? 'bg-surface text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>With Partner</button>
                 </div>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
@@ -2056,10 +2520,51 @@ export default function App() {
                   <div><label className="text-slate-600 font-semibold block mb-1">Taper 2 reduction (%)</label><input type="number" min="0" max="100" step="1" placeholder="e.g. 10" onFocus={handleFocus} value={plan?.spending?.taper2Rate ?? ''} onChange={(e) => updateSpending('taper2Rate', e.target.value)} className={inputCls} /></div>
                 </div>
               </div>
+
+              {/* Advanced: optional figures most plans can leave blank */}
+              <div className="pt-3 border-t border-slate-100">
+                <button type="button" onClick={() => setShowAdvanced(v => !v)} className="text-[11px] font-bold text-slate-600 hover:text-slate-900 uppercase tracking-wider flex items-center gap-1.5 cursor-pointer">
+                  <Settings className="w-3.5 h-3.5" /> Advanced inputs {showAdvanced ? '▾' : '▸'}
+                  <span className="font-normal normal-case tracking-normal text-slate-400">— optional; sensible defaults are assumed if left blank</span>
+                </button>
+                {showAdvanced && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-xs mt-3">
+                    {ctx.owners.map(o => (
+                      <div key={`cf_${o.key}`}>
+                        <label className="text-slate-600 font-semibold block mb-1">Pension allowance carried forward ({o.label} £)</label>
+                        <input type="number" min="0" step="1000" placeholder="blank = £0" onFocus={handleFocus}
+                          value={plan?.demographics?.[o.key === 'self' ? 'cfBroughtForwardSelf' : 'cfBroughtForwardPart'] ?? ''}
+                          onChange={(e) => updateDemographics(o.key === 'self' ? 'cfBroughtForwardSelf' : 'cfBroughtForwardPart', e.target.value)} className={inputCls} />
+                        <span className="text-[10px] text-slate-400 mt-1 block">Unused annual allowance from the last three tax years. Cannot be used once a pension is flexibly accessed, and never lifts the earnings limit.</span>
+                      </div>
+                    ))}
+                    {P.cgtEnabled && ctx.owners.map(o => (
+                      <div key={`cg_${o.key}`}>
+                        <label className="text-slate-600 font-semibold block mb-1">Capital gains already used ({o.label} £)</label>
+                        <input type="number" min="0" step="500" placeholder="blank = full allowance" onFocus={handleFocus}
+                          value={plan?.demographics?.[o.key === 'self' ? 'cgtGainsUsedSelf' : 'cgtGainsUsedPart'] ?? ''}
+                          onChange={(e) => updateDemographics(o.key === 'self' ? 'cgtGainsUsedSelf' : 'cgtGainsUsedPart', e.target.value)} className={inputCls} />
+                        <span className="text-[10px] text-slate-400 mt-1 block">Gains already realised this tax year — reduces the {formatGBP(P.cgtAnnualExempt)} exemption in the current year only.</span>
+                      </div>
+                    ))}
+                    {P.cgtEnabled && ctx.owners.map(o => {
+                      const acc = (plan?.accounts || []).find(a => a.id === o.ids.other);
+                      return (
+                        <div key={`ug_${o.key}`}>
+                          <label className="text-slate-600 font-semibold block mb-1">Other Investments — unrealised gain ({o.label} £)</label>
+                          <input type="number" min="0" step="500" placeholder="blank = balance is all cost" onFocus={handleFocus}
+                            value={acc?.unrealisedGain ?? ''} onChange={(e) => updateAccountField(o.ids.other, 'unrealisedGain', e.target.value)} className={inputCls} />
+                          <span className="text-[10px] text-slate-400 mt-1 block">How much of today's GIA balance is profit. Left blank, only future growth is taxed — which understates CGT on long-held holdings.</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Balances & Contributions */}
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Wallet className="w-4 h-4 text-blue-600" /> 2. Current Balances, Annual Contributions &amp; Risk Profiles</h3>
                 <button type="button" onClick={() => goToDoc('doc-risk-profiles')} className="text-xs text-blue-600 hover:text-blue-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer self-start sm:self-auto"><HelpCircle className="w-3.5 h-3.5" /> Guide to investment allocations &amp; fund types &rarr;</button>
@@ -2078,11 +2583,11 @@ export default function App() {
                       <tr key={acc.id} className="hover:bg-slate-50/80 transition-colors">
                         <td className="py-2.5 font-sans font-bold text-slate-800">{acc.category}{Array.isArray(acc.contribByYear) && <span className="ml-2 px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[10px] font-normal">phased schedule</span>}</td>
                         {isCouple && <td className="py-2.5 font-sans text-slate-500">{acc.owner}</td>}
-                        <td className="py-2.5"><input type="number" min="0" step="500" placeholder="0" onFocus={handleFocus} value={acc.balance} onChange={(e) => updateAccountField(acc.id, 'balance', e.target.value)} className="w-32 p-1.5 bg-slate-50 border border-slate-300 rounded font-bold text-slate-900 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" /></td>
-                        <td className="py-2.5"><input type="number" min="0" step="250" placeholder="0" onFocus={handleFocus} value={acc.contrib} onChange={(e) => { updateAccountField(acc.id, 'contrib', e.target.value); if (acc.contribByYear) setPlan(prev => ({ ...prev, accounts: prev.accounts.map(a => a.id === acc.id ? { ...a, contribByYear: undefined } : a) })); }} className={`w-28 p-1.5 bg-slate-50 border rounded text-slate-800 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none ${over ? 'border-rose-400 text-rose-700' : 'border-slate-300'}`} title={over ? 'Exceeds the annual allowance set in Config' : ''} /></td>
-                        <td className="py-2.5"><input type="number" step="0.5" placeholder="0" onFocus={handleFocus} value={acc.growth} onChange={(e) => updateAccountField(acc.id, 'growth', e.target.value)} className="w-20 p-1.5 bg-slate-50 border border-slate-300 rounded text-slate-800 focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none" /></td>
+                        <td className="py-2.5"><input type="number" min="0" step="500" placeholder="0" onFocus={handleFocus} value={acc.balance} onChange={(e) => updateAccountField(acc.id, 'balance', e.target.value)} className="w-32 p-1.5 bg-slate-50 border border-slate-300 rounded font-bold text-slate-900 focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none" /></td>
+                        <td className="py-2.5"><input type="number" min="0" step="250" placeholder="0" onFocus={handleFocus} value={acc.contrib} onChange={(e) => { updateAccountField(acc.id, 'contrib', e.target.value); if (acc.contribByYear) setPlan(prev => ({ ...prev, accounts: prev.accounts.map(a => a.id === acc.id ? { ...a, contribByYear: undefined } : a) })); }} className={`w-28 p-1.5 bg-slate-50 border rounded text-slate-800 focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none ${over ? 'border-rose-400 text-rose-700' : 'border-slate-300'}`} title={over ? 'Exceeds the annual allowance set in Config' : ''} /></td>
+                        <td className="py-2.5"><input type="number" step="0.5" placeholder="0" onFocus={handleFocus} value={acc.growth} onChange={(e) => updateAccountField(acc.id, 'growth', e.target.value)} className="w-20 p-1.5 bg-slate-50 border border-slate-300 rounded text-slate-800 focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none" /></td>
                         <td className="py-2.5">
-                          <select value={acc.risk} onChange={(e) => updateAccountField(acc.id, 'risk', e.target.value)} className="p-1.5 bg-slate-50 border border-slate-300 rounded text-xs text-blue-700 font-semibold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer">
+                          <select value={acc.risk} onChange={(e) => updateAccountField(acc.id, 'risk', e.target.value)} className="p-1.5 bg-slate-50 border border-slate-300 rounded text-xs text-blue-700 font-semibold focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer">
                             {Object.keys(activeRiskMatrix).map(rk => <option key={rk} value={rk}>{activeRiskMatrix[rk].label || rk}</option>)}
                           </select>
                         </td>
@@ -2094,11 +2599,12 @@ export default function App() {
             </div>
 
             {/* Other income */}
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex justify-between items-center">
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (e.g. DB Pension, Part-time work, Rental)</h3>
                   <span className="text-[11px] text-slate-500">Taxable streams count toward the personal allowance and tax bands; tax-free streams directly reduce net drawdown demand. Blank end age = plan end.</span>
+                  <p className="text-[11px] text-slate-500 mt-1 leading-relaxed max-w-3xl"><strong>Earnings</strong> (employment / self-employment) are taxed <em>and</em> count as relevant UK earnings, so they raise how much you can pay into a pension that year. <strong>Other taxable income</strong> — DB pensions, annuities, rent, dividends, interest — is taxed at income-tax rates but does <strong>not</strong> support pension contributions. <strong>Tax-free income</strong> is neither taxed nor counted. With no relevant earnings the pension limit is {formatGBP(P.pensionNoEarningsLimit)}/yr.</p>
                 </div>
                 <button onClick={addOtherIncome} className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer shadow-xs"><Plus className="w-3.5 h-3.5" /> Add Stream</button>
               </div>
@@ -2108,19 +2614,21 @@ export default function App() {
                 <div className="space-y-2">
                   {plan.otherIncomes.map(inc => (
                     <div key={inc.id} className="grid grid-cols-1 sm:grid-cols-6 gap-2 p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs items-center">
-                      <input type="text" onFocus={handleFocus} value={inc.name} onChange={(e) => updateListItem('otherIncomes', inc.id, { name: e.target.value })} className="p-1.5 bg-white border border-slate-300 rounded font-bold text-slate-800 sm:col-span-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="Description" />
+                      <input type="text" onFocus={handleFocus} value={inc.name} onChange={(e) => updateListItem('otherIncomes', inc.id, { name: e.target.value })} className="p-1.5 bg-surface border border-slate-300 rounded font-bold text-slate-800 sm:col-span-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="Description" />
                       {isCouple ? (
-                        <select value={inc.owner} onChange={(e) => updateListItem('otherIncomes', inc.id, { owner: e.target.value })} className="p-1.5 bg-white border border-slate-300 rounded text-slate-700"><option value="Myself">Myself</option><option value="Partner">Partner</option></select>
+                        <select value={inc.owner} onChange={(e) => updateListItem('otherIncomes', inc.id, { owner: e.target.value })} className="p-1.5 bg-surface border border-slate-300 rounded text-slate-700"><option value="Myself">Myself</option><option value="Partner">Partner</option></select>
                       ) : <div className="p-1.5 text-slate-500 font-semibold">Myself</div>}
                       <div className="flex items-center gap-1">
                         <span className="text-slate-500">Age</span>
-                        <input type="number" min="0" max="120" placeholder="Start" onFocus={handleFocus} value={inc.startAge} onChange={(e) => updateListItem('otherIncomes', inc.id, { startAge: parseInputNumber(e.target.value) })} className="w-12 p-1 bg-white border border-slate-300 rounded font-mono text-center font-bold" />
+                        <input type="number" min="0" max="120" placeholder="Start" onFocus={handleFocus} value={inc.startAge} onChange={(e) => updateListItem('otherIncomes', inc.id, { startAge: parseInputNumber(e.target.value) })} className="w-12 p-1 bg-surface border border-slate-300 rounded font-mono text-center font-bold" />
                         <span className="text-slate-400">to</span>
-                        <input type="number" min="0" max="120" placeholder="End" onFocus={handleFocus} value={inc.endAge} onChange={(e) => updateListItem('otherIncomes', inc.id, { endAge: parseInputNumber(e.target.value) })} className="w-12 p-1 bg-white border border-slate-300 rounded font-mono text-center font-bold" />
+                        <input type="number" min="0" max="120" placeholder="End" onFocus={handleFocus} value={inc.endAge} onChange={(e) => updateListItem('otherIncomes', inc.id, { endAge: parseInputNumber(e.target.value) })} className="w-12 p-1 bg-surface border border-slate-300 rounded font-mono text-center font-bold" />
                       </div>
                       <div className="flex items-center gap-2">
-                        <input type="number" min="0" step="500" placeholder="£/yr" onFocus={handleFocus} value={inc.amount} onChange={(e) => updateListItem('otherIncomes', inc.id, { amount: parseInputNumber(e.target.value) })} className="w-24 p-1.5 bg-white border border-slate-300 rounded font-mono text-emerald-700 font-bold" />
-                        <select value={inc.taxTreatment} onChange={(e) => updateListItem('otherIncomes', inc.id, { taxTreatment: e.target.value })} className="p-1.5 bg-white border border-slate-300 rounded text-xs font-semibold text-amber-700"><option value="Tax-free">Tax-free</option><option value="Taxable">Taxable</option></select>
+                        <input type="number" min="0" step="500" placeholder="£/yr" onFocus={handleFocus} value={inc.amount} onChange={(e) => updateListItem('otherIncomes', inc.id, { amount: parseInputNumber(e.target.value) })} className="w-24 p-1.5 bg-surface border border-slate-300 rounded font-mono text-emerald-700 font-bold" />
+                        <select value={inc.incomeType} onChange={(e) => updateListItem('otherIncomes', inc.id, { incomeType: e.target.value })} className="p-1.5 bg-surface border border-slate-300 rounded text-xs font-semibold text-amber-700" title="Drives both income tax and whether this counts as relevant earnings for pension contributions">
+                          {Object.keys(E.INCOME_TYPES).map(k => <option key={k} value={k}>{E.INCOME_TYPES[k].label}</option>)}
+                        </select>
                       </div>
                       <div className="flex justify-end"><button onClick={() => deleteOtherIncome(inc.id)} className="p-1 text-slate-400 hover:text-rose-600 cursor-pointer transition-colors"><Trash2 className="w-4 h-4" /></button></div>
                     </div>
@@ -2131,32 +2639,100 @@ export default function App() {
 
             {/* One-offs */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
-                <div className="flex justify-between items-center">
-                  <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Plus className="w-4 h-4 text-blue-600" /> 4. One-Off Deposits (by Wrapper)</h3>
-                  <button onClick={addOneOffContrib} className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer border border-slate-200"><Plus className="w-3.5 h-3.5" /> Add Lump Sum</button>
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+                <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2">
+                  <div>
+                    <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Plus className="w-4 h-4 text-blue-600" /> 4. One-Off Deposits (by Wrapper)</h3>
+                    <span className="text-[11px] text-slate-500 block mt-0.5">Lump sums into a chosen wrapper. Anything above that year's allowance is parked in Other Investments and fed in over later years.</span>
+                    <button type="button" onClick={() => goToDoc('doc-one-off-deposits')} className="text-[11px] text-blue-600 hover:text-blue-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer mt-0.5"><HelpCircle className="w-3.5 h-3.5" /> How one-off deposits &amp; multi-year staging work &rarr;</button>
+                  </div>
+                  <button onClick={addOneOffContrib} className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer border border-slate-200 self-start sm:self-auto"><Plus className="w-3.5 h-3.5" /> Add Lump Sum</button>
+                </div>
+                <div className="p-4 bg-indigo-50/80 border border-indigo-200 rounded-2xl text-xs text-slate-700 space-y-1.5">
+                  <div className="flex items-center gap-2 font-bold text-indigo-950 text-sm"><Info className="w-4 h-4 text-indigo-600" /> Annual Allowance Headroom &mdash; {ctx.baseYear} tax year</div>
+                  {ctx.owners.map(o => (
+                    <div key={o.key} className="flex flex-wrap gap-x-4">
+                      <span className="font-semibold">{o.label}:</span>
+                      <span>S&amp;S ISA remaining <strong>{formatGBP(E.wrapperHeadroomAtYear(ctx, o.key, 'isa', 0))}</strong>/yr</span>
+                      <span>Pension remaining <strong>{formatGBP(E.wrapperHeadroomAtYear(ctx, o.key, 'pen', 0))}</strong>/yr</span>
+                    </div>
+                  ))}
+                  <p className="text-slate-500 text-[11px] leading-relaxed">A one-off deposit that exceeds remaining headroom is auto-staged: the allowed amount deposits now, the rest parks in Other Investments and drip-feeds into the target wrapper as future years' allowance opens up.</p>
+                  <p className="text-slate-500 text-[11px] leading-relaxed">These are <strong>this year's</strong> figures. Headroom changes in later years as regular contributions escalate, and again once contributions stop at retirement — each deposit below shows the headroom for its own year.</p>
                 </div>
                 {(plan?.oneOffContributions || []).length === 0 ? (
                   <div className="text-xs text-slate-400 italic p-3 bg-slate-50 border border-slate-200 rounded-xl">No one-off contributions scheduled.</div>
                 ) : (
                   <div className="space-y-2">
-                    {plan.oneOffContributions.map(c => (
-                      <div key={c.id} className="flex flex-wrap items-center gap-2 p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs">
-                        <input type="date" value={c.date || (c.year ? `${c.year}-01-01` : '')} onChange={(e) => { const d = e.target.value; updateListItem('oneOffContributions', c.id, { date: d, year: parseInt(d.slice(0, 4)) || '' }); }} className="p-1 bg-white border border-slate-300 rounded font-mono text-slate-800 text-xs" />
-                        {isCouple ? (
-                          <select value={c.owner} onChange={(e) => updateListItem('oneOffContributions', c.id, { owner: e.target.value })} className="p-1 bg-white border border-slate-300 rounded text-slate-700"><option value="Myself">Myself</option><option value="Partner">Partner</option></select>
-                        ) : <span className="text-slate-500 font-semibold px-1">Myself</span>}
-                        <select value={c.category} onChange={(e) => updateListItem('oneOffContributions', c.id, { category: e.target.value })} className="p-1 bg-white border border-slate-300 rounded text-blue-700 font-semibold">
-                          {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
-                        </select>
-                        <input type="number" min="0" step="1000" placeholder="Amount (£)" onFocus={handleFocus} value={c.amount} onChange={(e) => updateListItem('oneOffContributions', c.id, { amount: parseInputNumber(e.target.value) })} className="w-24 p-1 bg-white border border-slate-300 rounded font-mono text-emerald-700 font-bold" />
-                        <button onClick={() => deleteOneOffContrib(c.id)} className="p-1 ml-auto text-slate-400 hover:text-rose-600 cursor-pointer transition-colors"><Trash2 className="w-4 h-4" /></button>
-                      </div>
-                    ))}
+                    {plan.oneOffContributions.map(c => {
+                      const st = ctx.oneOffStaging.get(c.id);
+                      const isExpanded = expandedOneOff.has(c.id);
+                      return (
+                        <div key={c.id} className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <input type="date" value={c.date || (c.year ? `${c.year}-01-01` : '')} onChange={(e) => { const d = e.target.value; updateListItem('oneOffContributions', c.id, { date: d, year: parseInt(d.slice(0, 4)) || '' }); }} className="p-1 bg-surface border border-slate-300 rounded font-mono text-slate-800 text-xs" />
+                            {isCouple ? (
+                              <select value={c.owner} onChange={(e) => updateListItem('oneOffContributions', c.id, { owner: e.target.value })} className="p-1 bg-surface border border-slate-300 rounded text-slate-700"><option value="Myself">Myself</option><option value="Partner">Partner</option></select>
+                            ) : <span className="text-slate-500 font-semibold px-1">Myself</span>}
+                            <div className="flex flex-col gap-0.5">
+                              <span className="text-[9px] text-slate-400 leading-none">New capital or internal transfer?</span>
+                              <select value={c.transferredFrom} onChange={(e) => updateListItem('oneOffContributions', c.id, { transferredFrom: e.target.value })} className="p-1 bg-surface border border-slate-300 rounded text-slate-700" title="Transferred from">
+                                <option value="External">External (New Capital)</option>
+                                {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
+                              </select>
+                            </div>
+                            <div className="flex flex-col gap-0.5">
+                              <span className="text-[9px] text-slate-400 leading-none">Funding destination</span>
+                              <select value={c.category} onChange={(e) => { const category = e.target.value; const patch = { category }; if (c.stagedTargetWrapper === c.category) patch.stagedTargetWrapper = category; updateListItem('oneOffContributions', c.id, patch); }} className="p-1 bg-surface border border-slate-300 rounded text-blue-700 font-semibold">
+                                {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
+                              </select>
+                            </div>
+                            <input type="number" min="0" step="1000" placeholder="Amount (£)" onFocus={handleFocus} value={c.amount} onChange={(e) => updateListItem('oneOffContributions', c.id, { amount: parseInputNumber(e.target.value) })} className="w-24 p-1 bg-surface border border-slate-300 rounded font-mono text-emerald-700 font-bold" />
+                            {st && !st.direct && (
+                              <button onClick={() => toggleOneOffExpand(c.id)} className="p-1 text-amber-600 hover:text-amber-800 cursor-pointer transition-colors" title="Staging schedule"><Settings className="w-4 h-4" /></button>
+                            )}
+                            <button onClick={() => deleteOneOffContrib(c.id)} className="p-1 ml-auto text-slate-400 hover:text-rose-600 cursor-pointer transition-colors"><Trash2 className="w-4 h-4" /></button>
+                          </div>
+                          {st && (
+                            <div className="flex flex-wrap items-center gap-2">
+                              {st.direct ? (
+                                <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded font-sans text-[10px] font-bold">Direct Deposit (£{Math.round(st.amount).toLocaleString()} within headroom)</span>
+                              ) : (
+                                <span className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded font-sans text-[10px] font-bold">Staged (Option A): £{Math.round(st.H0).toLocaleString()} now &rarr; {c.category}, £{Math.round(st.surplus0).toLocaleString()} parked in Other Investments</span>
+                              )}
+                              <span className="text-slate-500 font-sans text-[10px]">
+                                {Number.isFinite(st.yearHeadroom)
+                                  ? `${c.category} headroom in ${c.year}: ${formatGBP(st.yearHeadroom)}`
+                                  : `${c.category} has no annual limit`}
+                              </span>
+                            </div>
+                          )}
+                          {st && !st.direct && isExpanded && (
+                            <div className="w-full p-2.5 bg-surface border border-amber-200 rounded-lg text-[11px] space-y-1.5">
+                              <div className="flex items-center gap-2">
+                                <span className="font-semibold text-slate-600">Staged destination:</span>
+                                <select value={c.stagedTargetWrapper} onChange={(e) => updateListItem('oneOffContributions', c.id, { stagedTargetWrapper: e.target.value })} className="p-1 bg-surface border border-slate-300 rounded text-slate-700">
+                                  {Object.values(E.CATEGORY_LABEL).map(l => <option key={l} value={l}>{l}</option>)}
+                                </select>
+                              </div>
+                              <div className="space-y-0.5 text-slate-600">
+                                <div>Year {c.year}: £{Math.round(st.H0).toLocaleString()} direct to {c.category} + £{Math.round(st.surplus0).toLocaleString()} parked in Other Investments</div>
+                                {st.tranches.map((tr, i) => (
+                                  <div key={i}>Year {tr.year}: £{Math.round(tr.amount).toLocaleString()} transferred to {c.stagedTargetWrapper}</div>
+                                ))}
+                                {st.unresolvedRemainder > 0 && (
+                                  <div className="text-amber-700">£{Math.round(st.unresolvedRemainder).toLocaleString()} remains parked in Other Investments beyond the plan horizon.</div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
-              <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
                 <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2">
                   <div>
                     <h3 className="text-xs font-bold text-rose-700 uppercase tracking-wider flex items-center gap-2"><Trash2 className="w-4 h-4 text-rose-600" /> 5. One-Off Capital Costs</h3>
@@ -2170,9 +2746,9 @@ export default function App() {
                   <div className="space-y-2">
                     {plan.oneOffCosts.map(cost => (
                       <div key={cost.id} className="flex flex-wrap items-center gap-2 p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs">
-                        <input type="date" value={cost.date || (cost.year ? `${cost.year}-01-01` : '')} onChange={(e) => { const d = e.target.value; updateListItem('oneOffCosts', cost.id, { date: d, year: parseInt(d.slice(0, 4)) || '' }); }} className="p-1 bg-white border border-slate-300 rounded font-mono text-slate-800 text-xs" />
-                        <input type="text" onFocus={handleFocus} value={cost.desc} onChange={(e) => updateListItem('oneOffCosts', cost.id, { desc: e.target.value })} className="p-1 bg-white border border-slate-300 rounded text-slate-700 flex-1" placeholder="Purpose" />
-                        <input type="number" min="0" step="1000" placeholder="Amount (£)" onFocus={handleFocus} value={cost.amount} onChange={(e) => updateListItem('oneOffCosts', cost.id, { amount: parseInputNumber(e.target.value) })} className="w-24 p-1 bg-white border border-slate-300 rounded font-mono text-rose-700 font-bold" />
+                        <input type="date" value={cost.date || (cost.year ? `${cost.year}-01-01` : '')} onChange={(e) => { const d = e.target.value; updateListItem('oneOffCosts', cost.id, { date: d, year: parseInt(d.slice(0, 4)) || '' }); }} className="p-1 bg-surface border border-slate-300 rounded font-mono text-slate-800 text-xs" />
+                        <input type="text" onFocus={handleFocus} value={cost.desc} onChange={(e) => updateListItem('oneOffCosts', cost.id, { desc: e.target.value })} className="p-1 bg-surface border border-slate-300 rounded text-slate-700 flex-1" placeholder="Purpose" />
+                        <input type="number" min="0" step="1000" placeholder="Amount (£)" onFocus={handleFocus} value={cost.amount} onChange={(e) => updateListItem('oneOffCosts', cost.id, { amount: parseInputNumber(e.target.value) })} className="w-24 p-1 bg-surface border border-slate-300 rounded font-mono text-rose-700 font-bold" />
                         <button onClick={() => deleteOneOffCost(cost.id)} className="p-1 text-slate-400 hover:text-rose-600 cursor-pointer transition-colors"><Trash2 className="w-4 h-4" /></button>
                       </div>
                     ))}
@@ -2186,13 +2762,26 @@ export default function App() {
         {/* TAB 2: CONFIG */}
         {activeTab === 'config' && (
           <div className="space-y-6">
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
-              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Sliders className="w-4 h-4 text-blue-600" /> Decumulation &amp; Pension Withdrawal Methodology</h2>
-              <p className="text-xs text-slate-500">Select how withdrawals are ordered across tax wrappers and how pensions are crystallized. <button type="button" onClick={() => goToDoc('doc-decumulation')} className="text-blue-600 hover:underline font-semibold cursor-pointer">What the evidence says &rarr;</button></p>
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Sliders className="w-4 h-4 text-blue-600" /> Decumulation &amp; Pension Withdrawal Methodology</h2>
+                  <p className="text-xs text-slate-500 mt-1">Select how withdrawals are ordered across tax wrappers and how pensions are crystallized. <button type="button" onClick={() => goToDoc('doc-decumulation')} className="text-blue-600 hover:underline font-semibold cursor-pointer">What the evidence says &rarr;</button></p>
+                </div>
+                <div className="shrink-0">
+                  <button type="button" onClick={handleFindBestPolicy} disabled={isPolicySearching || !policySweepReady}
+                    className="px-3.5 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 dark:from-[#2C5C8F] dark:to-[#A9781F] dark:hover:from-[#204568] text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed">
+                    <Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300 dark:fill-[#FCD34D] dark:text-[#FCD34D]" />
+                    {isPolicySearching ? 'Searching…' : '⚡ Auto-Pick Best Policy'}
+                  </button>
+                  {!policySweepReady && <span className="text-[10px] text-slate-400 mt-1 block text-right max-w-[15rem]">Add balances or contributions and a living spend first — with nothing to draw down every policy scores the same.</span>}
+                </div>
+              </div>
+              {policyProgress && <ProgressBar value={policyProgress.value} label={policyProgress.label} />}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs pt-1">
                 <div>
                   <label className="text-slate-600 font-semibold block mb-1">Decumulation Policy</label>
-                  <select value={plan?.spending?.decumulationPolicy} onChange={(e) => updateSpending('decumulationPolicy', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs text-blue-700 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer">
+                  <select value={plan?.spending?.decumulationPolicy} onChange={(e) => updateSpending('decumulationPolicy', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs text-blue-700 font-bold focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer">
                     {Object.entries(E.DECUMULATION_POLICIES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
                   </select>
                   <span className="text-[10px] text-slate-400 mt-1 block">
@@ -2203,7 +2792,7 @@ export default function App() {
                 </div>
                 <div>
                   <label className="text-slate-600 font-semibold block mb-1">Pension Drawdown Strategy</label>
-                  <select value={plan?.spending?.drawdownStrategy} onChange={(e) => updateSpending('drawdownStrategy', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs text-blue-700 font-bold focus:bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer">
+                  <select value={plan?.spending?.drawdownStrategy} onChange={(e) => updateSpending('drawdownStrategy', e.target.value)} className="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs text-blue-700 font-bold focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer">
                     <option value="Phased Drawdown">Phased Drawdown (Ongoing {Math.round(P.pclsProp * 100)}% tax-free proportion)</option>
                     <option value="Full 25% Lump Sum">Full Lump Sum (Upfront statutory PCLS into Cash)</option>
                   </select>
@@ -2217,10 +2806,48 @@ export default function App() {
                   </label>
                   <span className="text-[10px] text-slate-400 mt-1 block">Applies to the two bracket-fill policies once retired and past the access age.</span>
                 </div>
+                <div>
+                  <label className="text-slate-600 font-semibold block mb-1">Capital gains tax on the GIA</label>
+                  <label className="flex items-center gap-2 p-2 bg-slate-50 border border-slate-300 rounded-lg cursor-pointer">
+                    <input type="checkbox" checked={!!plan?.config?.cgtEnabled} onChange={(e) => updateConfig('cgtEnabled', e.target.checked)} className="accent-blue-600" />
+                    <span className="text-slate-700 font-semibold">Tax gains realised when Other Investments are sold, using the cost basis of each holding.</span>
+                  </label>
+                  <span className="text-[10px] text-slate-400 mt-1 block">Off treats the GIA as tax-free. Gains are wiped on death, so nothing is charged at the terminal age.</span>
+                  <button type="button" onClick={() => goToDoc('doc-cgt')} className="text-[11px] text-blue-600 hover:text-blue-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer mt-1"><HelpCircle className="w-3.5 h-3.5" /> How capital gains are tracked &amp; taxed &rarr;</button>
+                </div>
               </div>
+
+              {policyResults && (
+                <div className="pt-3 border-t border-slate-100 space-y-2">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5"><Trophy className="w-3.5 h-3.5 text-emerald-600" /> Policy search results — winner applied above</h3>
+                    <span className="text-[10px] text-slate-400">{policyResults.rows.length} combinations · {policyResults.trials.toLocaleString()} paths each · seed {policyResults.seed} · ranked by survival, ties within 0.5 points broken by the 10th-percentile pot</span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-[11px] border-collapse">
+                      <thead><tr className="border-b border-slate-200 text-slate-500 font-semibold"><th className="pb-1.5 pr-3">Policy combination</th><th className="pb-1.5 pr-3">Survival</th><th className="pb-1.5 pr-3">Pre-SIPP access failures</th><th className="pb-1.5 pr-3">10th %ile pot</th><th className="pb-1.5">Median pot</th></tr></thead>
+                      <tbody className="divide-y divide-slate-100 font-mono">
+                        {policyResults.rows.map(r => {
+                          const won = r.id === policyResults.bestId;
+                          return (
+                            <tr key={r.id} className={won ? 'bg-emerald-50/70' : 'hover:bg-slate-50/80'}>
+                              <td className={`py-1.5 pr-3 font-sans ${won ? 'font-bold text-emerald-900' : 'text-slate-700'}`}>{won && <Trophy className="w-3 h-3 text-emerald-600 inline mr-1 -mt-0.5" />}{r.label}</td>
+                              <td className={`py-1.5 pr-3 font-bold ${r.stats.successRate >= 90 ? 'text-emerald-700' : r.stats.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}`}>{r.stats.successRate.toFixed(1)}%</td>
+                              <td className={`py-1.5 pr-3 ${r.stats.preNmpaFailRate > 5 ? 'text-rose-600 font-bold' : 'text-slate-600'}`}>{r.stats.preNmpaFailRate.toFixed(1)}%</td>
+                              <td className="py-1.5 pr-3 text-slate-700">{fmtK(r.stats.p10Terminal)}</td>
+                              <td className="py-1.5 text-slate-700">{fmtK(r.stats.medianTerminal)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <p className="text-[10px] text-slate-400">Every combination is scored on the same market paths, so differences between rows are more reliable than each row's own sampling error. Changing any plan input invalidates these results — re-run to refresh.</p>
+                </div>
+              )}
             </div>
 
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Settings className="w-4 h-4 text-blue-600" /> Global Economic &amp; Calculation Configuration</h2>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs pt-3">
                 <div><label className="text-slate-600 font-semibold block mb-1">Valuation Date (Today)</label><input type="date" value={plan?.config?.valuationDate ?? ''} onChange={(e) => updateConfig('valuationDate', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Year 0 flows are pro-rated to the {(ctx.yf * 100).toFixed(0)}% of the year remaining.</span></div>
@@ -2228,17 +2855,17 @@ export default function App() {
                 <div><label className="text-slate-600 font-semibold block mb-1">Personal Pension Access Age (NMPA)</label><input type="number" min="0" max="120" placeholder="58" onFocus={handleFocus} value={plan?.demographics?.privatePensionAge ?? ''} onChange={(e) => updateDemographics('privatePensionAge', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Statutory NMPA is 55 today and 57 from April 2028.</span></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">State Pension Start Age</label><input type="number" min="0" max="120" placeholder="68" onFocus={handleFocus} value={plan?.demographics?.statePensionAge ?? ''} onChange={(e) => updateDemographics('statePensionAge', e.target.value)} className={inputCls} /></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">Cash buffer kept from surplus income (months)</label><input type="number" min="0" step="1" placeholder="6" onFocus={handleFocus} value={plan?.config?.cashBufferMonths ?? ''} onChange={(e) => updateConfig('cashBufferMonths', e.target.value)} className={inputCls} /></div>
-                <div><label className="text-slate-600 font-semibold block mb-1">Tournament bridge safety margin (%)</label><input type="number" min="0" step="5" placeholder="30" onFocus={handleFocus} value={plan?.config?.bridgeSafetyMargin ?? ''} onChange={(e) => updateConfig('bridgeSafetyMargin', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Uplift on the pre-access reserve, assuming 0% real growth.</span></div>
+                <div><label className="text-slate-600 font-semibold block mb-1">Tournament bridge safety margin (%)</label><input type="number" min="0" step="5" placeholder="30" onFocus={handleFocus} value={plan?.config?.bridgeSafetyMargin ?? ''} onChange={(e) => updateConfig('bridgeSafetyMargin', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Uplift on the pre-SIPP access reserve, assuming 0% real growth.</span></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">Pension death-tax haircut (%)</label><input type="number" min="0" max="100" step="5" placeholder="0" onFocus={handleFocus} value={plan?.config?.pensionDeathTaxRate ?? ''} onChange={(e) => updateConfig('pensionDeathTaxRate', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Applied to pension left at age {terminalAge} for the "net" pot figures only (IHT from April 2027 / beneficiary income tax).</span></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">Monte Carlo seed</label><div className="flex gap-1"><input type="number" value={mcSeed} onChange={(e) => setMcSeed(Math.max(1, parseInt(e.target.value) || 1))} className={inputCls} /><button type="button" onClick={() => setMcSeed(Math.floor(Math.random() * 1e9) + 1)} className="px-2 bg-slate-100 border border-slate-300 rounded-lg text-[11px] font-semibold cursor-pointer hover:bg-slate-200">Reseed</button></div><span className="text-[10px] text-slate-400 mt-1 block">Same seed = same market paths (reproducible, fair comparisons).</span></div>
               </div>
             </div>
 
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4 overflow-x-auto">
               <div className="flex justify-between items-center">
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">Asset Allocations, Return Matrix &amp; Volatilities (σ)</h3>
-                  <span className="text-[11px] text-slate-500">Expected real return is treated as the median (geometric) annual rate; Monte Carlo paths are log-normal around it with the stated σ, one market factor for all wrappers.</span>
+                  <span className="text-[11px] text-slate-500">Expected real return is treated as the median (geometric) annual rate; Monte Carlo paths are log-normal around it with the stated σ, one market factor for all wrappers. Default rates and volatilities are drawn from Vanguard's Capital Markets Model (VCMM).</span>
                 </div>
                 <button onClick={() => setIsEditingRisk(!isEditingRisk)} className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border ${isEditingRisk ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'}`}><Pencil className="w-3.5 h-3.5" />{isEditingRisk ? 'Done Editing' : 'Edit Matrix'}</button>
               </div>
@@ -2251,7 +2878,7 @@ export default function App() {
                       {[['real', 'text-blue-700', 0.05], ['unlucky', 'text-rose-700', 0.05], ['lucky', 'text-emerald-700', 0.05], ['nominal', 'text-purple-700', 0.05], ['volatility', 'text-amber-700', 0.5]].map(([field, color, step]) => (
                         <td key={field} className="py-2.5">
                           {isEditingRisk ? (
-                            <input type="number" step={step} min={field === 'volatility' ? 0 : undefined} onFocus={handleFocus} value={val[field] ?? ''} onChange={(e) => updateRiskField(key, field, e.target.value)} className={`w-20 p-1 bg-slate-50 border border-slate-300 rounded font-mono ${color} font-bold focus:bg-white focus:ring-1 focus:ring-blue-500`} />
+                            <input type="number" step={step} min={field === 'volatility' ? 0 : undefined} onFocus={handleFocus} value={val[field] ?? ''} onChange={(e) => updateRiskField(key, field, e.target.value)} className={`w-20 p-1 bg-slate-50 border border-slate-300 rounded font-mono ${color} font-bold focus:bg-surface focus:ring-1 focus:ring-blue-500`} />
                           ) : <span className={`${color} font-bold`}>{E.num(val[field], 0).toFixed(field === 'volatility' ? 1 : 2)}%</span>}
                         </td>
                       ))}
@@ -2261,7 +2888,7 @@ export default function App() {
               </table>
             </div>
 
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">UK Income Tax, National Insurance &amp; Pension Allowances</h3>
               <p className="text-[11px] text-slate-500">Defaults are rUK 2025/26 (frozen to April 2028). Scottish bands differ. All thresholds are held constant in real terms.</p>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs font-mono">
@@ -2269,11 +2896,22 @@ export default function App() {
                   ['personalAllowance', 'Personal Allowance (£)'], ['paTaperThreshold', 'PA Taper Threshold (£)'], ['paTaperRate', 'PA Taper Rate (% of excess)'], ['basicBandLimit', 'Higher Rate Starts At (£ income)'],
                   ['basicTaxRate', 'Basic Rate (%)'], ['higherBandLimit', 'Additional Rate Starts At (£ income)'], ['higherTaxRate', 'Higher Rate (%)'], ['additionalTaxRate', 'Additional Rate (%)'],
                   ['nicPrimaryThreshold', 'NIC Primary Threshold (£)'], ['nicUpperEarningsLimit', 'NIC Upper Earnings Limit (£)'], ['nicMainRate', 'NIC Main Rate (%)'], ['nicUpperRate', 'NIC Upper Rate (%)'],
-                  ['employerNicRate', 'Employer NIC Rate (%)'], ['employerNicPassThrough', 'Employer NIC Passed to Pension (%)'], ['pclsProportion', 'PCLS Tax-Free (%)'], ['pclsMaxCap', 'Lump Sum Allowance (£ LSA)'],
-                  ['isaAnnualAllowance', 'ISA Allowance (£/person/yr)'], ['pensionAnnualAllowance', 'Pension Annual Allowance (£/person/yr)']
+                  ['employerNicRate', 'Employer NIC Rate (%)'], ['pclsProportion', 'PCLS Tax-Free (%)'], ['pclsMaxCap', 'Lump Sum Allowance (£ LSA)'],
+                  ['isaAnnualAllowance', 'ISA Allowance (£/person/yr)'], ['pensionAnnualAllowance', 'Pension Annual Allowance (£/person/yr)'], ['pensionNoEarningsLimit', 'Pension Limit With No Earnings (£/person/yr)'], ['mpaaLimit', 'Money Purchase Annual Allowance (£/person/yr)'], ['cgtAnnualExempt', 'CGT Annual Exempt Amount (£/person/yr)'], ['cgtBasicRate', 'CGT Rate — Basic Band (%)'], ['cgtHigherRate', 'CGT Rate — Higher/Additional Band (%)']
                 ].map(([field, label]) => (
                   <div key={field}><span className="text-slate-600 font-sans font-semibold block mb-1">{label}</span><input type="number" min="0" placeholder={String(E.DEFAULT_CONFIG[field])} onFocus={handleFocus} value={plan?.config?.[field] ?? ''} onChange={(e) => updateConfig(field, e.target.value)} className={smallInputCls} /></div>
                 ))}
+              </div>
+              <div className="pt-3 border-t border-slate-100">
+                <button type="button" onClick={() => setShowAdvancedConfig(v => !v)} className="text-[11px] font-bold text-slate-600 hover:text-slate-900 uppercase tracking-wider flex items-center gap-1.5 cursor-pointer">
+                  <Settings className="w-3.5 h-3.5" /> Advanced inputs {showAdvancedConfig ? '▾' : '▸'}
+                  <span className="font-normal normal-case tracking-normal text-slate-400">— niche settings most plans leave at the default</span>
+                </button>
+                {showAdvancedConfig && (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs font-mono mt-3">
+                    <div><span className="text-slate-600 font-sans font-semibold block mb-1">Employer NIC Passed to Pension (%)</span><input type="number" min="0" placeholder={String(E.DEFAULT_CONFIG.employerNicPassThrough)} onFocus={handleFocus} value={plan?.config?.employerNicPassThrough ?? ''} onChange={(e) => updateConfig('employerNicPassThrough', e.target.value)} className={smallInputCls} /><span className="text-[10px] text-slate-400 font-sans mt-1 block">Share of the employer's NIC saving added to a salary-sacrifice contribution.</span></div>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -2288,11 +2926,11 @@ export default function App() {
               <p className="leading-relaxed"><strong>What it does:</strong> Models compound wealth paths and tax-wrapper decumulation using steady real rates of return (Expected baseline, Lucky 90th percentile, Unlucky 10th percentile). Use the Sandbox below to test contributions and salary sacrifice ratios.</p>
               <p className="text-slate-500 text-[11px] leading-relaxed"><strong>Why these figures differ from Monte Carlo:</strong> this trajectory assumes smooth, constant returns without volatility or sequence-of-returns shocks. The Monte Carlo median is centred on the same expected rate, so the gap between the two is the cost of volatility.</p>
               <p className={`text-[11px] font-semibold ${deterministicVerdict.survived ? 'text-emerald-700' : 'text-rose-700'}`}>
-                {deterministicVerdict.survived ? `Expected path survives to ${terminalAge}` : `Expected path fails at age ${deterministicVerdict.failAge} (${deterministicVerdict.failReason === 'pre-access' ? 'pre-access bridge exhausted' : deterministicVerdict.failReason === 'floor' ? 'below the bequest floor' : 'spending shortfall'})`} — lifetime income tax {formatGBP(deterministicVerdict.lifetimeTax)}.
+                {deterministicVerdict.survived ? `Expected path survives to ${terminalAge}` : `Expected path fails at age ${deterministicVerdict.failAge} (${deterministicVerdict.failReason === 'pre-access' ? 'pre-SIPP access bridge exhausted' : deterministicVerdict.failReason === 'floor' ? 'below the bequest floor' : 'spending shortfall'})`} — lifetime tax {formatGBP(deterministicVerdict.lifetimeTax)}{P.cgtEnabled ? ' (income tax + CGT)' : ''}.
               </p>
             </div>
 
-            <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
+            <div className="bg-surface border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <span className="text-xs text-slate-500 font-semibold">Active View:</span>
                 {(isCouple ? ['Combined', 'Myself', 'Partner'] : ['Combined']).map(p => (
@@ -2302,12 +2940,12 @@ export default function App() {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Expected Terminal Pot</div><div className="text-2xl font-black font-mono text-blue-600 mt-2">{formatGBP(chartDisplayData[chartDisplayData.length - 1]?.expected)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Target className="w-3.5 h-3.5 text-blue-600" /> Constant expected real growth to age {terminalAge}</div></div>
-              <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Lucky Scenario (90th %ile)</div><div className="text-2xl font-black font-mono text-emerald-600 mt-2">{formatGBP(timelineData[timelineData.length - 1]?.lucky)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><TrendingUp className="w-3.5 h-3.5 text-emerald-600" /> Constant above-average return rate</div></div>
-              <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Unlucky Scenario (10th %ile)</div><div className="text-2xl font-black font-mono text-rose-600 mt-2">{formatGBP(timelineData[timelineData.length - 1]?.unlucky)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><ShieldCheck className="w-3.5 h-3.5 text-rose-600" /> Constant below-average return rate</div></div>
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Expected Terminal Pot</div><div className="text-2xl font-black font-mono text-blue-600 mt-2">{formatGBP(chartDisplayData[chartDisplayData.length - 1]?.expected)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Target className="w-3.5 h-3.5 text-blue-600" /> Constant expected real growth to age {terminalAge}</div></div>
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Lucky Scenario (90th %ile)</div><div className="text-2xl font-black font-mono text-emerald-600 mt-2">{formatGBP(timelineData[timelineData.length - 1]?.lucky)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><TrendingUp className="w-3.5 h-3.5 text-emerald-600" /> Constant above-average return rate</div></div>
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Unlucky Scenario (10th %ile)</div><div className="text-2xl font-black font-mono text-rose-600 mt-2">{formatGBP(timelineData[timelineData.length - 1]?.unlucky)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><ShieldCheck className="w-3.5 h-3.5 text-rose-600" /> Constant below-average return rate</div></div>
             </div>
 
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                 <div>
                   <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Layers className="w-4 h-4 text-blue-600" /> Projected Portfolio Trajectory</h2>
@@ -2321,17 +2959,17 @@ export default function App() {
               <div className="relative overflow-x-auto">
                 <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="w-full h-auto select-none" onMouseLeave={() => setHoveredPoint(null)}>
                   <g transform={`translate(${margin.left}, ${margin.top})`}>
-                    {yScale.ticks(6).map((t, i) => <g key={i} transform={`translate(0, ${yScale(t)})`}><line x2={innerWidth} stroke="#f1f5f9" strokeDasharray="3,3" /><text x={-10} dy="0.32em" fill="#64748b" fontSize="10" textAnchor="end" fontFamily="monospace">£{(t / 1000).toFixed(0)}k</text></g>)}
-                    {xScale.ticks(10).map((t, i) => <g key={i} transform={`translate(${xScale(t)}, 0)`}><line y2={innerHeight} stroke="#f8fafc" /><text y={innerHeight + 20} fill="#64748b" fontSize="11" textAnchor="middle" fontFamily="monospace">{t}</text></g>)}
+                    {yScale.ticks(6).map((t, i) => <g key={i} transform={`translate(0, ${yScale(t)})`}><line x2={innerWidth} stroke={cp.gridMajor} strokeDasharray="3,3" /><text x={-10} dy="0.32em" fill={cp.axisText} fontSize="10" textAnchor="end" fontFamily="monospace">£{(t / 1000).toFixed(0)}k</text></g>)}
+                    {xScale.ticks(10).map((t, i) => <g key={i} transform={`translate(${xScale(t)}, 0)`}><line y2={innerHeight} stroke={cp.gridMinor} /><text y={innerHeight + 20} fill={cp.axisText} fontSize="11" textAnchor="middle" fontFamily="monospace">{t}</text></g>)}
                     {markers(xScale)}
-                    {SERIES_CONFIG.map(s => (activeSeries[s.id] && pathGenerators[s.id]) ? <path key={s.id} d={pathGenerators[s.id]} fill="none" stroke={s.color} strokeWidth={s.strokeWidth} strokeDasharray={s.dash} strokeLinecap="round" /> : null)}
-                    {sandboxLinePath && <path d={sandboxLinePath} fill="none" stroke="#f59e0b" strokeWidth="3.5" strokeDasharray="6,4" strokeLinecap="round" />}
+                    {themedSeries.map(s => (activeSeries[s.id] && pathGenerators[s.id]) ? <path key={s.id} d={pathGenerators[s.id]} fill="none" stroke={s.color} strokeWidth={s.strokeWidth} strokeDasharray={s.dash} strokeLinecap="round" /> : null)}
+                    {sandboxLinePath && <path d={sandboxLinePath} fill="none" stroke={cp.sandboxDash} strokeWidth="3.5" strokeDasharray="6,4" strokeLinecap="round" />}
                     <rect width={innerWidth} height={innerHeight} fill="transparent" onMouseMove={(e) => { const rect = e.currentTarget.getBoundingClientRect(); const age = Math.round(xScale.invert((e.clientX - rect.left) * (innerWidth / Math.max(1, rect.width)))); setHoveredPoint(visibleData.find(d => d.ageSelf === age) || null); }} />
-                    {hoveredPoint && <g transform={`translate(${xScale(hoveredPoint.ageSelf)}, 0)`}><line y2={innerHeight} stroke="#94a3b8" strokeWidth="1" strokeDasharray="2,2" /><circle cy={yScale(hoveredPoint.expected || 0)} r="4" fill="#2563eb" stroke="#ffffff" strokeWidth="2" /></g>}
+                    {hoveredPoint && <g transform={`translate(${xScale(hoveredPoint.ageSelf)}, 0)`}><line y2={innerHeight} stroke={cp.hoverCrosshair} strokeWidth="1" strokeDasharray="2,2" /><circle cy={yScale(hoveredPoint.expected || 0)} r="4" fill={cp.trajectoryHoverFill} stroke={cp.hoverDotStroke} strokeWidth="2" /></g>}
                   </g>
                 </svg>
                 {hoveredPoint && (
-                  <div className="absolute top-4 left-24 bg-white/95 border border-slate-200 p-3 rounded-xl shadow-lg text-xs space-y-1 backdrop-blur-md pointer-events-none">
+                  <div className="absolute top-4 left-24 bg-surface/95 border border-slate-200 p-3 rounded-xl shadow-lg text-xs space-y-1 backdrop-blur-md pointer-events-none">
                     <div className="font-bold text-slate-800 border-b border-slate-100 pb-1 flex justify-between gap-4"><span>Age {hoveredPoint.ageSelf} ({hoveredPoint.year})</span><span className="text-slate-500">Spend Demand: {formatGBP(hoveredPoint.targetSpend)}/yr</span></div>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-1 font-mono">
                       {activeSeries.expected && <div className="text-blue-600 font-bold">Projected Pot: {formatGBP(hoveredPoint.expected)}</div>}
@@ -2347,8 +2985,8 @@ export default function App() {
               </div>
               <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
                 <div className="flex flex-wrap items-center gap-2">
-                  {SERIES_CONFIG.map(s => (
-                    <button key={s.id} onClick={() => setActiveSeries(prev => ({ ...prev, [s.id]: !prev[s.id] }))} className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center gap-2 transition-all cursor-pointer border ${activeSeries[s.id] ? 'bg-slate-100 border-slate-300 text-slate-900 font-semibold' : 'bg-white border-slate-200 text-slate-400 opacity-60'}`}>
+                  {themedSeries.map(s => (
+                    <button key={s.id} onClick={() => setActiveSeries(prev => ({ ...prev, [s.id]: !prev[s.id] }))} className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center gap-2 transition-all cursor-pointer border ${activeSeries[s.id] ? 'bg-slate-100 border-slate-300 text-slate-900 font-semibold' : 'bg-surface border-slate-200 text-slate-400 opacity-60'}`}>
                       <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: s.color }} />{s.label}{activeSeries[s.id] && <Check className="w-3 h-3 text-slate-600" />}
                     </button>
                   ))}
@@ -2358,17 +2996,49 @@ export default function App() {
             </div>
 
             {/* SANDBOX */}
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-5">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-5">
               <div className="pb-3 border-b border-slate-100">
                 <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Sparkles className="w-4 h-4 text-amber-500" /> Contribution &amp; Escalation Sandbox</h3>
                 <p className="text-xs text-slate-500 mt-0.5">Test contributions, escalation rates and tournament strategies without modifying your base plan inputs.</p>
               </div>
-              <SalarySacrificeOptimizer plan={plan} ctx={ctx} onSalaryChange={(v) => updateDemographics('salarySelf', v)} onApplyToSandbox={handleApplyOptimizerToSandbox} onApplyToPlan={handleApplyOptimizerToPlan} onNavigateDocs={() => goToDoc('doc-salary-sacrifice')} />
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 pb-3 border-y border-slate-100">
-                <div><h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Wrapper Sandbox Controls</h4><span className="text-[11px] text-slate-500">Adjust individual wrappers below or reset back to your baseline plan inputs.</span></div>
+                <div><h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Wrapper Sandbox Controls</h4><span className="text-[11px] text-slate-500">Adjust retirement ages and individual wrappers below, or reset back to your baseline plan inputs.</span></div>
                 <div className="flex items-center gap-2">
                   <button onClick={handleResetSandbox} disabled={!isSandboxModified} className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all border ${isSandboxModified ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300 cursor-pointer' : 'bg-slate-50 text-slate-300 border-slate-200 cursor-not-allowed'}`}><RotateCcw className="w-3.5 h-3.5" /> Reset Sandbox</button>
-                  <button onClick={handleApplySandboxToPlan} disabled={!isSandboxModified} className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs ${isSandboxModified ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white cursor-pointer active:scale-95' : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'}`}><Check className="w-3.5 h-3.5" /> Apply to Plan Inputs</button>
+                  <button onClick={handleApplySandboxToPlan} disabled={!isSandboxModified} className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs ${isSandboxModified ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 dark:from-[#C77A2E] dark:to-[#B0631E] dark:hover:from-[#B0631E] dark:hover:to-[#8A4C17] text-white cursor-pointer active:scale-95' : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'}`}><Check className="w-3.5 h-3.5" /> Apply to Plan Inputs</button>
+                </div>
+              </div>
+              <div className="p-4 bg-slate-50/80 border border-slate-200 rounded-2xl space-y-3">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <Users className="w-4 h-4 text-slate-500" />
+                  <h5 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Retirement Age</h5>
+                  <span className="text-[11px] text-slate-500">Contributions stop and drawdown begins at this age — test retiring earlier or later.</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {ctx.owners.map(o => {
+                    const base = sandboxRetireFromPlan(plan)[o.key];
+                    const val = sandboxRetire[o.key];
+                    const changed = val !== base;
+                    const yearsToGo = Math.max(0, Math.round(val - o.age0));
+                    return (
+                      <div key={o.key} className={`p-3 rounded-xl border transition-colors ${changed ? 'bg-amber-50/60 border-amber-200' : 'bg-surface border-slate-200'}`}>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-xs font-bold text-slate-800 font-sans">{o.label}</span>
+                          {changed
+                            ? <span className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded font-sans text-[10px] font-bold">{base} &rarr; {val}</span>
+                            : <span className="text-slate-400 font-sans text-[10px]">Base: {base}</span>}
+                        </div>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <input type="number" min="0" max="120" step="1" value={val} onFocus={handleFocus} onChange={(e) => updateSandboxRetire(o.key, e.target.value)} className="w-20 p-1.5 bg-surface border border-slate-300 rounded font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500" />
+                          {[-5, -1, 1, 5].map(d => (
+                            <button key={d} onClick={() => adjustSandboxRetire(o.key, d)} className="px-1.5 py-1 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded text-[10px] font-sans font-semibold text-slate-700 cursor-pointer">{d > 0 ? '+' : ''}{d}</button>
+                          ))}
+                          <span className="text-[10px] text-slate-400 font-sans ml-auto">{yearsToGo > 0 ? `${yearsToGo} yr${yearsToGo === 1 ? '' : 's'} to go` : 'at/past current age'}</span>
+                        </div>
+                        {val < nmpa && <div className="text-[10px] text-amber-700 font-sans mt-1.5">Retires before pension access age {nmpa} — needs {Math.round(nmpa - val)} yr bridge from ISAs/GIA/cash.</div>}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
               {sandboxMetrics && (
@@ -2381,7 +3051,7 @@ export default function App() {
                   <div className={`p-4 rounded-2xl border shadow-2xs ${sandboxMetrics.retirementDelta >= 0 ? 'bg-emerald-50/70 border-emerald-200' : 'bg-rose-50/70 border-rose-200'}`}>
                     <div className="flex items-center justify-between"><span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Retirement Pot Impact</span>{sandboxMetrics.retirementDelta >= 0 ? <ArrowUpRight className="w-4 h-4 text-emerald-600" /> : <ArrowDownRight className="w-4 h-4 text-rose-600" />}</div>
                     <div className={`text-xl font-black font-mono mt-1 ${sandboxMetrics.retirementDelta >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{sandboxMetrics.retirementDelta >= 0 ? '+' : ''}{formatGBP(sandboxMetrics.retirementDelta)}</div>
-                    <span className="text-[11px] text-slate-500 block mt-0.5 font-mono">At Age {ctx.owners[0].retireAge}</span>
+                    <span className="text-[11px] text-slate-500 block mt-0.5 font-mono">{sandboxMetrics.baseRetAge === sandboxMetrics.sbRetAge ? `At Age ${sandboxMetrics.baseRetAge}` : `Age ${sandboxMetrics.baseRetAge} → ${sandboxMetrics.sbRetAge} (each at own retirement)`}</span>
                   </div>
                   <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50/70 shadow-2xs"><span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block mb-1">Cumulative Extra Invested</span><div className="text-xl font-bold font-mono text-slate-800 mt-1">{sandboxMetrics.cumulativeExtraCapital >= 0 ? '+' : ''}{formatGBP(sandboxMetrics.cumulativeExtraCapital)}</div><span className="text-[11px] text-slate-500 block mt-0.5">Total difference in deposits to retirement</span></div>
                   <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50/70 shadow-2xs"><span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block mb-1">Wealth Compounding Multiple</span><div className="text-xl font-bold font-mono text-indigo-700 mt-1">{sandboxMetrics.cumulativeExtraCapital !== 0 ? `${sandboxMetrics.multiplier.toFixed(2)}x` : '—'}</div><span className="text-[11px] text-slate-500 block mt-0.5">Terminal change per £1 of extra deposits</span></div>
@@ -2398,9 +3068,9 @@ export default function App() {
                         <tr key={acc.id} className={`transition-colors ${isModified ? 'bg-amber-50/40' : 'hover:bg-slate-50/60'}`}>
                           <td className="p-3 font-sans font-bold text-slate-800">{acc.category}<span className="block text-[10px] text-slate-400 font-normal">Base: {formatGBP(E.num(acc.contrib, 0))} / yr @ {acc.growth || 0}%{sb.balance !== undefined && E.num(sb.balance, 0) !== E.num(acc.balance, 0) ? ` · balance ${formatGBP(E.num(acc.balance, 0))} → ${formatGBP(sb.balance)}` : ''}</span></td>
                           {isCouple && <td className="p-3 font-sans text-slate-600">{acc.owner}</td>}
-                          <td className="p-3"><div className="flex items-center gap-1.5"><input type="number" min="0" step="250" value={sb.contrib} onFocus={handleFocus} onChange={(e) => updateSandboxField(acc.id, 'contrib', e.target.value)} className="w-28 p-1.5 bg-white border border-slate-300 rounded font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500" />{sb.contribByYear && <span className="px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[10px] font-sans" title="Year-by-year schedule from a phased strategy; editing replaces it">phased</span>}</div></td>
+                          <td className="p-3"><div className="flex items-center gap-1.5"><input type="number" min="0" step="250" value={sb.contrib} onFocus={handleFocus} onChange={(e) => updateSandboxField(acc.id, 'contrib', e.target.value)} className="w-28 p-1.5 bg-surface border border-slate-300 rounded font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500" />{sb.contribByYear && <span className="px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[10px] font-sans" title="Year-by-year schedule from a phased strategy; editing replaces it">phased</span>}</div></td>
                           <td className="p-3"><div className="flex items-center gap-1">{[-1000, -500, 500, 1000].map(d => <button key={d} onClick={() => adjustSandboxContrib(acc.id, d)} className="px-1.5 py-1 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded text-[10px] font-sans font-semibold text-slate-700 cursor-pointer">{d > 0 ? '+' : ''}{Math.abs(d) >= 1000 ? `${d / 1000}k` : d}</button>)}</div></td>
-                          <td className="p-3"><div className="flex items-center gap-1.5"><input type="number" step="0.5" value={sb.growth} onFocus={handleFocus} onChange={(e) => updateSandboxField(acc.id, 'growth', e.target.value)} className="w-20 p-1.5 bg-white border border-slate-300 rounded text-slate-900 font-bold focus:outline-none focus:ring-2 focus:ring-amber-500" /><span className="text-slate-400 font-sans">%</span></div></td>
+                          <td className="p-3"><div className="flex items-center gap-1.5"><input type="number" step="0.5" value={sb.growth} onFocus={handleFocus} onChange={(e) => updateSandboxField(acc.id, 'growth', e.target.value)} className="w-20 p-1.5 bg-surface border border-slate-300 rounded text-slate-900 font-bold focus:outline-none focus:ring-2 focus:ring-amber-500" /><span className="text-slate-400 font-sans">%</span></div></td>
                           <td className="p-3 text-right">{isModified ? <span className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded font-sans text-[10px] font-bold">Adjusted</span> : <span className="text-slate-400 font-sans text-[10px]">Unchanged</span>}</td>
                         </tr>
                       );
@@ -2418,18 +3088,18 @@ export default function App() {
             <div className="p-4 bg-indigo-50/80 border border-indigo-200 rounded-2xl text-xs text-slate-700 space-y-1.5 shadow-2xs">
               <div className="flex items-center gap-2 font-bold text-indigo-950 text-sm"><Dices className="w-4 h-4 text-indigo-600" /> Stochastic Monte Carlo Stress Testing ({MC_TRIALS.toLocaleString()} Randomized Paths)</div>
               <p className="leading-relaxed"><strong>What it does:</strong> Stress-tests your target living expenditure against {MC_TRIALS.toLocaleString()} randomized market runs using each risk tier's annual volatility (σ). It reports the failure probability, when capital runs out, and solves for your sustainable maximum spending at a chosen confidence level.</p>
-              <p className="text-slate-500 text-[11px] leading-relaxed"><strong>How failure is defined:</strong> a year in which living costs or a one-off cost cannot be met from any accessible wrapper (a pre-access failure means pension money existed but was locked), or a terminal pot below the bequest floor. Paths are seeded, so re-running with the same seed reproduces the result exactly.</p>
+              <p className="text-slate-500 text-[11px] leading-relaxed"><strong>How failure is defined:</strong> a year in which living costs or a one-off cost cannot be met from any accessible wrapper (a pre-SIPP access failure means pension money existed but was locked), or a terminal pot below the bequest floor. Paths are seeded, so re-running with the same seed reproduces the result exactly.</p>
             </div>
 
-            <div className="bg-white border border-slate-200/90 rounded-2xl p-5 shadow-xs flex flex-wrap items-center justify-between gap-3">
+            <div className="bg-surface border border-slate-200/90 rounded-2xl p-5 shadow-xs flex flex-wrap items-center justify-between gap-3">
               <div><h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Run Multi-Path Simulation</h3><span className="text-[11px] text-slate-500">Run {MC_TRIALS.toLocaleString()} stochastic trials or calculate your sustainable safe spending limit.</span></div>
               <div className="flex items-center gap-2 flex-wrap">
                 <div className="flex items-center bg-slate-100 border border-slate-200 rounded-xl p-1 text-xs">
                   <span className="text-slate-500 px-2 font-medium">Confidence:</span>
-                  {[85, 90, 95].map(rate => <button key={rate} onClick={() => setTargetConfidence(rate)} className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${targetConfidence === rate ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>{rate}%</button>)}
+                  {[85, 90, 95].map(rate => <button key={rate} onClick={() => setTargetConfidence(rate)} className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${targetConfidence === rate ? 'bg-surface text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>{rate}%</button>)}
                 </div>
                 <button onClick={handleRunMC} disabled={isSimulating || isOptimizing} className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs active:scale-95 disabled:opacity-60"><Dices className="w-3.5 h-3.5 text-blue-200" />{isSimulating ? 'Testing…' : 'Test Current Spend'}</button>
-                <button onClick={handleOptimize} disabled={isSimulating || isOptimizing} className="px-3.5 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95 disabled:opacity-60"><Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300" />{isOptimizing ? 'Solving…' : `⚡ Safe Max Annual Spend (${targetConfidence}%)`}</button>
+                <button onClick={handleOptimize} disabled={isSimulating || isOptimizing} className="px-3.5 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 dark:from-[#2C5C8F] dark:to-[#A9781F] dark:hover:from-[#204568] text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95 disabled:opacity-60"><Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300 dark:fill-[#FCD34D] dark:text-[#FCD34D]" />{isOptimizing ? 'Solving…' : `⚡ Safe Max Annual Spend (${targetConfidence}%)`}</button>
               </div>
               {simProgress && <div className="w-full"><ProgressBar value={simProgress.value} label={simProgress.label} /></div>}
             </div>
@@ -2446,12 +3116,12 @@ export default function App() {
                     </div>
                   </div>
                   <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 w-full lg:w-auto text-xs border-t lg:border-t-0 border-slate-200/80 pt-3 lg:pt-0">
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Survival Rate</span><span className={`text-base font-black font-mono ${simResult.successRate >= 90 ? 'text-emerald-700' : simResult.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}`}>{simResult.successRate.toFixed(1)}%</span></div>
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Age of Failure</span><span className={`text-base font-black font-mono ${!simResult.medianFailAge ? 'text-emerald-700' : simResult.medianFailAge < nmpa ? 'text-rose-700' : 'text-amber-700'}`}>{simResult.medianFailAge ? `Age ${simResult.medianFailAge}` : 'None'}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono truncate">{simResult.medianFailAge ? `Median of failures (earliest ${simResult.earliestFailAge})` : '100% Solvency'}</span></div>
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Pre-access failures</span><span className={`text-base font-black font-mono ${simResult.preNmpaFailRate > 5 ? 'text-rose-700' : 'text-slate-700'}`}>{simResult.preNmpaFailRate.toFixed(1)}%</span></div>
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">10th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-rose-700">{formatGBP(simResult.p10Terminal)}</span></div>
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Median Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-blue-700">{formatGBP(simResult.medianTerminal)}</span>{ctx.pensionDeathTaxRate > 0 && <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">net of pension death tax {formatGBP(simResult.medianTerminalNet)}</span>}</div>
-                    <div className="bg-white/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">90th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-emerald-700">{formatGBP(simResult.p90Terminal)}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">median lifetime tax {formatGBP(simResult.medianLifetimeTax)}</span></div>
+                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Survival Rate</span><span className={`text-base font-black font-mono ${simResult.successRate >= 90 ? 'text-emerald-700' : simResult.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}`}>{simResult.successRate.toFixed(1)}%</span></div>
+                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Age of Failure</span><span className={`text-base font-black font-mono ${!simResult.medianFailAge ? 'text-emerald-700' : simResult.medianFailAge < nmpa ? 'text-rose-700' : 'text-amber-700'}`}>{simResult.medianFailAge ? `Age ${simResult.medianFailAge}` : 'None'}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono truncate">{simResult.medianFailAge ? `Median of failures (earliest ${simResult.earliestFailAge})` : '100% Solvency'}</span></div>
+                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Pre-SIPP access failures</span><span className={`text-base font-black font-mono ${simResult.preNmpaFailRate > 5 ? 'text-rose-700' : 'text-slate-700'}`}>{simResult.preNmpaFailRate.toFixed(1)}%</span></div>
+                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">10th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-rose-700">{formatGBP(simResult.p10Terminal)}</span></div>
+                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Median Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-blue-700">{formatGBP(simResult.medianTerminal)}</span>{ctx.pensionDeathTaxRate > 0 && <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">net of pension death tax {formatGBP(simResult.medianTerminalNet)}</span>}</div>
+                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">90th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-emerald-700">{formatGBP(simResult.p90Terminal)}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">median lifetime tax {formatGBP(simResult.medianLifetimeTax)}</span></div>
                   </div>
                 </div>
                 {simResult.preNmpaFailRate > 0 && (
@@ -2475,16 +3145,16 @@ export default function App() {
               <p>Feeds actual historical real returns (US large-cap equities and a 50/50 government/corporate bond blend, weighted by each wrapper's risk tier) into your plan, <strong>starting from today (Age {currentAge})</strong> through to Age {terminalAge}.</p>
               <p className="text-slate-500">Selectable start years are capped at <strong>{maxHistoricalStartYear}</strong> so your {spanYears}-year plan runs within recorded history through {E.HISTORICAL_LAST_YEAR}.{historicalMetrics?.beyondData && ' Years beyond the dataset use the expected return.'}</p>
             </div>
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
                 <div><h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Select Historical Scenario or Start Year</h3><span className="text-[11px] text-slate-500">Select an iconic crisis preset or slide to any year between {E.HISTORICAL_FIRST_YEAR} and {maxHistoricalStartYear}.</span></div>
-                <div className="flex items-center gap-2 bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200 text-xs font-mono font-bold text-indigo-700"><span>Start Year:</span><input type="number" min={E.HISTORICAL_FIRST_YEAR} max={maxHistoricalStartYear} value={activeHistoricalStartYear} onChange={(e) => setSelectedHistoricalYear(Math.max(E.HISTORICAL_FIRST_YEAR, Math.min(maxHistoricalStartYear, Number(e.target.value) || E.HISTORICAL_FIRST_YEAR)))} className="w-16 p-1 bg-white border border-slate-300 rounded text-center text-indigo-900 focus:outline-none focus:ring-1 focus:ring-indigo-500" /></div>
+                <div className="flex items-center gap-2 bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200 text-xs font-mono font-bold text-indigo-700"><span>Start Year:</span><input type="number" min={E.HISTORICAL_FIRST_YEAR} max={maxHistoricalStartYear} value={activeHistoricalStartYear} onChange={(e) => setSelectedHistoricalYear(Math.max(E.HISTORICAL_FIRST_YEAR, Math.min(maxHistoricalStartYear, Number(e.target.value) || E.HISTORICAL_FIRST_YEAR)))} className="w-16 p-1 bg-surface border border-slate-300 rounded text-center text-indigo-900 focus:outline-none focus:ring-1 focus:ring-indigo-500" /></div>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
                 {HISTORICAL_PRESETS.map(p => {
                   const isValid = p.year <= maxHistoricalStartYear;
                   return (
-                    <button key={p.year} onClick={() => isValid && setSelectedHistoricalYear(p.year)} disabled={!isValid} className={`p-2.5 rounded-xl border text-left transition-all ${!isValid ? 'bg-slate-50 text-slate-300 border-slate-200/50 cursor-not-allowed opacity-50' : activeHistoricalStartYear === p.year ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs cursor-pointer' : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200 cursor-pointer'}`}>
+                    <button key={p.year} onClick={() => isValid && setSelectedHistoricalYear(p.year)} disabled={!isValid} className={`p-2.5 rounded-xl border text-left transition-all ${!isValid ? 'bg-slate-50 text-slate-300 border-slate-200/50 cursor-not-allowed opacity-50' : activeHistoricalStartYear === p.year ? 'bg-indigo-600 dark:bg-[#A9781F] text-white border-indigo-600 shadow-xs cursor-pointer' : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200 cursor-pointer'}`}>
                       <div className="flex items-center justify-between"><span className="font-bold text-xs">{p.year}</span>{!isValid && <span className="text-[9px] text-slate-400 font-sans">Over {E.HISTORICAL_LAST_YEAR}</span>}</div>
                       <div className={`text-[10px] leading-tight truncate mt-0.5 ${!isValid ? 'text-slate-300' : activeHistoricalStartYear === p.year ? 'text-indigo-100' : 'text-slate-500'}`}>{p.label.split('(')[0]}</div>
                     </button>
@@ -2497,28 +3167,28 @@ export default function App() {
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
                 <div className={`p-4 rounded-2xl border shadow-xs ${historicalMetrics.survived ? 'bg-emerald-50/90 border-emerald-200' : 'bg-rose-50/90 border-rose-200'}`}>
                   <span className="text-[11px] font-bold uppercase tracking-wider block text-slate-500 mb-1">Backtest Verdict</span>
-                  <div className="flex items-center gap-2">{historicalMetrics.survived ? <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0" /> : <AlertTriangle className="w-6 h-6 text-rose-600 shrink-0" />}<div><div className={`text-base font-black ${historicalMetrics.survived ? 'text-emerald-800' : 'text-rose-800'}`}>{historicalMetrics.survived ? `Survived to Age ${terminalAge}` : `${historicalMetrics.failReason === 'floor' ? 'Below floor' : 'Depleted'} at Age ${historicalMetrics.failAge}`}</div><span className="text-[11px] text-slate-500">{historicalMetrics.survived ? 'Zero insolvency detected' : `Failed in plan year ${historicalMetrics.failYear} (${historicalMetrics.failReason})`}</span></div></div>
+                  <div className="flex items-center gap-2">{historicalMetrics.survived ? <CheckCircle2 className="w-6 h-6 text-emerald-600 shrink-0" /> : <AlertTriangle className="w-6 h-6 text-rose-600 shrink-0" />}<div><div className={`text-base font-black font-display italic ${historicalMetrics.survived ? 'text-emerald-800' : 'text-rose-800'}`}>{historicalMetrics.survived ? `Survived to Age ${terminalAge}` : `${historicalMetrics.failReason === 'floor' ? 'Below floor' : 'Depleted'} at Age ${historicalMetrics.failAge}`}</div><span className="text-[11px] text-slate-500">{historicalMetrics.survived ? 'Zero insolvency detected' : `Failed in plan year ${historicalMetrics.failYear} (${historicalMetrics.failReason})`}</span></div></div>
                 </div>
-                <div className="bg-white border border-slate-200/90 p-4 rounded-2xl shadow-xs"><span className="text-[11px] font-bold uppercase tracking-wider block text-slate-500 mb-1">Starting Balance (Today)</span><div className="text-xl font-bold font-mono text-slate-900 mt-1">{formatGBP(historicalMetrics.startVal)}</div><span className="text-[11px] text-slate-400">After year-0 flows, at Age {currentAge}</span></div>
-                <div className="bg-white border border-slate-200/90 p-4 rounded-2xl shadow-xs"><span className="text-[11px] font-bold uppercase tracking-wider block text-slate-500 mb-1">Lowest Portfolio Trough</span><div className="text-xl font-bold font-mono text-amber-700 mt-1">{formatGBP(historicalMetrics.minVal)}</div><span className="text-[11px] text-slate-400">Lowest total experienced</span></div>
-                <div className="bg-white border border-slate-200/90 p-4 rounded-2xl shadow-xs"><span className="text-[11px] font-bold uppercase tracking-wider block text-slate-500 mb-1">Terminal Pot @ {terminalAge}</span><div className={`text-xl font-bold font-mono mt-1 ${historicalMetrics.terminalVal > 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{formatGBP(historicalMetrics.terminalVal)}</div><span className="text-[11px] text-slate-400">Real purchasing power remaining · lifetime tax {formatGBP(historicalMetrics.lifetimeTax)}</span></div>
+                <div className="bg-surface border border-slate-200/90 p-4 rounded-2xl shadow-xs"><span className="text-[11px] font-bold uppercase tracking-wider block text-slate-500 mb-1">Starting Balance (Today)</span><div className="text-xl font-bold font-mono text-slate-900 mt-1">{formatGBP(historicalMetrics.startVal)}</div><span className="text-[11px] text-slate-400">After year-0 flows, at Age {currentAge}</span></div>
+                <div className="bg-surface border border-slate-200/90 p-4 rounded-2xl shadow-xs"><span className="text-[11px] font-bold uppercase tracking-wider block text-slate-500 mb-1">Lowest Portfolio Trough</span><div className="text-xl font-bold font-mono text-amber-700 mt-1">{formatGBP(historicalMetrics.minVal)}</div><span className="text-[11px] text-slate-400">Lowest total experienced</span></div>
+                <div className="bg-surface border border-slate-200/90 p-4 rounded-2xl shadow-xs"><span className="text-[11px] font-bold uppercase tracking-wider block text-slate-500 mb-1">Terminal Pot @ {terminalAge}</span><div className={`text-xl font-bold font-mono mt-1 ${historicalMetrics.terminalVal > 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{formatGBP(historicalMetrics.terminalVal)}</div><span className="text-[11px] text-slate-400">Real purchasing power remaining · lifetime tax {formatGBP(historicalMetrics.lifetimeTax)}</span></div>
               </div>
             )}
-            <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div><h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider">Historical Wealth Path (Simulating {activeHistoricalStartYear}–{activeHistoricalStartYear + spanYears})</h3><span className="text-xs text-slate-500">Real purchasing power across accumulation and decumulation</span></div>
               <div className="relative overflow-x-auto">
                 <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="w-full h-auto select-none" onMouseLeave={() => setHoveredHistPoint(null)}>
                   <g transform={`translate(${margin.left}, ${margin.top})`}>
-                    {histYScale.ticks(6).map((t, i) => <g key={i} transform={`translate(0, ${histYScale(t)})`}><line x2={innerWidth} stroke="#f1f5f9" strokeDasharray="3,3" /><text x={-10} dy="0.32em" fill="#64748b" fontSize="10" textAnchor="end" fontFamily="monospace">£{(t / 1000).toFixed(0)}k</text></g>)}
-                    {histXScale.ticks(10).map((t, i) => <g key={i} transform={`translate(${histXScale(t)}, 0)`}><line y2={innerHeight} stroke="#f8fafc" /><text y={innerHeight + 20} fill="#64748b" fontSize="11" textAnchor="middle" fontFamily="monospace">{t}</text></g>)}
+                    {histYScale.ticks(6).map((t, i) => <g key={i} transform={`translate(0, ${histYScale(t)})`}><line x2={innerWidth} stroke={cp.gridMajor} strokeDasharray="3,3" /><text x={-10} dy="0.32em" fill={cp.axisText} fontSize="10" textAnchor="end" fontFamily="monospace">£{(t / 1000).toFixed(0)}k</text></g>)}
+                    {histXScale.ticks(10).map((t, i) => <g key={i} transform={`translate(${histXScale(t)}, 0)`}><line y2={innerHeight} stroke={cp.gridMinor} /><text y={innerHeight + 20} fill={cp.axisText} fontSize="11" textAnchor="middle" fontFamily="monospace">{t}</text></g>)}
                     {markers(histXScale)}
-                    {histLinePath && <path d={histLinePath} fill="none" stroke="#6366f1" strokeWidth="3" strokeLinecap="round" />}
+                    {histLinePath && <path d={histLinePath} fill="none" stroke={cp.historicalLine} strokeWidth="3" strokeLinecap="round" />}
                     <rect width={innerWidth} height={innerHeight} fill="transparent" onMouseMove={(e) => { const rect = e.currentTarget.getBoundingClientRect(); const age = Math.round(histXScale.invert((e.clientX - rect.left) * (innerWidth / Math.max(1, rect.width)))); setHoveredHistPoint(historicalTimeline.find(d => d.ageSelf === age) || null); }} />
-                    {hoveredHistPoint && <g transform={`translate(${histXScale(hoveredHistPoint.ageSelf)}, 0)`}><line y2={innerHeight} stroke="#94a3b8" strokeWidth="1" strokeDasharray="2,2" /><circle cy={histYScale(hoveredHistPoint.totalCombined)} r="4" fill="#6366f1" stroke="#ffffff" strokeWidth="2" /></g>}
+                    {hoveredHistPoint && <g transform={`translate(${histXScale(hoveredHistPoint.ageSelf)}, 0)`}><line y2={innerHeight} stroke={cp.hoverCrosshair} strokeWidth="1" strokeDasharray="2,2" /><circle cy={histYScale(hoveredHistPoint.totalCombined)} r="4" fill={cp.historicalHoverFill} stroke={cp.hoverDotStroke} strokeWidth="2" /></g>}
                   </g>
                 </svg>
                 {hoveredHistPoint && (
-                  <div className="absolute top-4 left-24 bg-white/95 border border-slate-200 p-3 rounded-xl shadow-lg text-xs space-y-1 backdrop-blur-md pointer-events-none">
+                  <div className="absolute top-4 left-24 bg-surface/95 border border-slate-200 p-3 rounded-xl shadow-lg text-xs space-y-1 backdrop-blur-md pointer-events-none">
                     <div className="font-bold text-slate-800 border-b border-slate-100 pb-1 flex justify-between gap-4"><span>Age {hoveredHistPoint.ageSelf} (Simulated {hoveredHistPoint.histYear ?? 'beyond data'})</span><span className="text-slate-500">Plan Year: {hoveredHistPoint.year}</span></div>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-1 font-mono">
                       <div className="text-indigo-600 font-bold">Total Pot: {formatGBP(hoveredHistPoint.totalCombined)}</div>
@@ -2535,14 +3205,14 @@ export default function App() {
 
         {/* TAB 6: AUDIT */}
         {activeTab === 'audit' && (
-          <div className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+          <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
               <div><h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Table className="w-4 h-4 text-blue-600" /> Year-by-Year Cash Flow &amp; Wrapper Ledger</h2><span className="text-xs text-slate-500">Expected-return path: contributions, guaranteed income, decumulation waterfall, tax and wrapper balances (end of year).</span></div>
               <button onClick={handleExportCSV} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all border border-slate-200 cursor-pointer self-start sm:self-auto"><FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" /> Export CSV Spreadsheet</button>
             </div>
             <div className="overflow-x-auto border border-slate-200 rounded-xl">
               <table className="w-full text-left text-xs border-collapse">
-                <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans"><tr><th className="p-2.5">Year</th><th className="p-2.5">Age (M)</th>{isCouple && <th className="p-2.5">Age (P)</th>}<th className="p-2.5">Spend Target</th><th className="p-2.5">Guaranteed + Take-home (net)</th><th className="p-2.5">Net Drawdown</th><th className="p-2.5">Pension Draw (gross)</th><th className="p-2.5">Tax</th><th className="p-2.5">Pensions</th><th className="p-2.5">ISAs</th><th className="p-2.5">Other Inv</th><th className="p-2.5">Cash</th><th className="p-2.5">Total Combined</th><th className="p-2.5">Pre-access Liquid</th><th className="p-2.5 text-right">Status</th></tr></thead>
+                <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans"><tr><th className="p-2.5">Year</th><th className="p-2.5">Age (M)</th>{isCouple && <th className="p-2.5">Age (P)</th>}<th className="p-2.5">Spend Target</th><th className="p-2.5">Guaranteed + Take-home (net)</th><th className="p-2.5">Net Drawdown</th><th className="p-2.5">Pension Draw (gross)</th><th className="p-2.5">Tax</th>{P.cgtEnabled && <th className="p-2.5">CGT</th>}<th className="p-2.5">Pensions</th><th className="p-2.5">ISAs</th><th className="p-2.5">Other Inv</th><th className="p-2.5">Cash</th><th className="p-2.5">Total Combined</th><th className="p-2.5">Pre-SIPP access Liquid</th><th className="p-2.5 text-right">Status</th></tr></thead>
                 <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
                   {timelineData.map(r => (
                     <tr key={r.year} className="hover:bg-slate-50/80 transition-colors">
@@ -2552,9 +3222,10 @@ export default function App() {
                       <td className="p-2 text-rose-600 font-medium">{formatGBP(r.netDrawdown)}</td>
                       <td className="p-2 text-sky-700">{formatGBP(r.drawdownPensions)}{r.harvested > 0 && <span className="text-[9px] text-slate-400 block">incl. {formatGBP(r.harvested)} harvested</span>}</td>
                       <td className="p-2 text-slate-600">{formatGBP(r.taxPaid)}</td>
+                      {P.cgtEnabled && <td className="p-2 text-amber-700">{formatGBP(r.cgtPaid || 0)}{r.realisedGains > 0 && <span className="text-[9px] text-slate-400 block">on {formatGBP(r.realisedGains)} gains</span>}</td>}
                       <td className="p-2 text-sky-700">{formatGBP(r.pensions)}</td><td className="p-2 text-teal-700">{formatGBP(r.isas)}</td><td className="p-2 text-amber-700">{formatGBP(r.other)}</td><td className="p-2 text-slate-700">{formatGBP(r.cash)}</td>
                       <td className="p-2 font-bold text-blue-700">{formatGBP(r.totalCombined)}</td><td className="p-2 text-slate-600">{formatGBP(r.preNmpaLiquid)}</td>
-                      <td className="p-2 text-right">{r.preNmpaInsolvent ? <span className="px-2 py-0.5 bg-rose-100 text-rose-800 rounded font-sans text-[10px] font-bold">Pre-access Gap</span> : r.unmetDemand > E.FAIL_TOLERANCE ? <span className="px-2 py-0.5 bg-rose-100 text-rose-800 rounded font-sans text-[10px] font-bold">Shortfall {formatGBP(r.unmetDemand)}</span> : <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded font-sans text-[10px] font-bold">Solvent</span>}</td>
+                      <td className="p-2 text-right">{r.preNmpaInsolvent ? <span className="px-2 py-0.5 bg-rose-100 text-rose-800 rounded font-sans text-[10px] font-bold">Pre-SIPP access Gap</span> : r.unmetDemand > E.FAIL_TOLERANCE ? <span className="px-2 py-0.5 bg-rose-100 text-rose-800 rounded font-sans text-[10px] font-bold">Shortfall {formatGBP(r.unmetDemand)}</span> : <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded font-sans text-[10px] font-bold">Solvent</span>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -2566,20 +3237,20 @@ export default function App() {
         {/* TAB 7: DOCS */}
         {activeTab === 'docs' && (
           <div className="space-y-6">
-            <div id="doc-tournament" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+            <div id="doc-tournament" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Zap className="w-4 h-4 text-indigo-600" /> Automated Strategy Tournament &amp; Optimization Methodology</h2>
               <p className="text-xs text-slate-600 leading-relaxed">The tournament compares six ways of splitting the same annual take-home budget between S&amp;S ISAs and pensions. Every player is run on the same {TOURNAMENT_TRIALS.toLocaleString()} market paths (common random numbers), so the ranking reflects the strategies rather than sampling luck.</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">1. Equal net budget</strong><p className="text-slate-500">Each strategy costs the same take-home pay. Pension money is grossed up using each owner's own salary (income tax + NIC relief, plus any employer NIC pass-through set in Config), capped by the annual allowance (£{P.pensionAllowance.toLocaleString()}) and salary; ISA money is capped at £{P.isaAllowance.toLocaleString()} per person; anything left over flows to a GIA.</p></div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">2. Conservative bridge sizing</strong><p className="text-slate-500">If spending starts before anyone can access a pension (age {nmpa}), the bridge reserve is the sum of net drawdown in those years (after guaranteed income and a working partner's take-home), uplifted by the safety margin ({E.num(plan?.config?.bridgeSafetyMargin, 30)}%) and assuming 0% real growth.</p></div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">3. The players</strong><p className="text-slate-500"><strong>Current Plan</strong> · <strong>Survival Maximizer</strong> (searches the ISA share from 0% to 100% and keeps the best survival, subject to the bridge-risk cap) · <strong>Liquidity-First</strong> (ISA allowances first) · <strong>Relief-First</strong> (pension first, bridge minimum kept; with a Bed &amp; SIPP transfer of spare ISA capital in full scope) · <strong>Bracket-Smoothed Sizing</strong> (pension funded only to the pot whose sustainable withdrawal plus state pension fills the basic-rate band, the rest to ISA) · <strong>Relief-First, Bridge-Last</strong> (pension-max early, ISA-max in the final years before retirement).</p></div>
-                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">4. Reading the results</strong><p className="text-slate-500">Rank by survival first; ties within 0.5 points are broken by the 10th-percentile pot. Watch the pre-access failure rate: a strategy can win on total survival by accepting more bridge risk. The "Partner balancing" option steers new money to the partner with the smaller projected pension so both personal allowances can be used in retirement; it costs relief if that partner pays a lower marginal rate, so it does not always win.</p></div>
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">4. Reading the results</strong><p className="text-slate-500">Rank by survival first; ties within 0.5 points are broken by the 10th-percentile pot. Watch the pre-SIPP access failure rate: a strategy can win on total survival by accepting more bridge risk. The "Partner balancing" option steers new money to the partner with the smaller projected pension so both personal allowances can be used in retirement; it costs relief if that partner pays a lower marginal rate, so it does not always win.</p></div>
               </div>
             </div>
 
-            <div id="doc-decumulation" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+            <div id="doc-decumulation" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Sliders className="w-4 h-4 text-blue-600" /> Decumulation Policies &amp; Pension Drawdown Strategies</h2>
-              <p className="text-xs text-slate-600 leading-relaxed">How money is withdrawn across wrappers changes lifetime tax and the size of the pot left at the end; it changes the probability of maintaining your living costs far less than the spend level, asset allocation and the pre-access bridge do.</p>
+              <p className="text-xs text-slate-600 leading-relaxed">How money is withdrawn across wrappers changes lifetime tax and the size of the pot left at the end; it changes the probability of maintaining your living costs far less than the spend level, asset allocation and the pre-SIPP access bridge do.</p>
               <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1.5">
                 <li><strong>Tax Smoothing (default):</strong> fills the £{P.pa.toLocaleString()} allowance from pension income (0%), then draws pension income up to the £{P.basicLimit.toLocaleString()} higher-rate threshold (about {Math.round((1 - P.pclsProp) * P.basicRate * 100)}% effective with the {Math.round(P.pclsProp * 100)}% tax-free element), then cash, GIA and ISA, with pension income above the threshold as the last resort. Cash and ISAs are preserved as the low-volatility reserve and the tax-free shield for later life.</li>
                 <li><strong>UK FIRE Bracket Fill:</strong> draws pension only up to the £{P.pa.toLocaleString()} allowance, then cash, GIA and ISAs; pension income above the allowance is the last resort. Pays the least tax during your lifetime and leaves the largest pot, but that pot is mostly taxable pension — set the pension death-tax haircut in Config to see the difference net of what beneficiaries would pay.</li>
@@ -2589,7 +3260,7 @@ export default function App() {
               </ul>
             </div>
 
-            <div id="doc-salary-sacrifice" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+            <div id="doc-salary-sacrifice" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Zap className="w-4 h-4 text-indigo-600" /> Salary Sacrifice vs S&amp;S ISAs</h2>
               <p className="text-xs text-slate-600 leading-relaxed">Salary sacrifice redirects gross earnings into your pension before income tax and employee NIC are deducted. Relief is calculated from the salary you enter, so it correctly reflects the {Math.round(P.basicRate * 100)}% + {Math.round(P.nicMain * 100)}% basic-rate band, the {Math.round(P.higherRate * 100)}% + {Math.round(P.nicUpper * 100)}% higher-rate band, and the {Math.round((P.higherRate + P.nicUpper) * 100 + P.higherRate * 100 * P.taperRate)}% effective rate where the personal allowance is tapered (£{P.thr.toLocaleString()}–£{Math.round(P.taperEnd).toLocaleString()}).</p>
               <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
@@ -2599,7 +3270,7 @@ export default function App() {
               </ul>
             </div>
 
-            <div id="doc-taper" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+            <div id="doc-taper" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><HelpCircle className="w-4 h-4 text-blue-600" /> Lifestyle Spending Tapers</h2>
               <p className="text-xs text-slate-600 leading-relaxed">Retirement spending rarely stays constant. Research into spending curves suggests three phases:</p>
               <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
@@ -2610,7 +3281,7 @@ export default function App() {
               <p className="text-xs text-slate-600 leading-relaxed">Taper 2 applies to the post-Taper 1 figure: £40,000 with a 10% Taper 1 becomes £36,000, and a 10% Taper 2 then reduces that to £32,400. Tapers key off "Myself" ages.</p>
             </div>
 
-            <div id="doc-risk-profiles" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+            <div id="doc-risk-profiles" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-blue-600" /> Asset Allocations, Return Bounds &amp; Volatility (σ)</h2>
               <p className="text-xs text-slate-600 leading-relaxed">Each wrapper is assigned a risk tier with an expected real return (treated as the median annual rate), lucky/unlucky bounds for the deterministic chart, and a volatility used by the Monte Carlo. All wrappers move together (one market factor scaled by each tier's σ); the historical backtest blends real US equity and bond returns by the tier's equity weight ({Object.entries(E.RISK_EQUITY_WEIGHTS).map(([k, v]) => `${k.replace(' Risk', '')} ${Math.round(v * 100)}%`).join(', ')}).</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
@@ -2620,14 +3291,65 @@ export default function App() {
               </div>
             </div>
 
-            <div id="doc-one-offs" className="bg-white border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+            <div id="doc-one-off-deposits" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Plus className="w-4 h-4 text-blue-600" /> One-Off Deposits &amp; Multi-Year Staging</h2>
+              <p className="text-xs text-slate-600 leading-relaxed">A one-off deposit is a lump sum paid into a chosen wrapper in a chosen year. Because ISAs and pensions are capped each tax year, the engine checks the deposit against that year's remaining allowance before it lands.</p>
+
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Where the money comes from</h3>
+              <p className="text-xs text-slate-600 leading-relaxed"><strong>External (new capital)</strong> is money arriving from outside the plan — an inheritance, a bonus, a property sale — and nothing is deducted from your existing pots. Choosing any wrapper instead treats it as an internal transfer: the full amount is taken out of that pot in the deposit year. If that pot does not hold enough at the time, the engine moves what is there and the rest is recorded as a shortfall.</p>
+
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">How much fits this year (headroom)</h3>
+              <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
+                <li><strong>S&amp;S ISA:</strong> {formatGBP(P.isaAllowance)} less whatever your regular ISA contribution is that year.</li>
+                <li><strong>Carry forward:</strong> unused annual allowance from the previous three tax years is added to the current year's. Years inside the projection are worked out from your contribution schedule; for the three years before it starts the model has no data, so it assumes nothing unless you enter a figure under Advanced inputs. Carry forward never lifts the earnings limit, so it does nothing for someone with no relevant earnings.</li>
+                <li><strong>Pension after flexible access:</strong> taking taxable pension income permanently replaces the allowance with the money purchase annual allowance of {formatGBP(P.mpaaLimit)}, and carry forward is no longer available. Taking only tax-free cash, or buying an annuity, does not trigger it. You do not enter this — the model works out the first year your plan draws taxable pension income and applies it from there.</li>
+                <li><strong>Pension:</strong> {formatGBP(P.pensionAllowance)} — but capped at your <em>relevant UK earnings</em> — less your regular pension contribution that year. Only employment and self-employment income counts as earnings; DB pensions, annuities, rent, dividends and interest do not. With no relevant earnings the limit is <strong>{formatGBP(P.pensionNoEarningsLimit)}</strong>, which is what normally applies once you have retired. If you leave your salary blank while still working, the engine treats your earnings as unknown and does not constrain the allowance.</li>
+                <li><strong>Other Investments and Cash Savings:</strong> no annual limit, so a deposit there is never staged.</li>
+              </ul>
+              <p className="text-xs text-slate-600 leading-relaxed">Headroom is therefore not a fixed number. It shrinks in later years if your regular contributions escalate, and it changes again at retirement, when regular contributions stop and the pension earnings test starts to bite. The card above the deposits table shows this tax year only — each deposit row shows the headroom for its own year.</p>
+
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">If the deposit exceeds the headroom</h3>
+              <p className="text-xs text-slate-600 leading-relaxed">Rather than silently breaching the allowance, the deposit is staged across several tax years:</p>
+              <ol className="list-decimal pl-5 text-xs text-slate-600 space-y-1">
+                <li>As much as fits the current year's allowance goes straight into the target wrapper.</li>
+                <li>The surplus is parked in <strong>Other Investments (GIA)</strong>, where it stays invested and grows at that account's risk tier. Once it has grown, moving it out is a disposal, so with CGT switched on each transfer year realises a proportional gain.</li>
+                <li>At the start of each following tax year, as much as that year's allowance permits is moved from the GIA into the target wrapper, repeating until nothing is left. You can redirect where the staged money ends up from the row's settings icon.</li>
+              </ol>
+              <p className="text-xs text-slate-600 leading-relaxed">Where several deposits compete for the same person's allowance in the same year, they are resolved in date order, so one allowance is never counted twice. If a market fall shrinks the parked money, that year's transfer is capped at whatever the GIA actually holds. Anything still parked at the end of the plan stays in Other Investments and is flagged as a warning.</p>
+
+              <p className="text-xs text-slate-500 leading-relaxed"><strong>Assumption:</strong> allowances are held fixed in real terms at the figures in Config ({formatGBP(P.isaAllowance)} ISA, {formatGBP(P.pensionAllowance)} pension, {formatGBP(P.pensionNoEarningsLimit)} with no earnings). Any future increase in these limits is <strong>not</strong> modelled, so a long staging schedule is a cautious estimate — if allowances do rise, the money would move across in fewer years than shown. You can edit the figures in Config to test a different assumption.</p>
+            </div>
+
+            <div id="doc-cgt" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Wallet className="w-4 h-4 text-blue-600" /> Capital Gains Tax on Other Investments (GIA)</h2>
+              <p className="text-xs text-slate-600 leading-relaxed">Pensions and ISAs shelter growth, but a general investment account does not. When CGT is switched on in Config, the engine tracks the <strong>cost basis</strong> of each person's GIA and charges tax on gains as they are realised.</p>
+
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Growth is not taxed until you sell</h3>
+              <p className="text-xs text-slate-600 leading-relaxed">Holding costs nothing. Money paid in is added at cost; growth raises the value without raising the cost, so the unrealised gain builds up untaxed. Tax is only triggered by a disposal — funding your spending, paying a one-off cost, or moving money out under a staged deposit. Each disposal is treated as selling a slice of the whole holding, so the gain is the same proportion of the sale as the unrealised gain is of the pot.</p>
+              <p className="text-xs text-slate-600 leading-relaxed">Example: a {formatGBP(100000)} GIA holding {formatGBP(40000)} of gain is 40% gain. Selling {formatGBP(10000)} realises {formatGBP(4000)}; the remaining {formatGBP(3000)} exemption leaves {formatGBP(1000)} taxable, so the bill is {formatGBP(180)} at the basic rate.</p>
+
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Rates and allowances</h3>
+              <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
+                <li>Each person has a {formatGBP(P.cgtAnnualExempt)} annual exempt amount. If you have already realised gains this tax year, enter them in Plan Inputs so the current year's exemption is reduced; leaving it blank assumes the full allowance is available.</li>
+                <li>Gains stack on top of that year's income: the part falling in your remaining basic-rate band is taxed at {Math.round(P.cgtBasicRate * 100)}%, anything above at {Math.round(P.cgtHigherRate * 100)}%.</li>
+                <li>The bill is settled from cash, then the GIA, then ISAs, then an accessible pension — the same order used for one-off costs. Selling to pay the bill realises a little more gain, which is carried into the next year, mirroring the fact that CGT is due the January after the tax year.</li>
+              </ul>
+
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Setting your opening position</h3>
+              <p className="text-xs text-slate-600 leading-relaxed">The "of which unrealised gain" figure on the GIA row tells the engine how much of today's balance is profit. Left blank, the balance is treated as entirely cost, so only future growth is ever taxed — a deliberately cautious default. If you hold long-standing investments with a large embedded gain, enter it, or the model will understate your tax.</p>
+
+              <p className="text-xs text-slate-500 leading-relaxed"><strong>Deliberate omissions:</strong> gains are wiped by the uplift on death, so nothing is charged on whatever remains at the terminal age — a real reason to spend other wrappers first. Dividends and interest inside the GIA are not modelled separately, share pooling and the 30-day rule are ignored, and the exempt amount and rates are held flat in real terms at the Config figures.</p>
+            </div>
+
+            <div id="doc-one-offs" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Coins className="w-4 h-4 text-blue-600" /> One-Off Cost Liquidation Hierarchy</h2>
               <p className="text-xs text-slate-600 leading-relaxed">When a one-off capital cost is scheduled, the engine liquidates assets in this order:</p>
               <ol className="list-decimal pl-5 text-xs text-slate-600 space-y-1">
                 <li><strong>Cash Savings</strong> (both owners), then <strong>Other Investments (GIA)</strong>, then <strong>Stocks &amp; Shares ISAs</strong>.</li>
-                <li><strong>Pensions</strong>, but only for an owner who has reached the access age ({nmpa}). If the cost still cannot be met, the year is flagged as a shortfall — or a pre-access gap when pension money existed but was locked.</li>
+                <li><strong>Pensions</strong>, but only for an owner who has reached the access age ({nmpa}). If the cost still cannot be met, the year is flagged as a shortfall — or a pre-SIPP access gap when pension money existed but was locked.</li>
               </ol>
-              <p className="text-xs text-slate-500">Known simplifications: GIA gains are not taxed, state pension is held flat in real terms (no triple-lock uplift), tax thresholds are held flat in real terms, and the death of a partner is not modelled.</p>
+              <p className="text-xs text-slate-500">Known simplifications: state pension is held flat in real terms (no triple-lock uplift), tax thresholds and allowances are held flat in real terms, and the death of a partner is not modelled.</p>
+              <p className="text-xs text-slate-500 leading-relaxed"><strong>Pension allowance limitations.</strong> The model assumes you have <strong>not</strong> yet flexibly accessed a pension, because it is built for planning towards retirement rather than for someone already drawing an income. If you have already taken taxable pension income, your annual allowance is already {formatGBP(P.mpaaLimit)} and the projection will overstate how much you can contribute until the year it starts drawing. Carry forward is also worked out independently for each year rather than being consumed as it is used, so several large staged deposits in overlapping years could each count the same unused allowance. Neither the tapered annual allowance for high earners nor annual allowance charges themselves are modelled.</p>
             </div>
           </div>
         )}
