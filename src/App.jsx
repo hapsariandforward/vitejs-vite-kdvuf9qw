@@ -76,6 +76,16 @@ const CATEGORIES = ['pen', 'isa', 'other', 'cash'];
 const CATEGORY_LABEL = { pen: 'Pensions', isa: 'S&S ISAs', other: 'Other Investments', cash: 'Cash Savings' };
 const accountId = (cat, owner) => `${cat}_${owner}`;
 
+// Income stream types. `taxable` drives income tax; `relevantEarnings` drives the pension annual-allowance
+// earnings test — under UK rules only employment/self-employment income supports pension contributions,
+// so DB pensions, annuities, rent, dividends and interest are taxed but do not raise the pension limit.
+const INCOME_TYPES = {
+  earnings: { label: 'Earnings (employment / self-employment)', taxable: true, relevantEarnings: true },
+  otherTaxable: { label: 'Other taxable income (e.g. DB pensions, annuities)', taxable: true, relevantEarnings: false },
+  taxFree: { label: 'Tax-free income', taxable: false, relevantEarnings: false }
+};
+const incomeTypeOf = (key) => INCOME_TYPES[key] || INCOME_TYPES.otherTaxable;
+
 const DEFAULT_CONFIG = {
   valuationDate: '',                 // '' => today (resolved at run time)
   inflation: 2.5,
@@ -102,6 +112,7 @@ const DEFAULT_CONFIG = {
   // Annual wrapper allowances (per person)
   isaAnnualAllowance: 20000,
   pensionAnnualAllowance: 60000,
+  pensionNoEarningsLimit: 3600,      // gross pension contribution allowed with no relevant UK earnings
   // Behavioural / modelling assumptions
   cashBufferMonths: 6,               // months of spending kept in cash before surplus income is swept to ISA
   harvestPersonalAllowance: true,    // in retirement draw pension to fill unused 0% allowance and move it to ISA
@@ -185,7 +196,9 @@ function normalizePlan(raw) {
     spending: { ...BLANK_PLAN.spending, ...s },
     accounts: [],
     riskProfiles: {},
-    otherIncomes: Array.isArray(src.otherIncomes) ? src.otherIncomes.filter(isPlainObject).map(i => ({ id: String(i.id || 'inc_' + Math.random().toString(36).slice(2)), name: i.name ?? '', owner: i.owner === 'Partner' ? 'Partner' : 'Myself', startAge: i.startAge ?? '', endAge: i.endAge ?? '', amount: i.amount ?? '', taxTreatment: i.taxTreatment === 'Tax-free' ? 'Tax-free' : 'Taxable', notes: i.notes ?? '' })) : [],
+    // legacy plans carried taxTreatment: 'Taxable' | 'Tax-free'; 'Taxable' migrates to otherTaxable so an
+    // upgrade can never silently raise someone's pension headroom.
+    otherIncomes: Array.isArray(src.otherIncomes) ? src.otherIncomes.filter(isPlainObject).map(i => ({ id: String(i.id || 'inc_' + Math.random().toString(36).slice(2)), name: i.name ?? '', owner: i.owner === 'Partner' ? 'Partner' : 'Myself', startAge: i.startAge ?? '', endAge: i.endAge ?? '', amount: i.amount ?? '', incomeType: INCOME_TYPES[i.incomeType] ? i.incomeType : (i.taxTreatment === 'Tax-free' ? 'taxFree' : 'otherTaxable'), notes: i.notes ?? '' })) : [],
     oneOffContributions: Array.isArray(src.oneOffContributions) ? src.oneOffContributions.filter(isPlainObject).map(x => {
       const category = Object.values(CATEGORY_LABEL).includes(x.category) ? x.category : 'Pensions';
       return {
@@ -254,12 +267,13 @@ function taxParams(cfgIn) {
   const lsa = Math.max(0, num(cfg.pclsMaxCap, DEFAULT_CONFIG.pclsMaxCap));
   const isaAllowance = Math.max(0, num(cfg.isaAnnualAllowance, DEFAULT_CONFIG.isaAnnualAllowance));
   const pensionAllowance = Math.max(0, num(cfg.pensionAnnualAllowance, DEFAULT_CONFIG.pensionAnnualAllowance));
+  const pensionNoEarningsLimit = clamp(num(cfg.pensionNoEarningsLimit, DEFAULT_CONFIG.pensionNoEarningsLimit), 0, pensionAllowance);
   // allowance remaining at a given income
   const paAt = (income) => taperRate > 0 && income > thr ? Math.max(0, pa - (income - thr) * taperRate) : pa;
   const basicWidth = Math.max(0, basicLimit - pa);                 // basic band measured in taxable income
   const higherTop = Math.max(basicWidth, higherLimit - paAt(higherLimit)); // higher band upper limit in taxable income
   const taperEnd = taperRate > 0 ? thr + pa / taperRate : Infinity;
-  return { __isParams: true, pa, thr, taperRate, basicLimit, higherLimit, basicRate, higherRate, addRate, nicPT, nicUEL, nicMain, nicUpper, erNic, erPass, pclsProp, lsa, isaAllowance, pensionAllowance, paAt, basicWidth, higherTop, taperEnd };
+  return { __isParams: true, pa, thr, taperRate, basicLimit, higherLimit, basicRate, higherRate, addRate, nicPT, nicUEL, nicMain, nicUpper, erNic, erPass, pclsProp, lsa, isaAllowance, pensionAllowance, pensionNoEarningsLimit, paAt, basicWidth, higherTop, taperEnd };
 }
 
 function incomeTax(gross, cfg) {
@@ -531,7 +545,8 @@ function buildContext(rawPlan) {
     startAge: Math.max(0, num(i.startAge, 0)),
     endAge: isBlank(i.endAge) ? terminalAge : num(i.endAge, terminalAge),
     amount: Math.max(0, num(i.amount, 0)),
-    taxFree: i.taxTreatment === 'Tax-free'
+    taxFree: !incomeTypeOf(i.incomeType).taxable,
+    isEarnings: incomeTypeOf(i.incomeType).relevantEarnings
   }));
   const yearOf = (x) => x.date ? parseInt(String(x.date).slice(0, 4)) : num(x.year, NaN);
   const oneOffContribs = new Map();
@@ -542,10 +557,11 @@ function buildContext(rawPlan) {
     // Shared per-owner/wrapper/year claim ledger: every deposit and staged drip tranche competes for the
     // same headroom, so two deposits for the same owner/wrapper can never double-claim one year's allowance.
     const claimed = new Map(); // `${ownerKey}|${cat}|${t}` -> £ already claimed this pass
+    const headroomCtx = { P, owners, acc, otherIncomes };
     const claim = (ownerKey, cat, t, want) => {
       const key = `${ownerKey}|${cat}|${t}`;
       const already = claimed.get(key) || 0;
-      const avail = Math.max(0, wrapperHeadroomAtYear({ P, owners, acc }, ownerKey, cat, t) - already);
+      const avail = Math.max(0, wrapperHeadroomAtYear(headroomCtx, ownerKey, cat, t) - already);
       const take = Math.min(want, avail);
       claimed.set(key, already + take);
       return take;
@@ -583,11 +599,13 @@ function buildContext(rawPlan) {
       }
 
       // headroom resolution: direct deposit if within headroom, otherwise stage the surplus (Option A)
+      // yearHeadroom is this year's raw allowance (before other deposits' claims), shown on the row
+      const yearHeadroom = wrapperHeadroomAtYear(headroomCtx, ownerKey, targetCat, t);
       const H0 = claim(ownerKey, targetCat, t, amt);
       if (!oneOffContribs.has(y)) oneOffContribs.set(y, []);
       if (amt <= H0 + 1e-6) {
         oneOffContribs.get(y).push({ id: targetId, amount: amt });
-        oneOffStaging.set(x.id, { direct: true, targetId, otherId, stagedId: targetId, amount: amt, H0: amt, surplus0: 0, tranches: [], unresolvedRemainder: 0 });
+        oneOffStaging.set(x.id, { direct: true, targetId, otherId, stagedId: targetId, amount: amt, H0: amt, yearHeadroom, surplus0: 0, tranches: [], unresolvedRemainder: 0 });
         return;
       }
 
@@ -615,7 +633,7 @@ function buildContext(rawPlan) {
       if (remaining > 0.005) warnings.push(
         `${OWNER_LABEL[ownerKey]}: £${Math.round(remaining).toLocaleString()} of the ${y} one-off deposit could not be fully staged into ${CATEGORY_LABEL[stagedCat]} within the plan horizon and will remain in Other Investments.`
       );
-      oneOffStaging.set(x.id, { direct: false, targetId, otherId, stagedId, amount: amt, H0, surplus0, tranches, unresolvedRemainder: Math.max(0, remaining) });
+      oneOffStaging.set(x.id, { direct: false, targetId, otherId, stagedId, amount: amt, H0, yearHeadroom, surplus0, tranches, unresolvedRemainder: Math.max(0, remaining) });
     });
   }
   const oneOffCosts = new Map();
@@ -1056,7 +1074,16 @@ function contribAtYear(a, t) {
   return a.contribByYear ? (a.contribByYear[t] || 0) : a.contrib * Math.pow(1 + a.growth, t);
 }
 
-// Remaining annual ISA/pension headroom for `ownerKey` in year index t, net only of that owner's own regular
+// Relevant UK earnings for pension purposes in projection-year t: salary while still working, plus any
+// earnings-type income streams active at that age. Pension income, annuities and rent do not count.
+function relevantEarningsAtYear(ctx, o, t) {
+  const age = o.age0 + t;
+  const salary = age < o.retireAge ? o.salary : 0;
+  return (ctx.otherIncomes || []).reduce((s, i) =>
+    (i.owner === o.key && i.isEarnings && age >= i.startAge && age <= i.endAge) ? s + i.amount : s, salary);
+}
+
+// Remaining annual ISA/pension headroom for `ownerKey` in year index t, net of that owner's own regular
 // (escalating) contribution to the same wrapper. Other Investments / Cash Savings have no HMRC cap.
 function wrapperHeadroomAtYear(ctx, ownerKey, category, t) {
   const { P, acc, owners } = ctx;
@@ -1064,9 +1091,15 @@ function wrapperHeadroomAtYear(ctx, ownerKey, category, t) {
   const o = owners.find(x => x.key === ownerKey);
   if (!o) return 0;
   const a = acc[o.ids[category]];
-  const regContrib = a ? contribAtYear(a, t) : 0;
+  // regular contributions stop at retirement (mirrors stepYear), so they only consume headroom while working
+  const retired = (o.age0 + t) >= o.retireAge;
+  const regContrib = (a && !retired) ? contribAtYear(a, t) : 0;
   if (category === 'isa') return Math.max(0, P.isaAllowance - regContrib);
-  const cap = o.salary > 0 ? Math.min(P.pensionAllowance, o.salary) : P.pensionAllowance;
+  const earnings = relevantEarningsAtYear(ctx, o, t);
+  // a blank salary while still working means "earnings unknown" — leave the allowance unconstrained
+  const cap = (!retired && o.salary <= 0 && earnings <= 0)
+    ? P.pensionAllowance
+    : Math.min(P.pensionAllowance, Math.max(P.pensionNoEarningsLimit, earnings));
   return Math.max(0, cap - regContrib);
 }
 
@@ -1337,7 +1370,7 @@ function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
 }
 
 // Namespace used by the UI (mirrors the modular engine.js exports)
-const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, employeeNIC, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, wrapperHeadroomAtYear, allocateBudget, applyAllocationToPlan, resolveSurvivalMaximizer, buildTournament, pickBest };
+const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, employeeNIC, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, relevantEarningsAtYear, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, resolveSurvivalMaximizer, buildTournament, pickBest };
 export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament };
 
 
@@ -1793,7 +1826,7 @@ export default function App() {
   const updateSpending = (field, value) => setPlan(prev => ({ ...prev, spending: { ...(prev.spending || {}), [field]: (field === 'drawdownStrategy' || field === 'decumulationPolicy') ? value : parseInputNumber(value) } }));
   const updateConfig = (field, value) => setPlan(prev => ({ ...prev, config: { ...(prev.config || {}), [field]: (field === 'valuationDate' || typeof value === 'boolean') ? value : parseInputNumber(value) } }));
   const updateListItem = (listKey, id, patch) => setPlan(p => ({ ...p, [listKey]: (p[listKey] || []).map(i => i.id === id ? { ...i, ...patch } : i) }));
-  const addOtherIncome = () => setPlan(prev => ({ ...prev, otherIncomes: [...(prev.otherIncomes || []), { id: 'inc_' + Date.now(), name: '', owner: 'Myself', startAge: '', endAge: '', amount: '', taxTreatment: 'Taxable', notes: '' }] }));
+  const addOtherIncome = () => setPlan(prev => ({ ...prev, otherIncomes: [...(prev.otherIncomes || []), { id: 'inc_' + Date.now(), name: '', owner: 'Myself', startAge: '', endAge: '', amount: '', incomeType: 'otherTaxable', notes: '' }] }));
   const deleteOtherIncome = (id) => setPlan(prev => ({ ...prev, otherIncomes: (prev.otherIncomes || []).filter(i => i.id !== id) }));
   const addOneOffContrib = () => { const y = new Date().getFullYear() + 1; setPlan(prev => ({ ...prev, oneOffContributions: [...(prev.oneOffContributions || []), { id: 'c_' + Date.now(), date: `${y}-01-01`, year: y, owner: 'Myself', category: 'Pensions', amount: '', desc: '', transferredFrom: 'External', stagedTargetWrapper: 'Pensions' }] })); };
   const deleteOneOffContrib = (id) => setPlan(prev => ({ ...prev, oneOffContributions: (prev.oneOffContributions || []).filter(c => c.id !== id) }));
@@ -2118,6 +2151,7 @@ export default function App() {
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (e.g. DB Pension, Part-time work, Rental)</h3>
                   <span className="text-[11px] text-slate-500">Taxable streams count toward the personal allowance and tax bands; tax-free streams directly reduce net drawdown demand. Blank end age = plan end.</span>
+                  <p className="text-[11px] text-slate-500 mt-1 leading-relaxed max-w-3xl"><strong>Earnings</strong> (employment / self-employment) are taxed <em>and</em> count as relevant UK earnings, so they raise how much you can pay into a pension that year. <strong>Other taxable income</strong> — DB pensions, annuities, rent, dividends, interest — is taxed at income-tax rates but does <strong>not</strong> support pension contributions. <strong>Tax-free income</strong> is neither taxed nor counted. With no relevant earnings the pension limit is {formatGBP(P.pensionNoEarningsLimit)}/yr.</p>
                 </div>
                 <button onClick={addOtherIncome} className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer shadow-xs"><Plus className="w-3.5 h-3.5" /> Add Stream</button>
               </div>
@@ -2139,7 +2173,9 @@ export default function App() {
                       </div>
                       <div className="flex items-center gap-2">
                         <input type="number" min="0" step="500" placeholder="£/yr" onFocus={handleFocus} value={inc.amount} onChange={(e) => updateListItem('otherIncomes', inc.id, { amount: parseInputNumber(e.target.value) })} className="w-24 p-1.5 bg-white border border-slate-300 rounded font-mono text-emerald-700 font-bold" />
-                        <select value={inc.taxTreatment} onChange={(e) => updateListItem('otherIncomes', inc.id, { taxTreatment: e.target.value })} className="p-1.5 bg-white border border-slate-300 rounded text-xs font-semibold text-amber-700"><option value="Tax-free">Tax-free</option><option value="Taxable">Taxable</option></select>
+                        <select value={inc.incomeType} onChange={(e) => updateListItem('otherIncomes', inc.id, { incomeType: e.target.value })} className="p-1.5 bg-white border border-slate-300 rounded text-xs font-semibold text-amber-700" title="Drives both income tax and whether this counts as relevant earnings for pension contributions">
+                          {Object.keys(E.INCOME_TYPES).map(k => <option key={k} value={k}>{E.INCOME_TYPES[k].label}</option>)}
+                        </select>
                       </div>
                       <div className="flex justify-end"><button onClick={() => deleteOtherIncome(inc.id)} className="p-1 text-slate-400 hover:text-rose-600 cursor-pointer transition-colors"><Trash2 className="w-4 h-4" /></button></div>
                     </div>
@@ -2156,7 +2192,7 @@ export default function App() {
                   <button onClick={addOneOffContrib} className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer border border-slate-200"><Plus className="w-3.5 h-3.5" /> Add Lump Sum</button>
                 </div>
                 <div className="p-4 bg-indigo-50/80 border border-indigo-200 rounded-2xl text-xs text-slate-700 space-y-1.5">
-                  <div className="flex items-center gap-2 font-bold text-indigo-950 text-sm"><Info className="w-4 h-4 text-indigo-600" /> Annual Allowance Headroom</div>
+                  <div className="flex items-center gap-2 font-bold text-indigo-950 text-sm"><Info className="w-4 h-4 text-indigo-600" /> Annual Allowance Headroom &mdash; {ctx.baseYear} tax year</div>
                   {ctx.owners.map(o => (
                     <div key={o.key} className="flex flex-wrap gap-x-4">
                       <span className="font-semibold">{o.label}:</span>
@@ -2165,6 +2201,7 @@ export default function App() {
                     </div>
                   ))}
                   <p className="text-slate-500 text-[11px] leading-relaxed">A one-off deposit that exceeds remaining headroom is auto-staged: the allowed amount deposits now, the rest parks in Other Investments and drip-feeds into the target wrapper as future years' allowance opens up.</p>
+                  <p className="text-slate-500 text-[11px] leading-relaxed">These are <strong>this year's</strong> figures. Headroom changes in later years as regular contributions escalate, and again once contributions stop at retirement — each deposit below shows the headroom for its own year.</p>
                 </div>
                 {(plan?.oneOffContributions || []).length === 0 ? (
                   <div className="text-xs text-slate-400 italic p-3 bg-slate-50 border border-slate-200 rounded-xl">No one-off contributions scheduled.</div>
@@ -2194,12 +2231,17 @@ export default function App() {
                             <button onClick={() => deleteOneOffContrib(c.id)} className="p-1 ml-auto text-slate-400 hover:text-rose-600 cursor-pointer transition-colors"><Trash2 className="w-4 h-4" /></button>
                           </div>
                           {st && (
-                            <div>
+                            <div className="flex flex-wrap items-center gap-2">
                               {st.direct ? (
                                 <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded font-sans text-[10px] font-bold">Direct Deposit (£{Math.round(st.amount).toLocaleString()} within headroom)</span>
                               ) : (
                                 <span className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded font-sans text-[10px] font-bold">Staged (Option A): £{Math.round(st.H0).toLocaleString()} now &rarr; {c.category}, £{Math.round(st.surplus0).toLocaleString()} parked in Other Investments</span>
                               )}
+                              <span className="text-slate-500 font-sans text-[10px]">
+                                {Number.isFinite(st.yearHeadroom)
+                                  ? `${c.category} headroom in ${c.year}: ${formatGBP(st.yearHeadroom)}`
+                                  : `${c.category} has no annual limit`}
+                              </span>
                             </div>
                           )}
                           {st && !st.direct && isExpanded && (
@@ -2341,7 +2383,7 @@ export default function App() {
                   ['basicTaxRate', 'Basic Rate (%)'], ['higherBandLimit', 'Additional Rate Starts At (£ income)'], ['higherTaxRate', 'Higher Rate (%)'], ['additionalTaxRate', 'Additional Rate (%)'],
                   ['nicPrimaryThreshold', 'NIC Primary Threshold (£)'], ['nicUpperEarningsLimit', 'NIC Upper Earnings Limit (£)'], ['nicMainRate', 'NIC Main Rate (%)'], ['nicUpperRate', 'NIC Upper Rate (%)'],
                   ['employerNicRate', 'Employer NIC Rate (%)'], ['employerNicPassThrough', 'Employer NIC Passed to Pension (%)'], ['pclsProportion', 'PCLS Tax-Free (%)'], ['pclsMaxCap', 'Lump Sum Allowance (£ LSA)'],
-                  ['isaAnnualAllowance', 'ISA Allowance (£/person/yr)'], ['pensionAnnualAllowance', 'Pension Annual Allowance (£/person/yr)']
+                  ['isaAnnualAllowance', 'ISA Allowance (£/person/yr)'], ['pensionAnnualAllowance', 'Pension Annual Allowance (£/person/yr)'], ['pensionNoEarningsLimit', 'Pension Limit With No Earnings (£/person/yr)']
                 ].map(([field, label]) => (
                   <div key={field}><span className="text-slate-600 font-sans font-semibold block mb-1">{label}</span><input type="number" min="0" placeholder={String(E.DEFAULT_CONFIG[field])} onFocus={handleFocus} value={plan?.config?.[field] ?? ''} onChange={(e) => updateConfig(field, e.target.value)} className={smallInputCls} /></div>
                 ))}
