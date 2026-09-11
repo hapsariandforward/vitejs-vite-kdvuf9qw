@@ -61,14 +61,39 @@ const RISK_EQUITY_WEIGHTS = {
   'Medium/Low Risk': 0.30, 'Low Risk': 0.10, 'Cash Equivalents': 0.00
 };
 
+// `real` is the median (geometric) annual real return; `volatility` is the annual σ of the log return.
+// The lucky/unlucky bounds shown on the deterministic chart are no longer stored here: they are derived
+// from these two figures and the plan's own horizon by luckyBand, so the percentile they claim is true.
 const DEFAULT_RISK_PROFILES = {
-  'High Risk': { label: 'Highest: 80–100% Equities', real: 4.44, unlucky: 1.66, lucky: 7.31, nominal: 7.05, volatility: 15.5 },
-  'Medium/High Risk': { label: 'High: 60–80% Equities', real: 3.72, unlucky: 1.38, lucky: 6.13, nominal: 6.31, volatility: 11.5 },
-  'Medium Risk': { label: 'Medium: 40–60% Equities', real: 3.00, unlucky: 1.10, lucky: 4.95, nominal: 5.58, volatility: 8.0 },
-  'Medium/Low Risk': { label: 'Medium/Low: 20–40% Equities', real: 2.28, unlucky: 0.82, lucky: 3.77, nominal: 4.84, volatility: 5.5 },
-  'Low Risk': { label: 'Low: High interest Cash Savings, Fixed Income, Bonds', real: 1.56, unlucky: 0.54, lucky: 2.59, nominal: 4.10, volatility: 3.0 },
-  'Cash Equivalents': { label: 'Instant cash savings/money market', real: -0.50, unlucky: -1.00, lucky: 0.00, nominal: 1.99, volatility: 0.5 }
+  'High Risk': { label: 'Highest: 80–100% Equities', real: 4.44, nominal: 7.05, volatility: 15.5 },
+  'Medium/High Risk': { label: 'High: 60–80% Equities', real: 3.72, nominal: 6.31, volatility: 11.5 },
+  'Medium Risk': { label: 'Medium: 40–60% Equities', real: 3.00, nominal: 5.58, volatility: 8.0 },
+  'Medium/Low Risk': { label: 'Medium/Low: 20–40% Equities', real: 2.28, nominal: 4.84, volatility: 5.5 },
+  'Low Risk': { label: 'Low: High interest Cash Savings, Fixed Income, Bonds', real: 1.56, nominal: 4.10, volatility: 3.0 },
+  'Cash Equivalents': { label: 'Instant cash savings/money market', real: -0.50, nominal: 1.99, volatility: 0.5 }
 };
+
+// 90th percentile of the standard normal. The 10th is its negative.
+const Z90 = 1.2815515655446004;
+
+/*
+ * The constant annual real rate whose compounded result over `years` lands on the 90th (lucky) and 10th
+ * (unlucky) percentile of wealth at the end of that horizon.
+ *
+ * Monte Carlo draws each year's return as exp(ln(1+real) + σ·z) − 1, so over T years the cumulative log
+ * return is normal with mean T·ln(1+real) and standard deviation σ·√T. Dividing by T to annualise gives
+ * a spread of σ/√T: the band narrows as the horizon lengthens, because it is the *average* rate that
+ * diversifies, not the total. This is the PRIIPs convention for favourable and unfavourable scenarios.
+ *
+ * No single simulated path follows one of these lines. Each is a percentile of the outcome at the end,
+ * which is a different claim from "the 90th percentile happened every year" — that would be 0.1^T.
+ */
+function luckyBand(real, vol, years) {
+  const T = Math.max(1, num(years, 1));
+  const m = Math.log(1 + clamp(real, -0.99, 50));
+  const spread = Z90 * vol / Math.sqrt(T);
+  return { lucky: Math.exp(m + spread) - 1, unlucky: Math.exp(m - spread) - 1 };
+}
 
 // ---------------------------------------------------------------- plan shape & defaults
 const OWNERS = ['self', 'part'];
@@ -615,6 +640,9 @@ function buildContext(rawPlan) {
   const accounts = plan.accounts.filter(a => isCouple || a.owner === 'Myself').map(a => {
     const prof = riskOf(a.risk);
     const [cat, owner] = a.id.split('_');
+    const real = clamp(num(prof.real, 0), -50, 50) / 100;
+    const vol = clamp(num(prof.volatility, 12), 0, 100) / 100;
+    const band = luckyBand(real, vol, totalYears);
     return {
       id: a.id, cat, owner, ownerLabel: a.owner,
       balance: Math.max(0, num(a.balance, 0)),
@@ -624,10 +652,12 @@ function buildContext(rawPlan) {
       growth: clamp(num(a.growth, 0), -100, 100) / 100,
       contribByYear: Array.isArray(a.contribByYear) ? a.contribByYear.map(v => Math.max(0, num(v, 0))) : null,
       risk: a.risk,
-      real: clamp(num(prof.real, 0), -50, 50) / 100,
-      lucky: clamp(num(prof.lucky, 0), -50, 50) / 100,
-      unlucky: clamp(num(prof.unlucky, 0), -50, 50) / 100,
-      vol: clamp(num(prof.volatility, 12), 0, 100) / 100,
+      real: real,
+      // Derived, not entered: the annualised rate whose terminal wealth sits at the 90th/10th percentile
+      // of this tier's own log-normal distribution over the plan's horizon. See luckyBand.
+      lucky: band.lucky,
+      unlucky: band.unlucky,
+      vol,
       equityWeight: RISK_EQUITY_WEIGHTS[a.risk] !== undefined ? RISK_EQUITY_WEIGHTS[a.risk] : 0.9,
       isCash: a.risk === 'Cash Equivalents'
     };
@@ -1840,8 +1870,8 @@ function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
 }
 
 // Namespace used by the UI (mirrors the modular engine.js exports)
-const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, nicFor, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, salaryAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSurvivalMaximizer, buildTournament, buildPolicyCandidates, pickBest };
-export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans, buildPolicyCandidates, pickBest, accumulationOutlay, solveEscalation, applyEscalationToPlan };
+const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, luckyBand, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, nicFor, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, salaryAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSurvivalMaximizer, buildTournament, buildPolicyCandidates, pickBest };
+export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, luckyBand, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans, buildPolicyCandidates, pickBest, accumulationOutlay, solveEscalation, applyEscalationToPlan };
 
 
 const STORAGE_KEY = 'rp_plan_full_v28';          // unchanged: old saved plans are migrated by normalizePlan
@@ -3629,25 +3659,30 @@ export default function App() {
               <div className="flex justify-between items-center">
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">Asset Allocations, Return Matrix &amp; Volatilities (σ)</h3>
-                  <span className="text-[11px] text-slate-500">Expected real return is treated as the median (geometric) annual rate; Monte Carlo paths are log-normal around it with the stated σ, one market factor for all wrappers. Default rates and volatilities are drawn from Vanguard's Capital Markets Model (VCMM).</span>
+                  <span className="text-[11px] text-slate-500">Expected real return is treated as the median (geometric) annual rate; Monte Carlo paths are log-normal around it with the stated σ, one market factor for all wrappers. Default rates and volatilities are drawn from Vanguard's Capital Markets Model (VCMM). The lucky and unlucky columns are calculated from the expected rate, σ and your {ctx.totalYears}-year horizon, so they are not editable.</span>
                 </div>
                 <button onClick={() => setIsEditingRisk(!isEditingRisk)} className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border ${isEditingRisk ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'}`}><Pencil className="w-3.5 h-3.5" />{isEditingRisk ? 'Done Editing' : 'Edit Matrix'}</button>
               </div>
               <table className="w-full text-left text-xs border-collapse">
-                <thead><tr className="border-b border-slate-200 text-slate-500 font-semibold"><th className="pb-2">Allocation Category</th><th className="pb-2">Expected Real Return (% pa)</th><th className="pb-2">Unlucky Real Return (% pa)</th><th className="pb-2">Lucky Real Return (% pa)</th><th className="pb-2">Nominal Return (% pa)</th><th className="pb-2">Annual Volatility (σ % pa)</th></tr></thead>
+                <thead><tr className="border-b border-slate-200 text-slate-500 font-semibold"><th className="pb-2">Allocation Category</th><th className="pb-2">Expected Real Return (% pa)</th><th className="pb-2">Unlucky, 10th %ile (% pa)</th><th className="pb-2">Lucky, 90th %ile (% pa)</th><th className="pb-2">Nominal Return (% pa)</th><th className="pb-2">Annual Volatility (σ % pa)</th></tr></thead>
                 <tbody className="divide-y divide-slate-100 font-mono">
-                  {Object.entries(activeRiskMatrix).map(([key, val]) => (
+                  {Object.entries(activeRiskMatrix).map(([key, val]) => {
+                    const band = E.luckyBand(E.num(val.real, 0) / 100, E.num(val.volatility, 12) / 100, ctx.totalYears);
+                    return (
                     <tr key={key} className="hover:bg-slate-50/80">
                       <td className="py-2.5 font-sans font-bold text-slate-800">{val.label || key}</td>
                       {[['real', 'text-blue-700', 0.05], ['unlucky', 'text-rose-700', 0.05], ['lucky', 'text-emerald-700', 0.05], ['nominal', 'text-purple-700', 0.05], ['volatility', 'text-amber-700', 0.5]].map(([field, color, step]) => (
                         <td key={field} className="py-2.5">
-                          {isEditingRisk ? (
+                          {field === 'lucky' || field === 'unlucky' ? (
+                            <span className={`${color} font-bold`}>{(band[field] * 100).toFixed(2)}%</span>
+                          ) : isEditingRisk ? (
                             <input type="number" step={step} min={field === 'volatility' ? 0 : undefined} onFocus={handleFocus} value={val[field] ?? ''} onChange={(e) => updateRiskField(key, field, e.target.value)} className={`w-20 p-1 bg-slate-50 border border-slate-300 rounded font-mono ${color} font-bold focus:bg-surface focus:ring-1 focus:ring-blue-500`} />
                           ) : <span className={`${color} font-bold`}>{E.num(val[field], 0).toFixed(field === 'volatility' ? 1 : 2)}%</span>}
                         </td>
                       ))}
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -3688,8 +3723,8 @@ export default function App() {
           <div className="space-y-6">
             <div className="p-4 bg-blue-50/80 border border-blue-200 rounded-2xl text-xs text-slate-700 space-y-1.5 shadow-2xs">
               <div className="flex items-center gap-2 font-bold text-blue-950 text-sm"><Layers className="w-4 h-4 text-blue-600" /> Deterministic Portfolio Trajectory &amp; Sandbox</div>
-              <p className="leading-relaxed"><strong>What it does:</strong> Models compound wealth paths and tax-wrapper decumulation using steady real rates of return (Expected baseline, Lucky 90th percentile, Unlucky 10th percentile). Use the Sandbox below to test contributions and salary sacrifice ratios.</p>
-              <p className="text-slate-500 text-[11px] leading-relaxed"><strong>Why these figures differ from Monte Carlo:</strong> this trajectory assumes smooth, constant returns without volatility or sequence-of-returns shocks. The Monte Carlo median is centred on the same expected rate, so the gap between the two is the cost of volatility.</p>
+              <p className="leading-relaxed"><strong>What it does:</strong> Models compound wealth paths and tax-wrapper decumulation using steady real rates of return. The lucky and unlucky rates are calculated from each tier's volatility and your own horizon, so the pot each one reaches at the terminal age is the 90th and 10th percentile of what the Monte Carlo would produce. Use the Sandbox below to test contributions and salary sacrifice ratios.</p>
+              <p className="text-slate-500 text-[11px] leading-relaxed"><strong>How to read the bands:</strong> no real path runs at a constant rate, and none of these three lines is a path the simulation would produce. Each is the steady rate that lands on a given percentile of wealth at the terminal age. Because it is the <em>average</em> rate that diversifies over time and not the total, the band narrows in annual terms the longer the horizon, while the gap in pounds keeps widening. The lines also carry no sequence-of-returns risk, which is the main thing the Monte Carlo adds.</p>
               <p className={`text-[11px] font-semibold ${deterministicVerdict.survived ? 'text-emerald-700' : 'text-rose-700'}`}>
                 {deterministicVerdict.survived ? `Expected path survives to ${terminalAge}` : `Expected path fails at age ${deterministicVerdict.failAge} (${deterministicVerdict.failReason === 'pre-access' ? 'pre-SIPP access bridge exhausted' : deterministicVerdict.failReason === 'floor' ? 'below the bequest floor' : 'spending shortfall'})`}; lifetime tax {formatGBP(deterministicVerdict.lifetimeTax)}{P.cgtEnabled ? ' (income tax + CGT)' : ''}.
               </p>
@@ -3706,8 +3741,8 @@ export default function App() {
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Expected Terminal Pot</div><div className="text-2xl font-black font-mono text-blue-600 mt-2">{formatGBP(chartDisplayData[chartDisplayData.length - 1]?.expected)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Target className="w-3.5 h-3.5 text-blue-600" /> Constant expected real growth to age {terminalAge}</div></div>
-              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Lucky Scenario (90th %ile)</div><div className="text-2xl font-black font-mono text-emerald-600 mt-2">{formatGBP(timelineData[timelineData.length - 1]?.lucky)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><TrendingUp className="w-3.5 h-3.5 text-emerald-600" /> Constant above-average return rate</div></div>
-              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Unlucky Scenario (10th %ile)</div><div className="text-2xl font-black font-mono text-rose-600 mt-2">{formatGBP(timelineData[timelineData.length - 1]?.unlucky)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><ShieldCheck className="w-3.5 h-3.5 text-rose-600" /> Constant below-average return rate</div></div>
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Lucky Scenario (90th %ile)</div><div className="text-2xl font-black font-mono text-emerald-600 mt-2">{formatGBP(timelineData[timelineData.length - 1]?.lucky)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><TrendingUp className="w-3.5 h-3.5 text-emerald-600" /> Top decile of outcomes at age {terminalAge}</div></div>
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Unlucky Scenario (10th %ile)</div><div className="text-2xl font-black font-mono text-rose-600 mt-2">{formatGBP(timelineData[timelineData.length - 1]?.unlucky)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><ShieldCheck className="w-3.5 h-3.5 text-rose-600" /> Bottom decile of outcomes at age {terminalAge}</div></div>
             </div>
 
             <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
@@ -4020,7 +4055,7 @@ export default function App() {
 
             <div id="doc-risk-profiles" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-blue-600" /> Asset Allocations, Return Bounds &amp; Volatility (σ)</h2>
-              <p className="text-xs text-slate-600 leading-relaxed">Each wrapper is assigned a risk tier with an expected real return (treated as the median annual rate), lucky/unlucky bounds for the deterministic chart, and a volatility used by the Monte Carlo. All wrappers move together (one market factor scaled by each tier's σ); the historical backtest blends real US equity and bond returns by the tier's equity weight ({Object.entries(E.RISK_EQUITY_WEIGHTS).map(([k, v]) => `${k.replace(' Risk', '')} ${Math.round(v * 100)}%`).join(', ')}).</p>
+              <p className="text-xs text-slate-600 leading-relaxed">Each wrapper is assigned a risk tier with an expected real return (treated as the median annual rate) and a volatility used by the Monte Carlo. The lucky and unlucky rates on the deterministic chart are calculated from those two figures and the plan horizon, as exp(ln(1 + expected) ± 1.2816·σ/√T) − 1, so each line ends on the stated percentile of terminal wealth rather than on a fixed margin above and below the mean. All wrappers move together (one market factor scaled by each tier's σ); the historical backtest blends real US equity and bond returns by the tier's equity weight ({Object.entries(E.RISK_EQUITY_WEIGHTS).map(([k, v]) => `${k.replace(' Risk', '')} ${Math.round(v * 100)}%`).join(', ')}).</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                 {Object.entries(activeRiskMatrix).map(([k, v]) => (
                   <div key={k} className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><span className="font-bold text-slate-800">{k} ({v.label})</span><p className="text-slate-500">Expected real {E.num(v.real, 0).toFixed(2)}% pa, σ = {E.num(v.volatility, 0).toFixed(1)}%.</p></div>
