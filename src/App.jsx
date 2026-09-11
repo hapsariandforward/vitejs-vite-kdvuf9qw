@@ -2898,12 +2898,12 @@ export default function App() {
               <SketchRoulette className="hidden md:block absolute -right-6 -top-4 w-64 lg:w-80 text-indigo-600/[0.13] pointer-events-none" />
               <SketchCards className="hidden lg:block absolute right-64 top-16 w-40 text-amber-600/[0.16] pointer-events-none rotate-6" />
               <div className="relative p-6 sm:p-8 max-w-2xl space-y-3">
-                <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-indigo-600">UK retirement modelling</span>
+                <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-indigo-600">His Majesty's Royal Casino presents</span>
                 <h2 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 font-display italic leading-tight">
-                  Your plan, played out thousands of times.
+                  Test your portfolio against the casino of life!
                 </h2>
                 <p className="text-sm text-slate-600 leading-relaxed">
-                  Markets do not hand you an average. This model runs your pensions, ISAs, GIA and cash through {MC_TRIALS.toLocaleString()} different
+                  This model runs your pensions, ISAs, GIA and cash through {MC_TRIALS.toLocaleString()} different
                   market histories, taxes every withdrawal under UK rules, and tells you how often the plan actually holds — not just how it looks
                   on a good day.
                 </p>
@@ -2933,13 +2933,13 @@ export default function App() {
               <ol className="space-y-2.5">
                 {[
                   { n: 1, tab: 'inputs', label: 'Fill in Plan Inputs', need: 'Required',
-                    body: 'Ages, retirement ages, what you spend, and what sits in each wrapper today. The rest of the app is unusable without this, and a half-filled form produces confidently wrong answers.' },
-                  { n: 2, tab: 'config', label: 'Visit Config only if you need to', need: 'Optional',
+                    body: 'Ages, retirement ages, what you spend, and what sits in each wrapper today. This tab requires filling first. Choose \'advanced inputs\' for self employed.' },
+                  { n: 2, tab: 'config', label: 'Amend advanced config and assumptions', need: 'Optional',
                     body: `Tax bands, allowances, expected returns and volatility all carry sensible current-year defaults. Change them to test a different assumption — a lower return, a pension death tax rate — not because the tab exists.` },
-                  { n: 3, tab: 'simulation', label: 'Run the simulation, then the tournament', need: 'The answer',
+                  { n: 3, tab: 'simulation', label: 'Run monte carlo simulations',
                     body: `Test whether your spend survives, or solve for the most you could safely spend. Then let the tournament re-split the same take-home budget six ways and score each on ${TOURNAMENT_TRIALS.toLocaleString()} identical market paths.` },
-                  { n: 4, tab: 'docs', label: 'Check what the model does not do', need: 'Before you rely on it',
-                    body: 'Every assumption, simplification and known gap is written down rather than buried. Worth five minutes before any real decision rests on a number from here.' }
+                  { n: 4, tab: 'docs', label: 'Documentation and model gaps',
+                    body: 'Policies, Assumptions, simplification and known gaps are documented here.' }
                 ].map(step => (
                   <li key={step.n}>
                     <button type="button" onClick={() => setActiveTab(step.tab)}
@@ -2948,7 +2948,7 @@ export default function App() {
                       <span className="min-w-0">
                         <span className="flex flex-wrap items-center gap-2">
                           <strong className="text-xs font-bold text-slate-900 group-hover:text-indigo-700">{step.label}</strong>
-                          <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${step.need === 'Required' ? 'bg-rose-100 text-rose-800' : step.need === 'Optional' ? 'bg-slate-200 text-slate-600' : 'bg-indigo-100 text-indigo-800'}`}>{step.need}</span>
+                          {step.need && <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${step.need === 'Required' ? 'bg-rose-100 text-rose-800' : 'bg-slate-200 text-slate-600'}`}>{step.need}</span>}
                         </span>
                         <span className="block text-[11px] text-slate-600 leading-relaxed mt-1">{step.body}</span>
                       </span>
