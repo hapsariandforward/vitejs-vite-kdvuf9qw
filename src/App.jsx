@@ -3179,11 +3179,8 @@ export default function App() {
 
               <div className="pt-3 border-t border-slate-100">
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                  <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">Spending by age (optional)</span>
-                  <div className="flex items-center gap-3">
-                    <button type="button" onClick={() => goToDoc('doc-taper')} className="text-[11px] text-blue-600 hover:underline font-semibold flex items-center gap-1 cursor-pointer"><HelpCircle className="w-3.5 h-3.5" /> Go-go / slow-go / no-go years &rarr;</button>
-                    <button onClick={addSpendBand} className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer shadow-xs"><Plus className="w-3.5 h-3.5" /> Add Band</button>
-                  </div>
+                  <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">{isCouple ? 'Joint Net Living Spend' : 'Net Living Spend'} by age (optional)</span>
+                  <button onClick={addSpendBand} className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer shadow-xs"><Plus className="w-3.5 h-3.5" /> Add Band</button>
                 </div>
                 <p className="text-[11px] text-slate-500 mb-2 max-w-3xl">
                   Set what a stretch of years actually costs, in today's money, instead of one figure for the whole
@@ -3357,9 +3354,14 @@ export default function App() {
             <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex justify-between items-center">
                 <div>
-                  <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (e.g. DB Pension, Part-time work, Rental)</h3>
+                  <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (e.g. Direct Benefit Pensions, Part-time work, Rental income)</h3>
                   <span className="text-[11px] text-slate-500">Taxable streams count towards the personal allowance and tax bands; tax-free streams directly reduce net drawdown demand. Blank end age = plan end.</span>
-                  <p className="text-[11px] text-slate-500 mt-1 leading-relaxed max-w-3xl"><strong>Earnings</strong> (employment / self-employment) are taxed <em>and</em> count as relevant UK earnings, so they raise how much you can pay into a pension that year. <strong>Other taxable income</strong> (DB pensions, annuities, rent, dividends, interest) is taxed at income-tax rates but does <strong>not</strong> support pension contributions. <strong>Tax-free income</strong> is neither taxed nor counted. With no relevant earnings the pension limit is {formatGBP(P.pensionNoEarningsLimit)}/yr.</p>
+                  <ul className="list-disc pl-4 text-[11px] text-slate-500 mt-1 leading-relaxed max-w-3xl space-y-0.5">
+                    <li><strong>Earnings</strong> (employment / self-employment) are taxed <em>and</em> count as relevant UK earnings, so they raise how much you can pay into a pension that year.</li>
+                    <li><strong>Other taxable income</strong> (DB pensions, annuities, rent, dividends, interest) is taxed at income-tax rates but does <strong>not</strong> support pension contributions.</li>
+                    <li><strong>Tax-free income</strong> is neither taxed nor counted.</li>
+                  </ul>
+                  <span className="text-[11px] text-slate-500 mt-1 block">With no relevant earnings the pension limit is {formatGBP(P.pensionNoEarningsLimit)}/yr.</span>
                 </div>
                 <button onClick={addOtherIncome} className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer shadow-xs"><Plus className="w-3.5 h-3.5" /> Add Stream</button>
               </div>
@@ -4015,13 +4017,7 @@ export default function App() {
 
             <div id="doc-taper" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><HelpCircle className="w-4 h-4 text-blue-600" /> Spending by Age</h2>
-              <p className="text-xs text-slate-600 leading-relaxed">Retirement spending often isn't flat. It tends to move through phases:</p>
-              <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
-                <li><strong>Go-Go Years:</strong> active travel, hobbies, home modifications and dining out in early retirement.</li>
-                <li><strong>Slow-Go Years:</strong> spending on travel and lifestyle moderates naturally.</li>
-                <li><strong>No-Go Years:</strong> leisure spending falls again, though care costs can more than reverse that.</li>
-              </ul>
-              <p className="text-xs text-slate-600 leading-relaxed">Set these in Plan Inputs as bands: a start age, an end age and what those years cost in today's money. A band that names ages 58 to 67 at {formatGBP(45000)}, then 68 to 79 at {formatGBP(34000)}, then 80 onwards at {formatGBP(40000)}, says exactly that, including the rise at the end for care. Ages are "Myself" ages.</p>
+              <p className="text-xs text-slate-600 leading-relaxed">Retirement spending often isn't flat. Set what a stretch of years actually costs in Plan Inputs as bands: a start age, an end age and what those years cost in today's money. A band that names ages 58 to 67 at {formatGBP(45000)}, then 68 to 79 at {formatGBP(34000)}, then 80 onwards at {formatGBP(40000)}, says exactly that, including the rise at the end for care. Ages are "Myself" ages.</p>
               <p className="text-xs text-slate-600 leading-relaxed">Bands only override the years they cover. Any year outside every band falls back to the headline living spend, so naming a single expensive stretch is enough; you do not have to describe the whole retirement. Leave the end age blank to run a band to the terminal age. If two bands overlap the earlier one wins for the shared years, and the model says so in the warnings rather than picking silently.</p>
               <p className="text-xs text-slate-500 leading-relaxed">Bands replaced an older pair of percentage "tapers" that could only step spending down at two fixed ages. Any saved plan still carrying tapers is converted to the equivalent bands when it loads, so its projection is unchanged. The safe-spend solver scales the whole shape at once: it finds the multiple of your headline spend that survives, and every band moves with it in proportion.</p>
             </div>
