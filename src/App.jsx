@@ -156,6 +156,9 @@ const BLANK_PLAN = Object.freeze({
     currentAgeSelf: '', currentAgePart: '',
     retireAgeSelf: '', retireAgePart: '',
     salarySelf: '', salaryPart: '',
+    // real salary growth, i.e. on top of inflation. Blank or 0 means pay keeps pace with inflation, which
+    // is flat in today's money because the whole projection runs in real terms.
+    salaryGrowthSelf: '', salaryGrowthPart: '',
     // 'employed' (Class 1 NIC, salary sacrifice relief) or 'self-employed' (Class 4 NIC, income tax relief only)
     employmentSelf: 'employed', employmentPart: 'employed',
     cgtGainsUsedSelf: '', cgtGainsUsedPart: '',
@@ -583,6 +586,8 @@ function buildContext(rawPlan) {
     age0: o === 'self' ? ageSelf0 : agePart0,
     retireAge: o === 'self' ? retireSelf : retirePart,
     salary: Math.max(0, num(o === 'self' ? d.salarySelf : d.salaryPart, 0)),
+    // growth on top of inflation; 0 leaves pay flat in today's money
+    salaryGrowth: clamp(num(o === 'self' ? d.salaryGrowthSelf : d.salaryGrowthPart, 0), -100, 100) / 100,
     // trading profit rather than salary: Class 4 NIC, and pension relief at the income tax rate only
     selfEmployed: (o === 'self' ? d.employmentSelf : d.employmentPart) === 'self-employed',
     cgtGainsUsed: Math.max(0, num(o === 'self' ? d.cgtGainsUsedSelf : d.cgtGainsUsedPart, 0)),
@@ -889,9 +894,10 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
       if (!working[o.key] || o.salary <= 0) return;
       const pen = acc[o.ids.pen];
       const penContrib = pen ? contribAtYear(pen, t) : 0;
+      const pay = salaryAtYear(o, t);
       // pay less tax, NIC and the net cost of the pension contribution — which prices sacrifice for an
       // employee and relief at source for the self-employed, whose NIC is charged on the whole profit
-      const takeHome = o.salary - calculateUKTaxAndNIC(o.salary, P, o.selfEmployed) - netCostOfPensionContrib(penContrib, o.salary, P, o.selfEmployed);
+      const takeHome = pay - calculateUKTaxAndNIC(pay, P, o.selfEmployed) - netCostOfPensionContrib(penContrib, pay, P, o.selfEmployed);
       const nonPensionContribs = (contribThisYear[o.key] / frac) - penContrib;
       workingTakeHome += Math.max(0, takeHome - nonPensionContribs) * frac;
     });
@@ -1250,11 +1256,21 @@ function contribAtYear(a, t) {
   return a.contribByYear ? (a.contribByYear[t] || 0) : a.contrib * Math.pow(1 + a.growth, t);
 }
 
+/*
+ * Salary, or trading profit for the self-employed, in projection-year t. The projection is in today's
+ * money, so a rate of 0 is not a frozen wage: it is pay rising exactly with inflation. `salaryGrowth` is
+ * whatever is expected on top of that, and can be negative for a career winding down.
+ */
+function salaryAtYear(o, t) {
+  if (!(o.salary > 0)) return 0;
+  return o.salary * Math.pow(1 + (o.salaryGrowth || 0), t);
+}
+
 // Relevant UK earnings for pension purposes in projection-year t: salary while still working, plus any
 // earnings-type income streams active at that age. Pension income, annuities and rent do not count.
 function relevantEarningsAtYear(ctx, o, t) {
   const age = o.age0 + t;
-  const salary = age < o.retireAge ? o.salary : 0;
+  const salary = age < o.retireAge ? salaryAtYear(o, t) : 0;
   return (ctx.otherIncomes || []).reduce((s, i) =>
     (i.owner === o.key && i.isEarnings && age >= i.startAge && age <= i.endAge) ? s + i.amount : s, salary);
 }
@@ -1429,7 +1445,7 @@ function accumulationOutlay(rawPlan, rateOverride = null) {
           c = stripped * Math.pow(1 + rateOverride, t);
         }
         if (!(c > 0)) continue;
-        net += cat === 'pen' ? netCostOfPensionContrib(c, o.salary, cfg, o.selfEmployed) : c;
+        net += cat === 'pen' ? netCostOfPensionContrib(c, salaryAtYear(o, t), cfg, o.selfEmployed) : c;
       }
     });
   });
@@ -1742,7 +1758,7 @@ function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
 }
 
 // Namespace used by the UI (mirrors the modular engine.js exports)
-const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, nicFor, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSurvivalMaximizer, buildTournament, buildPolicyCandidates, pickBest };
+const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, nicFor, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, salaryAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSurvivalMaximizer, buildTournament, buildPolicyCandidates, pickBest };
 export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans, buildPolicyCandidates, pickBest, accumulationOutlay, solveEscalation, applyEscalationToPlan };
 
 
@@ -3112,6 +3128,25 @@ export default function App() {
                         </div>
                       );
                     })}
+                    {ctx.owners.map(o => {
+                      const field = o.key === 'self' ? 'salaryGrowthSelf' : 'salaryGrowthPart';
+                      const isSE = plan?.demographics?.[o.key === 'self' ? 'employmentSelf' : 'employmentPart'] === 'self-employed';
+                      const rate = E.num(plan?.demographics?.[field], 0);
+                      return (
+                        <div key={`sg_${o.key}`}>
+                          <label className="text-slate-600 font-semibold block mb-1">{isSE ? 'Profit' : 'Salary'} growth above inflation ({o.label} %/yr)</label>
+                          <input type="number" step="0.25" placeholder="0" onFocus={handleFocus}
+                            value={plan?.demographics?.[field] ?? ''}
+                            onChange={(e) => updateDemographics(field, e.target.value)} className={inputCls} />
+                          <span className="text-[10px] text-slate-400 mt-1 block">
+                            Default is 0, meaning pay rises with inflation. The projection is in today's money, so 0 holds
+                            {isSE ? ' profit' : ' pay'} flat in real terms rather than freezing it in cash terms. Enter 1 for a
+                            1% real rise a year; a negative figure winds earnings down.
+                            {rate !== 0 && ` At ${rate}%, ${formatGBP(o.salary)} today is worth ${formatGBP(o.salary * Math.pow(1 + rate / 100, Math.max(0, o.retireAge - o.age0)))} in today's money at retirement.`}
+                          </span>
+                        </div>
+                      );
+                    })}
                     {ctx.owners.map(o => (
                       <div key={`cf_${o.key}`}>
                         <label className="text-slate-600 font-semibold block mb-1">Pension allowance carried forward ({o.label} £)</label>
@@ -3814,6 +3849,7 @@ export default function App() {
               <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Decisions taken</h3>
               <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
                 <li><strong>Everything is in today's money.</strong> Growth uses each tier's <em>real</em> rate, so every pot, spend and bequest figure is in today's purchasing power. The "Combined (Nominal)" chart series is the only place inflation is added back, for display. A £100,000 bequest floor therefore means £100,000 of today's money. Do not gross it up.</li>
+                <li><strong>Pay is flat in real terms unless you say otherwise.</strong> Salary, or trading profit for the self-employed, is held at the figure you enter for every working year. Because the projection is in today's money that is not a frozen wage, it is pay rising exactly with inflation. Set a real growth rate per person under Advanced inputs to model promotions or a career winding down; it compounds on top of inflation and feeds the relevant-earnings cap, the annual allowance taper and the relief rate on every pension contribution.</li>
                 <li><strong>The MPAA is derived, not declared.</strong> The model runs the expected path once, finds the first year each person draws taxable pension income, and applies the £{P.mpaaLimit.toLocaleString()} allowance from that age. It assumes you have <em>not</em> already flexibly accessed a pension: reasonable for planning, wrong if you have, which would need the trigger set earlier.</li>
                 <li><strong>Carry-forward is not consumed.</strong> Unused allowance from the prior three years is offered as headroom but is not tracked as being used up, so a plan that leans on it repeatedly is optimistic. It never lifts the earnings limit, and it accrues at each prior year's <em>tapered</em> allowance.</li>
                 <li><strong>The annual allowance taper keys off earnings.</strong> HMRC tapers on adjusted income, which adds employer contributions; the model only knows earnings, so the taper is approximate for anyone near the £{P.aaTaperThr.toLocaleString()} threshold.</li>
@@ -3830,7 +3866,7 @@ export default function App() {
 
               <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Not modelled yet</h3>
               <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
-                <li><strong>Lumpy self-employed profits.</strong> Trading profit is carried as one figure with an escalation rate, like a salary. Real self-employment swings year to year, and a bad year can waste an annual allowance that carry-forward only partly recovers. <strong>Class 2 NIC</strong> is also not charged: it stopped being mandatory above the Small Profits Threshold in 2024, and the voluntary route for those below it does not change a projection. Payments on account, the trading allowance, capital allowances and incorporation are all out of scope.</li>
+                <li><strong>Lumpy self-employed profits.</strong> Trading profit is carried as a single figure that grows at a steady rate, exactly like a salary. Real self-employment swings year to year, and a bad year can waste an annual allowance that carry-forward only partly recovers. <strong>Class 2 NIC</strong> is also not charged: it stopped being mandatory above the Small Profits Threshold in 2024, and the voluntary route for those below it does not change a projection. Payments on account, the trading allowance, capital allowances and incorporation are all out of scope.</li>
                 <li><strong>Scottish and Welsh income tax:</strong> rates and bands are rest-of-UK throughout.</li>
                 <li><strong>Inheritance tax on the estate.</strong> The pension death tax setting applies a haircut to leftover pension only, so it represents the <em>extra</em> tax a pension suffers relative to an ISA, not IHT on everything.</li>
                 <li><strong>Defined benefit pensions</strong> beyond entering them as a taxable income stream; no accrual, revaluation or transfer values.</li>
