@@ -1979,7 +1979,26 @@ function SketchCards({ className = '' }) {
     </svg>
   );
 }
-function SketchRoulette({ className = '' }) {
+// True when the browser is set to reduce motion, so the decorative animations can sit still.
+function usePrefersReducedMotion() {
+  const [reduced, setReduced] = useState(false);
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const update = () => setReduced(mq.matches);
+    update();
+    mq.addEventListener('change', update);
+    return () => mq.removeEventListener('change', update);
+  }, []);
+  return reduced;
+}
+
+function SketchRoulette({ className = '', spin = false }) {
+  const still = usePrefersReducedMotion();
+  const live = spin && !still;
+  // The wheel is drawn in perspective, so the spokes are squashed about the centre (85, 56) and the
+  // rotation happens inside that squash: turning first and flattening second is what a real wheel does.
+  // The ball runs the other way round an ellipse of its own, the way it does before it drops.
   return (
     <svg viewBox="0 0 170 130" className={className} fill="none" stroke="currentColor" strokeWidth="1.5"
       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
@@ -1991,12 +2010,24 @@ function SketchRoulette({ className = '' }) {
       {/* inner track and hub */}
       <path d="M85 37 Q122 38 123 56 Q123 73 84 74 Q46 74 46 57 Q46 39 84 37" opacity="0.7" />
       <path d="M85 50 q13 0 13 6 q0 6 -13 6 q-13 0 -13 -6 q0 -6 13 -6" />
-      {/* spokes, drawn unevenly */}
-      <path d="M85 50 L84 39 M85 62 L86 73 M72 55 L48 53 M98 57 L122 59" opacity="0.6" />
-      <path d="M75 52 L57 43 M96 61 L114 70 M96 52 L114 44 M74 61 L57 70" opacity="0.35" />
+      {/* spokes, drawn unevenly, turning as one */}
+      <g transform="translate(85 56) scale(1 0.487) translate(-85 -56)" strokeWidth="2.2">
+        {live && <animateTransform attributeName="transform" type="rotate" additive="sum"
+          from="0 85 56" to="360 85 56" dur="5.2s" repeatCount="indefinite" />}
+        <path d="M98 56 L121 56 M85 69 L85 92 M72 56 L49 56 M85 43 L85 20" opacity="0.6" />
+        <path d="M94.9 65.9 L109 80 M75.1 65.9 L61 80 M75.1 46.1 L61 32 M94.9 46.1 L109 32" opacity="0.35" />
+      </g>
       {/* the ball, with a scuff of motion behind it */}
-      <path d="M110 44 q5 -1 5 3 q0 4 -5 4 q-5 0 -5 -4 q0 -4 5 -3" />
-      <path d="M99 42 q6 -3 12 -1" opacity="0.45" />
+      <g transform={live ? undefined : 'translate(110 47)'}>
+        {live && <animateMotion dur="2.3s" repeatCount="indefinite" rotate="auto"
+          path="M130 56 A45 22 0 1 0 40 56 A45 22 0 1 0 130 56" />}
+        <g>
+          {live && <animateTransform attributeName="transform" type="translate" additive="sum"
+            values="0 0; 0.8 -0.6; -0.5 0.9; 0.9 0.4; -0.4 -0.7; 0 0" dur="0.55s" repeatCount="indefinite" />}
+          <path d="M0 -3.5 q4.6 -0.5 4.6 3.5 q0 4 -4.6 4 q-4.6 0 -4.6 -4 q0 -4 4.6 -3.5" />
+          <path d="M-11 -2 q6 -2.5 11 -1.5" opacity="0.45" />
+        </g>
+      </g>
       {/* a corner of the betting layout, ruled by hand */}
       <g opacity="0.45" transform="translate(8 95)">
         <path d="M2 2 Q78 3 152 5" />
@@ -3004,7 +3035,7 @@ export default function App() {
           <div className="space-y-6">
             <div className="relative overflow-hidden bg-surface border border-slate-200/90 rounded-2xl shadow-xs">
               {/* light-touch sketches: decorative, behind the text, and out of the way on narrow screens */}
-              <SketchRoulette className="hidden md:block absolute -right-6 -top-4 w-64 lg:w-80 text-indigo-600/[0.13] pointer-events-none" />
+              <SketchRoulette spin className="hidden md:block absolute -right-6 -top-4 w-64 lg:w-80 text-indigo-600/[0.2] pointer-events-none" />
               <SketchCards className="hidden lg:block absolute right-64 top-16 w-40 text-amber-600/[0.16] pointer-events-none rotate-6" />
               <div className="relative p-6 sm:p-8 max-w-2xl space-y-3">
                 <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-indigo-600">His Majesty's Royal Casino presents</span>
@@ -3033,54 +3064,18 @@ export default function App() {
               </div>
             </div>
 
-            {/* order of work */}
-            <div className="bg-surface border border-slate-200/90 rounded-2xl p-5 shadow-xs space-y-4">
-              <div>
-                <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Where to start</h3>
-                <p className="text-[11px] text-slate-500 mt-0.5">Only the first step is required. Everything after it reads from what you entered there.</p>
-              </div>
-              <ol className="space-y-2.5">
-                {[
-                  { n: 1, tab: 'inputs', label: 'Fill in Plan Inputs', need: 'Required',
-                    body: 'Ages, retirement ages, what you spend, and what sits in each wrapper today. This tab requires filling first. Choose \'advanced inputs\' for self employed.' },
-                  { n: 2, tab: 'config', label: 'Amend advanced config and assumptions', need: 'Optional',
-                    body: `Tax bands, allowances, expected returns and volatility all carry sensible current-year defaults. Change them to test a different assumption (a lower return, a pension death tax rate), not because the tab exists.` },
-                  { n: 3, tab: 'trajectory', label: 'Preview the expected path',
-                    body: 'A single expected-return trajectory, year by year, with a sandbox for testing a different contribution or retirement age before running the full simulation.' },
-                  { n: 4, tab: 'simulation', label: 'Run monte carlo simulations',
-                    body: `Test whether your spend survives, or solve for the most you could safely spend. Then let the tournament re-split the same take-home budget six ways and score each on ${TOURNAMENT_TRIALS.toLocaleString()} identical market paths.` },
-                  { n: 5, tab: 'docs', label: 'Documentation and model gaps',
-                    body: 'Policies, Assumptions, simplification and known gaps are documented here.' }
-                ].map(step => (
-                  <li key={step.n}>
-                    <button type="button" onClick={() => setActiveTab(step.tab)}
-                      className="w-full text-left flex items-start gap-3.5 p-3 rounded-xl border border-slate-200 bg-slate-50/70 hover:bg-slate-100 hover:border-slate-300 transition-colors cursor-pointer group">
-                      <span className="shrink-0 w-6 h-6 rounded-full bg-indigo-600 text-white text-[11px] font-bold flex items-center justify-center mt-0.5">{step.n}</span>
-                      <span className="min-w-0">
-                        <span className="flex flex-wrap items-center gap-2">
-                          <strong className="text-xs font-bold text-slate-900 group-hover:text-indigo-700">{step.label}</strong>
-                          {step.need && <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${step.need === 'Required' ? 'bg-rose-100 text-rose-800' : 'bg-slate-200 text-slate-600'}`}>{step.need}</span>}
-                        </span>
-                        <span className="block text-[11px] text-slate-600 leading-relaxed mt-1">{step.body}</span>
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ol>
-            </div>
-
             {/* what each tab does */}
             <div className="bg-surface border border-slate-200/90 rounded-2xl p-5 shadow-xs space-y-4">
               <div>
                 <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">What each tab is for</h3>
-                <p className="text-[11px] text-slate-500 mt-0.5">Click any card to go there.</p>
+                <p className="text-[11px] text-slate-500 mt-0.5">Click any card to go there. Plan Inputs is the only tab you have to fill in. Everything else reads from what you entered there.</p>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                 {[
-                  { tab: 'inputs', Icon: Sliders, name: 'Plan Inputs', accent: 'blue',
-                    body: 'Who you are, when you stop working, what you spend, and what each wrapper holds. One-off costs and deposits live here too.' },
-                  { tab: 'config', Icon: Settings, name: 'Config & Assumptions', accent: 'blue',
-                    body: 'Tax rates, allowances, return and volatility assumptions, drawdown policy and the random seed. Defaults are current-year figures.' },
+                  { tab: 'inputs', Icon: Sliders, name: 'Plan Inputs', accent: 'blue', need: 'Required',
+                    body: 'Who you are, when you stop working, what you spend, and what each wrapper holds. One-off costs and deposits live here too. Choose Advanced inputs if either of you is self-employed.' },
+                  { tab: 'config', Icon: Settings, name: 'Config & Assumptions', accent: 'blue', need: 'Optional',
+                    body: 'Tax rates, allowances, return and volatility assumptions, drawdown policy and the random seed. Defaults are current-year figures, so change them to test a different assumption, not because the tab exists.' },
                   { tab: 'trajectory', Icon: Layers, name: 'Portfolio Trajectory', accent: 'blue',
                     body: 'A single expected-return path, year by year, with a sandbox for testing a different contribution or retirement age against it.' },
                   { tab: 'simulation', Icon: Dices, name: 'Monte Carlo Simulation', accent: 'indigo',
@@ -3094,9 +3089,10 @@ export default function App() {
                 ].map(t => (
                   <button key={t.tab} type="button" onClick={() => setActiveTab(t.tab)}
                     className="text-left p-3.5 rounded-xl border border-slate-200 bg-surface hover:border-indigo-200 hover:bg-slate-50 transition-colors cursor-pointer group flex flex-col gap-1.5">
-                    <span className="flex items-center gap-2">
-                      <t.Icon className={`w-4 h-4 ${t.accent === 'indigo' ? 'text-indigo-600' : 'text-blue-600'}`} />
+                    <span className="flex flex-wrap items-center gap-2">
+                      <t.Icon className={`w-4 h-4 shrink-0 ${t.accent === 'indigo' ? 'text-indigo-600' : 'text-blue-600'}`} />
                       <strong className="text-xs font-bold text-slate-900 group-hover:text-indigo-700">{t.name}</strong>
+                      {t.need && <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${t.need === 'Required' ? 'bg-rose-100 text-rose-800' : 'bg-slate-200 text-slate-600'}`}>{t.need}</span>}
                     </span>
                     <span className="text-[11px] text-slate-600 leading-relaxed">{t.body}</span>
                   </button>
