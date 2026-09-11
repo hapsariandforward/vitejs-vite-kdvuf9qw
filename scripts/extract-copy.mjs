@@ -34,12 +34,98 @@ const isProse = (t) => t.length >= 2 && /[A-Za-z]{2}/.test(t) && !CODE_SMELL.tes
 export const looksLikeCode = (t) => CODE_SMELL.test(normalise(t));
 
 /*
+ * Walks the source once, tracking whether each character sits in code, a comment, a string or a regex, so
+ * that a `//` inside a URL is not a comment and a `*` inside a sentence is not a delimiter.
+ *
+ * Comments are the reason this exists. A comment is prose, it is allowed to contain angle brackets, and
+ * "an <ellipse> would read as a diagram" looks exactly like a JSX tag followed by a text run. Left visible
+ * to the extractor, that run is taken to continue to the next '<' — past the end of the comment and into
+ * the function below it. Both extractProse and commentsOf are built on these spans.
+ */
+export function scanSpans(source) {
+  const spans = [];
+  let i = 0;
+  const n = source.length;
+  const open = (kind, start) => ({ kind, start });
+  while (i < n) {
+    const c = source[i], d = source[i + 1];
+    if (c === '/' && d === '/') {
+      const s = open('line-comment', i);
+      while (i < n && source[i] !== '\n') i++;
+      spans.push({ ...s, end: i });
+    } else if (c === '/' && d === '*') {
+      const s = open('block-comment', i);
+      i += 2;
+      while (i < n && !(source[i] === '*' && source[i + 1] === '/')) i++;
+      i = Math.min(n, i + 2);
+      spans.push({ ...s, end: i });
+    } else if (c === "'" || c === '"' || c === '`') {
+      const s = open(c === "'" ? 'sq' : c === '"' ? 'dq' : 'template', i);
+      const quote = c;
+      i++;
+      while (i < n) {
+        if (source[i] === '\\') { i += 2; continue; }
+        if (source[i] === quote) { i++; break; }
+        // an unterminated single- or double-quoted string cannot cross a line, so stop rather than
+        // swallowing the rest of the file when the character was an apostrophe in prose
+        if (quote !== '`' && source[i] === '\n') break;
+        i++;
+      }
+      spans.push({ ...s, end: i });
+    } else if (c === '/' && /[=([,:;!&|?+\-*{}\n]\s*$/.test(source.slice(Math.max(0, i - 3), i))) {
+      // a regex literal: consume it so a '/' inside it is never read as the start of a comment
+      const s = open('regex', i);
+      i++;
+      let inClass = false;
+      while (i < n) {
+        if (source[i] === '\\') { i += 2; continue; }
+        if (source[i] === '[') inClass = true;
+        else if (source[i] === ']') inClass = false;
+        else if (source[i] === '/' && !inClass) { i++; break; }
+        else if (source[i] === '\n') break;
+        i++;
+      }
+      spans.push({ ...s, end: i });
+    } else {
+      i++;
+    }
+  }
+  return spans;
+}
+
+/*
+ * Every comment in the file, run together. Comments are never editable copy, so a copy edit must leave
+ * this byte-for-byte identical, and the applier can check that without asking the extractor anything.
+ *
+ * That independence is the whole point. The skeleton check cuts out precisely the regions the extractor
+ * reports as copy, so it is blind wherever the extractor is wrong — and the extractor being wrong is
+ * exactly when a bad edit gets written. Comments are the case where it was: prose is allowed to contain
+ * angle brackets, so "an <ellipse> would read as a diagram" inside a comment looked like a tag followed by
+ * a text run, and the run was taken to continue past the comment's end and into the function below.
+ *
+ * Only comments are compared, not strings. A quotation mark typed into a sentence is ordinary copy, and a
+ * check that counted string boundaries would refuse it.
+ */
+export const commentsOf = (source) =>
+  scanSpans(source).filter(s => s.kind === 'line-comment' || s.kind === 'block-comment')
+    .map(s => source.slice(s.start, s.end)).join('\u0000');
+
+/*
  * Blank out what is not copy, replacing it with spaces rather than deleting it so that every offset in
  * the blanked text still points at the same character of the original.
  */
 const blankOut = (source, re) => source.replace(re, (m) => ' '.repeat(m.length));
+function blankComments(source) {
+  const out = source.split('');
+  for (const s of scanSpans(source)) {
+    if (s.kind !== 'line-comment' && s.kind !== 'block-comment') continue;
+    // newlines are kept so line-anchored patterns elsewhere still see the same line structure
+    for (let k = s.start; k < s.end; k++) if (out[k] !== '\n') out[k] = ' ';
+  }
+  return out.join('');
+}
 function blankNoise(source) {
-  let s = source;
+  let s = blankComments(source);
   s = blankOut(s, /\bclassName=\{`[^`]*`\}/g);
   s = blankOut(s, /\bclassName=\{[^}]*\}/g);
   s = blankOut(s, /\bclassName="[^"]*"/g);
@@ -54,8 +140,16 @@ function blankNoise(source) {
  */
 export function extractProse(source) {
   const blanked = blankNoise(source);
+  /*
+   * Blanking comments stops them being *found*, but a region is located in the blanked copy and then read
+   * back out of the original, so a run that merely straddles a comment still picks the comment's words up
+   * again. Nothing that touches a comment is copy, so the spans are checked directly.
+   */
+  const comments = scanSpans(source).filter(s => s.kind === 'line-comment' || s.kind === 'block-comment');
+  const touchesComment = (index, length) => comments.some(c => index < c.end && index + length > c.start);
   const out = [];
   const push = (index, length, kind) => {
+    if (touchesComment(index, length)) return;
     const raw = source.slice(index, index + length);
     const shown = normalise(decodeEntities(raw));
     if (isProse(shown)) out.push({ text: raw, shown, index, length, kind });
@@ -113,8 +207,18 @@ export function extractProse(source) {
   const attr = /\b(?:placeholder|title|aria-label)="([^"\n{}]+)"/g;
   while ((m = attr.exec(blanked)) !== null) push(m.index + m[0].indexOf('"') + 1, m[1].length, 'attr');
 
+  /*
+   * A text run is split on its `{…}` interpolations, but that split matches braces flatly, so a ternary
+   * holding a template literal — `{n > 0 ? ` … ${n} … ` : ''}` — closes early on the brace inside `${n}`
+   * and leaves shards like "scenario$" behind. They are harmless (both safety checks would catch an edit
+   * that reached past one) but they are not copy, and offering them to click on is just noise. Neither a
+   * backtick nor a bare dollar belongs in the wording of a sterling app.
+   */
+  const isShard = (t) => /[`$]/.test(t);
+
   // a class list or a path is not a sentence, however many spaces it has
   return out.filter(r => {
+    if (isShard(r.shown)) return false;
     if (r.kind === 'jsx' || r.kind === 'attr') return true;
     if (!/\s/.test(r.shown)) return false;
     return !/^[a-z0-9\s:/[\]._-]+$/.test(r.shown);

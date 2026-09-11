@@ -63,13 +63,21 @@ That distinction is not a guess about the text — it comes from *where* each pi
 source. `"Myself"` is a label shown in four places and also a data value written seventeen times; an edit
 rewrites the four and leaves the seventeen alone.
 
-Three further guarantees:
+Four further guarantees:
 
 - **No typed character can break the file.** Every replacement is escaped for the exact context it lands
   in, so a quote cannot close a string, a brace cannot open a JSX expression, and a backtick cannot end a
   template.
 - **Only text changes.** After applying, the file with all copy cut out of it must be byte-for-byte what it
   was. If it is not, nothing is written.
+- **Comments are never touched.** Every comment in the file is compared before and after, and any
+  difference refuses the patch. This is deliberately a second check rather than a stronger first one: the
+  check above cuts out exactly the regions the extractor calls copy, so it is blind wherever the extractor
+  is *wrong*, which is precisely when a bad edit gets written. Comments were that blind spot. Prose is
+  allowed to contain angle brackets, so `an <ellipse> would read as a diagram` inside a comment looked like
+  a tag followed by a text run, and the run was taken to continue past the comment's end and into the
+  function below it — with both skeletons coming out identical because the region was excluded from each.
+  Comments are now hidden from the extractor as well, so this check should never fire.
 - **All or nothing.** If any single edit in a patch cannot be placed, nothing is written at all.
 
 It only edits text and design tokens. Moving things around, changing layout, or adding elements is not

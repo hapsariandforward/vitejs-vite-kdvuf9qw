@@ -17,7 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { findProse, normalise, decodeEntities, escapeFor, skeleton, looksLikeCode } from './extract-copy.mjs';
+import { findProse, normalise, decodeEntities, escapeFor, skeleton, looksLikeCode, commentsOf } from './extract-copy.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = path.resolve(HERE, '..');
@@ -127,6 +127,19 @@ export function applyPatch(patch, { root = DEFAULT_ROOT, write = true } = {}) {
       reason: codey.length
         ? `new wording that reads as code cannot be written into the source: ${codey.map(c => JSON.stringify(c.slice(0, 60))).join(', ')}`
         : 'the edit would have changed the code around the text, not just the text — refusing to write'
+    });
+  }
+
+  /*
+   * The second check, which does not consult the extractor at all. The one above cuts out exactly the
+   * regions the extractor reports as copy, so if the extractor is what was wrong — if it offered a piece
+   * of a comment, say, and the "text" ran past the comment's end into the code below — both skeletons come
+   * out identical and the damage passes straight through. The comments are a fact about the file rather
+   * than the extractor's opinion of it, and no copy edit has any business touching one.
+   */
+  if (nextApp !== originalApp && commentsOf(nextApp) !== commentsOf(originalApp)) {
+    report.failed.push({
+      reason: 'the edit reached into a code comment, which is never editable copy — refusing to write'
     });
   }
 
