@@ -3354,7 +3354,7 @@ export default function App() {
             <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <div className="flex justify-between items-center">
                 <div>
-                  <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (e.g. Direct Benefit Pensions, Part-time work, Rental income)</h3>
+                  <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider flex items-center gap-2"><Coins className="w-4 h-4 text-blue-600" /> 3. Expected Other Income Streams (e.g. Defined Benefit Pensions, Part-time work, Rental income)</h3>
                   <span className="text-[11px] text-slate-500">Taxable streams count towards the personal allowance and tax bands; tax-free streams directly reduce net drawdown demand. Blank end age = plan end.</span>
                   <ul className="list-disc pl-4 text-[11px] text-slate-500 mt-1 leading-relaxed max-w-3xl space-y-0.5">
                     <li><strong>Earnings</strong> (employment / self-employment) are taxed <em>and</em> count as relevant UK earnings, so they raise how much you can pay into a pension that year.</li>
