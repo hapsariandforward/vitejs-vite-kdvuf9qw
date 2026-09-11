@@ -3,7 +3,7 @@ import * as d3 from 'd3';
 import {
   TrendingUp, Layers, Check, RotateCcw, Dices, Zap, ShieldCheck, Target, Sliders, Download, Upload, Users, Wallet, Coins,
   Settings, Plus, Trash2, Table, FileSpreadsheet, CheckCircle2, AlertTriangle, Pencil, HelpCircle, BookOpen, History, Bookmark,
-  Save, Sparkles, ArrowUpRight, ArrowDownRight, Trophy, Info, Sun, Moon, Monitor, ChevronUp, ChevronDown
+  Save, Sparkles, ArrowUpRight, ArrowDownRight, Trophy, Info, Sun, Moon, Monitor, ChevronUp, ChevronDown, Home
 } from 'lucide-react';
 // ============================================================================================
 // Monte-Carlo Retirement Planner v3.4 — single-file build (engine + UI).
@@ -1843,6 +1843,71 @@ function ProgressBar({ value, label }) {
   );
 }
 
+/*
+ * Pencil-sketch motifs for the landing page. Drawn as open paths rather than primitives so the strokes
+ * wobble, overshoot their corners and double back the way a pencil line does — an <ellipse> would read as
+ * a diagram. They inherit `currentColor` so each theme tints them, and are decorative only (aria-hidden).
+ */
+function SketchCards({ className = '' }) {
+  // Card faces are filled with the page surface so a fanned card hides the one behind it. The fade comes
+  // from the caller's text colour (currentColor carries its own alpha), not from group opacity, which
+  // would make the fills translucent and lose the occlusion.
+  const face = 'rgb(var(--surface))';
+  return (
+    <svg viewBox="0 0 150 125" className={className} fill="none" stroke="currentColor" strokeWidth="1.5"
+      strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      {/* back card, fanned left */}
+      <g transform="rotate(-19 55 72)">
+        <path fill={face} d="M27 32 Q48 29 70 28 Q73 29 73 33 L76 97 Q76 101 72 101 Q50 104 30 104 Q26 104 26 100 L24 36 Q24 32 27 32" />
+        {/* diamond */}
+        <path d="M43 51 L50 40 L57 52 L49 62 Z" strokeOpacity="0.8" />
+      </g>
+      {/* middle card */}
+      <g transform="rotate(-5 76 68)">
+        <path fill={face} d="M55 24 Q77 22 99 23 Q102 23 102 27 Q103 60 103 94 Q103 98 99 98 Q77 100 56 99 Q52 99 52 95 Q51 61 51 28 Q51 24 55 24" />
+        {/* club: three lobes and a flared stem */}
+        <path d="M77 40 q7 0 7 6 q0 5 -6 6 q7 -2 9 4 q2 6 -3 8 q-5 2 -7 -4 q-2 6 -7 4 q-5 -2 -3 -8 q2 -6 9 -4 q-6 -1 -6 -6 q0 -6 7 -6" />
+        <path d="M77 64 q-1 5 -5 8 q5 -2 10 0 q-4 -3 -5 -8" />
+      </g>
+      {/* front card, fanned right, with a second searching stroke down its long edge */}
+      <g transform="rotate(15 101 66)">
+        <path fill={face} d="M84 19 Q106 20 127 23 Q131 24 130 28 Q128 60 125 93 Q124 97 120 96 Q99 94 79 93 Q75 92 76 88 Q79 55 81 23 Q81 19 84 19" />
+        <path d="M86 21 Q105 22 125 25" strokeOpacity="0.35" />
+        {/* spade */}
+        <path d="M104 41 Q96 50 93 55 q-4 6 1 9 q5 3 9 -3 q4 6 9 3 q5 -3 1 -9 Q110 50 104 41" />
+        <path d="M104 62 q-1 6 -5 9 q5 -2 10 0 q-4 -3 -5 -9" />
+      </g>
+    </svg>
+  );
+}
+function SketchRoulette({ className = '' }) {
+  return (
+    <svg viewBox="0 0 170 130" className={className} fill="none" stroke="currentColor" strokeWidth="1.5"
+      strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      {/* outer rim: an open path that overshoots where it closes, so the line looks drawn round once */}
+      <path d="M87 27 Q133 28 136 56 Q137 82 85 85 Q33 85 32 57 Q32 30 84 27 Q99 27 108 29" />
+      {/* the depth of the bowl, and a lighter repeat of the near edge */}
+      <path d="M32 58 Q34 74 85 76 Q136 75 136 57" opacity="0.55" />
+      <path d="M35 61 Q40 74 85 77" opacity="0.3" />
+      {/* inner track and hub */}
+      <path d="M85 37 Q122 38 123 56 Q123 73 84 74 Q46 74 46 57 Q46 39 84 37" opacity="0.7" />
+      <path d="M85 50 q13 0 13 6 q0 6 -13 6 q-13 0 -13 -6 q0 -6 13 -6" />
+      {/* spokes, drawn unevenly */}
+      <path d="M85 50 L84 39 M85 62 L86 73 M72 55 L48 53 M98 57 L122 59" opacity="0.6" />
+      <path d="M75 52 L57 43 M96 61 L114 70 M96 52 L114 44 M74 61 L57 70" opacity="0.35" />
+      {/* the ball, with a scuff of motion behind it */}
+      <path d="M110 44 q5 -1 5 3 q0 4 -5 4 q-5 0 -5 -4 q0 -4 5 -3" />
+      <path d="M99 42 q6 -3 12 -1" opacity="0.45" />
+      {/* a corner of the betting layout, ruled by hand */}
+      <g opacity="0.45" transform="translate(8 95)">
+        <path d="M2 2 Q78 3 152 5" />
+        <path d="M2 2 Q1 15 0 28 M40 3 L37 29 M78 4 L76 30 M115 4 L114 30 M152 5 L151 31" />
+        <path d="M0 28 Q76 30 151 31" />
+      </g>
+    </svg>
+  );
+}
+
 function WarningsBanner({ warnings }) {
   if (!warnings || !warnings.length) return null;
   return (
@@ -2172,7 +2237,8 @@ function WrapperStrategyTournament({ plan, ctx, seed, state, setState, cancelRef
 
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('inputs');
+  // a returning visitor already knows the layout, so only a first visit (no saved plan) opens on the guide
+  const [activeTab, setActiveTab] = useState(() => (safeStorageGet(STORAGE_KEY) ? 'inputs' : 'home'));
   const [isEditingRisk, setIsEditingRisk] = useState(false);
   const [selectedHistoricalYear, setSelectedHistoricalYear] = useState(1965);
   const [mcSeed, setMcSeed] = useState(12345);
@@ -2233,8 +2299,9 @@ export default function App() {
     results: null, progress: null, isEvaluating: false, basePlan: null, autoRun: 0
   });
   const tournamentCancelRef = useRef(false);
-  // The Monte Carlo tab leads with the tournament, so its sandbox copy starts collapsed.
-  const [sandboxOpen, setSandboxOpen] = useState(false);
+  // Both tabs render the same sandbox, but each remembers its own expanded state: the Trajectory tab is
+  // the sandbox's home so it starts open, while the Monte Carlo tab leads with the tournament.
+  const [sandboxOpen, setSandboxOpen] = useState({ trajectory: true, simulation: false });
 
   useEffect(() => { safeStorageSet(STORAGE_KEY, JSON.stringify(plan)); }, [plan]);
   useEffect(() => { safeStorageSet(SCENARIOS_STORAGE_KEY, JSON.stringify(scenarios)); }, [scenarios]);
@@ -2613,6 +2680,9 @@ export default function App() {
   };
 
   const displayedAccounts = isCouple ? (plan?.accounts || []) : (plan?.accounts || []).filter(a => a.owner === 'Myself');
+  // enough has been entered for the rest of the app to say something meaningful
+  const planStarted = E.num(plan?.spending?.targetSpend, 0) > 0
+    || (plan?.accounts || []).some(a => E.num(a.balance, 0) > 0 || E.num(a.contrib, 0) > 0);
   const tabBtn = (id, Icon, label, accent = 'blue') => (
     <button key={id} onClick={() => setActiveTab(id)} className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${activeTab === id ? (accent === 'indigo' ? 'bg-surface text-indigo-600 shadow-xs' : 'bg-surface text-blue-600 shadow-xs') : 'text-slate-600 hover:text-slate-900'}`}>
       <Icon className="w-3.5 h-3.5" /> {label}
@@ -2648,23 +2718,23 @@ export default function App() {
   // backed by a single piece of state and an edit made in one tab is already present in the other.
   // On the Monte Carlo tab it sits below the tournament and starts collapsed, since the tournament is
   // what that tab is for and the sandbox is the follow-on.
-  const renderSandboxPanel = ({ collapsible = false } = {}) => (
+  const renderSandboxPanel = ({ tab }) => {
+    const open = !!sandboxOpen[tab];
+    return (
     <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-5">
-      <div className={collapsible && !sandboxOpen ? '' : 'pb-3 border-b border-slate-100'}>
+      <div className={open ? 'pb-3 border-b border-slate-100' : ''}>
         <div className="flex items-start justify-between gap-3">
           <div>
             <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Sparkles className="w-4 h-4 text-amber-500" /> Sandbox</h3>
             <p className="text-xs text-slate-500 mt-0.5">Test contributions, escalation rates and tournament strategies without modifying your base plan inputs.</p>
           </div>
-          {collapsible && (
-            <button type="button" onClick={() => setSandboxOpen(o => !o)} className="shrink-0 px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 cursor-pointer">
-              {sandboxOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-              {sandboxOpen ? 'Hide' : isSandboxModified ? 'Show (edited)' : 'Show'}
-            </button>
-          )}
+          <button type="button" onClick={() => setSandboxOpen(o => ({ ...o, [tab]: !o[tab] }))} className="shrink-0 px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 cursor-pointer">
+            {open ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+            {open ? 'Hide' : isSandboxModified ? 'Show (edited)' : 'Show'}
+          </button>
         </div>
       </div>
-      {collapsible && !sandboxOpen ? null : <>
+      {!open ? null : <>
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 pb-3 border-y border-slate-100">
         <div><h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Wrapper Sandbox Controls</h4><span className="text-[11px] text-slate-500">Adjust retirement ages and individual wrappers below, or reset back to your baseline plan inputs.</span></div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -2746,7 +2816,8 @@ export default function App() {
       </div>
       </>}
     </div>
-  );
+    );
+  };
 
 
   return (
@@ -2768,6 +2839,7 @@ export default function App() {
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               <div className="flex items-center gap-1 bg-slate-100 p-1.5 rounded-xl border border-slate-200/80 flex-wrap">
+                {tabBtn('home', Home, 'Start Here')}
                 {tabBtn('inputs', Sliders, 'Plan Inputs')}
                 {tabBtn('config', Settings, 'Config & Assumptions')}
                 {tabBtn('trajectory', Layers, 'Portfolio Trajectory')}
@@ -2791,6 +2863,7 @@ export default function App() {
         </div>
 
         {/* Scenario Toolbar */}
+        {activeTab !== 'home' && (
         <div className="bg-surface border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3 flex-wrap">
             <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700"><Bookmark className="w-4 h-4 text-blue-600" /><span>Active Scenario:</span></div>
@@ -2810,8 +2883,135 @@ export default function App() {
             {saveSuccessMsg && <span className="text-xs font-bold text-emerald-700 flex items-center gap-1 bg-emerald-50 px-2 py-1 rounded-lg border border-emerald-200"><Check className="w-3 h-3 text-emerald-600" /> {saveSuccessMsg}</span>}
           </div>
         </div>
+        )}
 
-        {activeTab !== 'docs' && <WarningsBanner warnings={ctx.warnings} />}
+        {activeTab !== 'docs' && activeTab !== 'home' && <WarningsBanner warnings={ctx.warnings} />}
+
+        {/* TAB 0: LANDING */}
+        {activeTab === 'home' && (
+          <div className="space-y-6">
+            <div className="relative overflow-hidden bg-surface border border-slate-200/90 rounded-2xl shadow-xs">
+              {/* light-touch sketches: decorative, behind the text, and out of the way on narrow screens */}
+              <SketchRoulette className="hidden md:block absolute -right-6 -top-4 w-64 lg:w-80 text-indigo-600/[0.13] pointer-events-none" />
+              <SketchCards className="hidden lg:block absolute right-64 top-16 w-40 text-amber-600/[0.16] pointer-events-none rotate-6" />
+              <div className="relative p-6 sm:p-8 max-w-2xl space-y-3">
+                <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-indigo-600">UK retirement modelling</span>
+                <h2 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 font-display italic leading-tight">
+                  Your plan, played out thousands of times.
+                </h2>
+                <p className="text-sm text-slate-600 leading-relaxed">
+                  Markets do not hand you an average. This model runs your pensions, ISAs, GIA and cash through {MC_TRIALS.toLocaleString()} different
+                  market histories, taxes every withdrawal under UK rules, and tells you how often the plan actually holds — not just how it looks
+                  on a good day.
+                </p>
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button type="button" onClick={() => setActiveTab('inputs')}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all cursor-pointer active:scale-95">
+                    <Sliders className="w-3.5 h-3.5" /> {planStarted ? 'Back to Plan Inputs' : 'Start with Plan Inputs'}
+                  </button>
+                  <button type="button" onClick={() => setActiveTab('docs')}
+                    className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer">
+                    <BookOpen className="w-3.5 h-3.5" /> Read the methodology
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-500 pt-1">
+                  <strong className="text-slate-700 font-semibold">Educational and illustrative only — this is not financial advice.</strong> Everything
+                  is stated in today&rsquo;s money, and your plan is saved in this browser only.
+                </p>
+              </div>
+            </div>
+
+            {/* order of work */}
+            <div className="bg-surface border border-slate-200/90 rounded-2xl p-5 shadow-xs space-y-4">
+              <div>
+                <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Where to start</h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">Only the first step is required. Everything after it reads from what you entered there.</p>
+              </div>
+              <ol className="space-y-2.5">
+                {[
+                  { n: 1, tab: 'inputs', label: 'Fill in Plan Inputs', need: 'Required',
+                    body: 'Ages, retirement ages, what you spend, and what sits in each wrapper today. The rest of the app is unusable without this, and a half-filled form produces confidently wrong answers.' },
+                  { n: 2, tab: 'config', label: 'Visit Config only if you need to', need: 'Optional',
+                    body: `Tax bands, allowances, expected returns and volatility all carry sensible current-year defaults. Change them to test a different assumption — a lower return, a pension death tax rate — not because the tab exists.` },
+                  { n: 3, tab: 'simulation', label: 'Run the simulation, then the tournament', need: 'The answer',
+                    body: `Test whether your spend survives, or solve for the most you could safely spend. Then let the tournament re-split the same take-home budget six ways and score each on ${TOURNAMENT_TRIALS.toLocaleString()} identical market paths.` },
+                  { n: 4, tab: 'docs', label: 'Check what the model does not do', need: 'Before you rely on it',
+                    body: 'Every assumption, simplification and known gap is written down rather than buried. Worth five minutes before any real decision rests on a number from here.' }
+                ].map(step => (
+                  <li key={step.n}>
+                    <button type="button" onClick={() => setActiveTab(step.tab)}
+                      className="w-full text-left flex items-start gap-3.5 p-3 rounded-xl border border-slate-200 bg-slate-50/70 hover:bg-slate-100 hover:border-slate-300 transition-colors cursor-pointer group">
+                      <span className="shrink-0 w-6 h-6 rounded-full bg-indigo-600 text-white text-[11px] font-bold flex items-center justify-center mt-0.5">{step.n}</span>
+                      <span className="min-w-0">
+                        <span className="flex flex-wrap items-center gap-2">
+                          <strong className="text-xs font-bold text-slate-900 group-hover:text-indigo-700">{step.label}</strong>
+                          <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${step.need === 'Required' ? 'bg-rose-100 text-rose-800' : step.need === 'Optional' ? 'bg-slate-200 text-slate-600' : 'bg-indigo-100 text-indigo-800'}`}>{step.need}</span>
+                        </span>
+                        <span className="block text-[11px] text-slate-600 leading-relaxed mt-1">{step.body}</span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ol>
+            </div>
+
+            {/* what each tab does */}
+            <div className="bg-surface border border-slate-200/90 rounded-2xl p-5 shadow-xs space-y-4">
+              <div>
+                <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">What each tab is for</h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">Click any card to go there.</p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {[
+                  { tab: 'inputs', Icon: Sliders, name: 'Plan Inputs', accent: 'blue',
+                    body: 'Who you are, when you stop working, what you spend, and what each wrapper holds. One-off costs and deposits live here too.' },
+                  { tab: 'config', Icon: Settings, name: 'Config & Assumptions', accent: 'blue',
+                    body: 'Tax rates, allowances, return and volatility assumptions, drawdown policy and the random seed. Defaults are current-year figures.' },
+                  { tab: 'trajectory', Icon: Layers, name: 'Portfolio Trajectory', accent: 'blue',
+                    body: 'A single expected-return path, year by year, with a sandbox for testing a different contribution or retirement age against it.' },
+                  { tab: 'simulation', Icon: Dices, name: 'Monte Carlo Simulation', accent: 'indigo',
+                    body: `${MC_TRIALS.toLocaleString()} random market paths, a survival rate, and the safe-spend solver — plus the strategy tournament that re-splits your budget across wrappers.` },
+                  { tab: 'historical', Icon: History, name: 'Historical Backtest', accent: 'indigo',
+                    body: `Replays real returns from ${E.HISTORICAL_FIRST_YEAR} onwards through your plan. A reality check on the random draws: sequences like 1973 or 2000 actually happened.` },
+                  { tab: 'audit', Icon: Table, name: 'Audit Data Table', accent: 'blue',
+                    body: 'Every projected year as raw numbers — balances, drawdown, tax paid — so you can check the arithmetic rather than trust the charts.' },
+                  { tab: 'docs', Icon: BookOpen, name: 'Documentation', accent: 'blue',
+                    body: 'How each calculation works, which modelling decisions were made and why, and — plainly stated — what is not modelled yet.' }
+                ].map(t => (
+                  <button key={t.tab} type="button" onClick={() => setActiveTab(t.tab)}
+                    className="text-left p-3.5 rounded-xl border border-slate-200 bg-surface hover:border-indigo-200 hover:bg-slate-50 transition-colors cursor-pointer group flex flex-col gap-1.5">
+                    <span className="flex items-center gap-2">
+                      <t.Icon className={`w-4 h-4 ${t.accent === 'indigo' ? 'text-indigo-600' : 'text-blue-600'}`} />
+                      <strong className="text-xs font-bold text-slate-900 group-hover:text-indigo-700">{t.name}</strong>
+                    </span>
+                    <span className="text-[11px] text-slate-600 leading-relaxed">{t.body}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* honesty note */}
+            <div className="relative overflow-hidden bg-slate-50 border border-slate-200 rounded-2xl p-5">
+              <SketchCards className="hidden sm:block absolute -right-3 -bottom-8 w-44 text-slate-500/[0.12] pointer-events-none -rotate-6" />
+              <div className="relative max-w-2xl space-y-2">
+                <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Info className="w-4 h-4 text-slate-500" /> What this model will not tell you</h3>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  It covers UK income tax and its personal-allowance taper, National Insurance for employees and the self-employed, the annual
+                  allowance with taper and carry-forward, the MPAA, ISA limits, realisation-based CGT, the {Math.round(P.pclsProp * 100)}% tax-free
+                  element and the pre-SIPP access bridge. It does <em>not</em> cover Scottish or Welsh income tax, inheritance tax on the wider
+                  estate, defined benefit accrual, or care costs.
+                </p>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  The full list of assumptions and gaps is written out rather than hidden, so you can judge how much weight a number here deserves.
+                </p>
+                <button type="button" onClick={() => goToDoc('doc-coverage')}
+                  className="text-xs text-indigo-600 hover:text-indigo-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer pt-0.5">
+                  <HelpCircle className="w-3.5 h-3.5" /> Modelling decisions, coverage and known gaps &rarr;
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* TAB 1: PLAN INPUTS */}
         {activeTab === 'inputs' && (
@@ -3385,7 +3585,7 @@ export default function App() {
               </div>
             </div>
 
-            {renderSandboxPanel()}
+            {renderSandboxPanel({ tab: 'trajectory' })}
           </div>
         )}
 
@@ -3401,11 +3601,11 @@ export default function App() {
             <div className="bg-surface border border-slate-200/90 rounded-2xl p-5 shadow-xs flex flex-wrap items-center justify-between gap-3">
               <div className="max-w-2xl">
                 <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Run Multi-Path Simulation</h3>
-                <span className="text-[11px] text-slate-500 block mt-0.5 leading-relaxed">
-                  <strong className="text-slate-700">Test Current Spend</strong> runs your target spend from Plan Inputs through {MC_TRIALS.toLocaleString()} random market paths and reports the share that lasted to age {terminalAge}.{' '}
-                  <strong className="text-slate-700">Safe Max Annual Spend</strong> works backwards instead: it solves for the largest spend that still survives at the confidence you pick, so it takes longer.{' '}
-                  <strong className="text-slate-700">Confidence</strong> applies only to that second button — a lower setting returns a higher spend for more risk.
-                </span>
+                <ul className="text-[11px] text-slate-500 mt-1.5 space-y-1 leading-relaxed list-disc pl-4">
+                  <li><strong className="text-slate-700">Test Current Spend</strong> — runs your target spend from Plan Inputs through {MC_TRIALS.toLocaleString()} random market paths and reports the share that lasted to age {terminalAge}.</li>
+                  <li><strong className="text-slate-700">Safe Max Annual Spend</strong> — works backwards instead, solving for the largest spend that still survives at the confidence you pick. Slower, because it re-runs the whole simulation at each step.</li>
+                  <li><strong className="text-slate-700">Confidence</strong> — applies only to that second button. A lower setting returns a higher spend, in exchange for more risk.</li>
+                </ul>
                 <button type="button" onClick={() => goToDoc('doc-mc-buttons')} className="text-[11px] text-blue-600 hover:text-blue-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer mt-1.5">
                   <HelpCircle className="w-3.5 h-3.5" /> How the two buttons differ, and how to read the result &rarr;
                 </button>
@@ -3451,7 +3651,7 @@ export default function App() {
             )}
 
             <WrapperStrategyTournament plan={plan} ctx={ctx} seed={mcSeed} state={tournament} setState={setTournament} cancelRef={tournamentCancelRef} onApplyStrategyToSandbox={handleApplyStrategyToSandbox} onApplyStrategyToPlan={handleApplyStrategyToPlan} onNavigateDocs={() => goToDoc('doc-tournament')} />
-            {renderSandboxPanel({ collapsible: true })}
+            {renderSandboxPanel({ tab: 'simulation' })}
           </div>
         )}
 
