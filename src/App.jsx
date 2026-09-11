@@ -26,6 +26,7 @@ const num = (v, d = 0) => {
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const isBlank = (v) => v === '' || v === null || v === undefined || (typeof v === 'number' && !Number.isFinite(v));
 const round250 = (v) => Math.round(v / 250) * 250;
+const formatGBP = (v) => new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', maximumFractionDigits: 0 }).format(Number.isFinite(v) ? v : 0);
 const isPlainObject = (o) => o !== null && typeof o === 'object' && !Array.isArray(o);
 
 // ---------------------------------------------------------------- empirical dataset
@@ -1349,18 +1350,68 @@ const annuityFactor = (r, n) => (Math.abs(r) < 1e-9 ? n : (1 - Math.pow(1 + r, -
 const fvContribStream = (C, r, g, n) => { let fv = 0; for (let t = 0; t < n; t++) fv = (fv + C * Math.pow(1 + g, t)) * (1 + r); return fv; };
 
 /*
+ * Real return the bridge pot can be expected to earn: the balance-weighted rate across the wrappers that
+ * are actually allowed to fund it. With nothing liquid held yet there is nothing to weight, so fall back
+ * to the ISA tier, which is where new bridge money would go.
+ */
+function liquidRealRate(ctx) {
+  let w = 0, s = 0;
+  ctx.accounts.forEach(a => { if (a.cat !== 'pen' && a.balance > 0) { w += a.balance; s += a.balance * a.real; } });
+  if (w > 0) return s / w;
+  const isa = ctx.accounts.find(a => a.cat === 'isa');
+  return isa ? isa.real : 0;
+}
+
+/*
  * Pre-access bridge: years in which the household draws on the portfolio but nobody can touch a pension.
- * Conservative: 0% real growth on liquid assets, spending net of guaranteed income (and a working partner's take-home).
+ * Spending is net of guaranteed income (and a working partner's take-home).
+ *
+ * Two sizes come back. `netNeeded` is the plain sum of those years' drawdowns, which assumes the money
+ * sits at 0% real from the day it is set aside: deliberately conservative, and what the bridge safety
+ * margin in Config is applied to. `pvNeeded` discounts each year back to the retirement date at the rate
+ * the liquid pot actually earns, because only the first year's spending is needed on day one; the rest
+ * keeps compounding while it waits. The gap between the two grows with the length of the bridge.
  */
 function bridgeRequirement(ctx) {
   const rows = simulateDeterministic(ctx, 'expected');
-  let years = 0, needed = 0;
+  const rate = liquidRealRate(ctx);
+  let years = 0, needed = 0, pv = 0;
   for (const r of rows) {
     const anyAccess = ctx.owners.some(o => (o.key === 'self' ? r.ageSelf : r.agePart) >= ctx.nmpa);
     if (anyAccess) break;
-    if (r.targetSpend > 0) { years++; needed += r.netDrawdown; }
+    if (r.targetSpend > 0) { pv += r.netDrawdown / Math.pow(1 + rate, years); years++; needed += r.netDrawdown; }
   }
-  return { gapYears: years, netNeeded: needed };
+  return { gapYears: years, netNeeded: needed, pvNeeded: pv, rate };
+}
+
+/*
+ * How much has to go into the ISA each year for the bridge to be funded by the time it is needed, once
+ * growth is counted on both sides: what is already held keeps compounding until retirement, and so does
+ * each new contribution.
+ *
+ * `margin` scales the target (1 = exactly the discounted requirement). `overYears` is how many of the
+ * remaining years carry the contributions: passing fewer than the full run to retirement back-loads them,
+ * which raises the annual figure but leaves the pension compounding on its own for longer first.
+ *
+ * This is the honest version of the figure Relief-First uses. That one ignores growth entirely and then
+ * divides by every year to retirement, which over a long run to retirement asks for several times more
+ * ISA than the bridge will need, and starves the pension of relief to pay for it.
+ */
+function bridgeIsaAnnual(ctx, { emergencyFloor = 0, margin = 1, overYears = null } = {}) {
+  const bridge = bridgeRequirement(ctx);
+  if (!(bridge.gapYears > 0) || !(bridge.pvNeeded > 0)) {
+    return { annual: 0, target: 0, shortfall: 0, spareAtRetire: 0, years: 0, bridge };
+  }
+  const g = bridge.rate;
+  const yearsToRetire = Math.max(1, Math.min(...ctx.owners.map(o => o.retireAge - o.age0)));
+  const liquidToday = ctx.accounts.reduce((t, a) => (a.cat === 'pen' ? t : t + a.balance), 0);
+  const spareAtRetire = Math.max(0, liquidToday - emergencyFloor) * Math.pow(1 + g, yearsToRetire);
+  const target = bridge.pvNeeded * Math.max(0, margin);
+  const shortfall = Math.max(0, target - spareAtRetire);
+  const years = clamp(Math.round(overYears || yearsToRetire), 1, yearsToRetire);
+  const isa = ctx.accounts.find(a => a.cat === 'isa');
+  const fv = fvContribStream(1, g, isa ? isa.growth : 0, years);
+  return { annual: fv > 0 ? shortfall / fv : 0, target, shortfall, spareAtRetire, years, yearsToRetire, bridge };
 }
 
 // Regular-contribution amount for account `a` in projection-year index t (post-escalation, or a phased schedule).
@@ -1641,31 +1692,40 @@ function diffStrategyPlans(basePlan, strategyPlan, { threshold = 50 } = {}) {
   return { contribDeltas, balanceDeltas, byCat, hasChange: contribDeltas.length > 0 || balanceDeltas.length > 0 };
 }
 
-// Evaluate the Survival Maximizer's candidate grid and return the winner as a fully-formed strategy.
-function resolveSurvivalMaximizer(strategy, { trials = 400, seed = 12345, preAccessCap = Infinity, onCandidate = null } = {}) {
+/*
+ * Run a searching player's candidates on one set of market paths and return the winner as an ordinary
+ * strategy. Every candidate carries its own `label` and `describe`, so this knows nothing about what is
+ * being searched: the Survival Maximizer varies the ISA share of the budget, Bridge-Sized Relief varies
+ * how much cover the bridge is given. Sharing one resolver is what keeps the two rankings comparable.
+ */
+function resolveSearchPlayer(strategy, { trials = 400, seed = 12345, preAccessCap = Infinity, onCandidate = null } = {}) {
   const evaluated = strategy.candidates.map((c, i) => {
     const stats = monteCarlo(c.planState, { trials, seed });
-    if (onCandidate) onCandidate(i, strategy.candidates.length, c.share, stats);
+    if (onCandidate) onCandidate(i, strategy.candidates.length, c.label, stats);
     return { ...c, stats };
   });
   const best = pickBest(evaluated, 0.5, preAccessCap);
   return {
     ...strategy,
-    chosenShare: best.share,
-    searchResults: evaluated.map(e => ({ share: e.share, successRate: e.stats.successRate, preAccess: e.stats.preNmpaFailRate, p10: e.stats.p10Terminal, median: e.stats.medianTerminal })),
-    isaContrib: best.alloc.isaContrib, penContrib: best.alloc.penContrib, giaContrib: best.alloc.giaContrib, taxReliefSaved: best.alloc.taxReliefSaved,
-    planState: best.planState,
-    description: `Searched every ISA/pension split of the same budget; best survival at ${Math.round(best.share * 100)}% ISA / ${Math.round((1 - best.share) * 100)}% pension (net budget).`
+    chosenShare: best.share, chosenLabel: best.label,
+    searchAxis: strategy.searchAxis || 'Candidate',
+    searchResults: evaluated.map(e => ({ label: e.label, successRate: e.stats.successRate, preAccess: e.stats.preNmpaFailRate, p10: e.stats.p10Terminal, median: e.stats.medianTerminal })),
+    isaContrib: best.alloc.isaContrib, penContrib: best.alloc.penContrib, giaContrib: best.alloc.giaContrib,
+    taxReliefSaved: best.alloc.taxReliefSaved + (best.reliefExtra || 0),
+    transferNet: Math.round(best.transferNet || 0), transferGross: Math.round(best.transferGross || 0),
+    planState: best.planState, phase: best.phase || null,
+    description: best.describe || strategy.description
   };
 }
 
 /*
- * Strategy tournament — builds the five players. Every player invests the same net take-home budget.
+ * Strategy tournament — builds the six players. Every player invests the same net take-home budget.
  *   1 Current Plan            : as entered
  *   2 Survival Maximizer      : grid search over the ISA share (evaluated by the caller with common random numbers)
- *   3 Relief-First            : pension first (subject to the pre-access bridge minimum), + Bed & SIPP in full scope
- *   4 Bracket-Smoothed Sizing : pension sized so retirement withdrawals + state pension stay inside the basic band
- *   5 Relief-First, Bridge-Last: pension-max early, switch to ISA-max for the final years to build the bridge
+ *   3 Bridge-Sized Relief     : pension-first, bridge carved out at a growth-aware size, cover level searched
+ *   4 Relief-First            : pension first (subject to the pre-access bridge minimum), + Bed & SIPP in full scope
+ *   5 Bracket-Smoothed Sizing : pension sized so retirement withdrawals + state pension stay inside the basic band
+ *   6 Relief-First, Bridge-Last: pension-max early, switch to ISA-max for the final years to build the bridge
  *
  * There used to be a sixth, Liquidity-First, which put the whole budget into ISAs. It was removed because
  * it was a duplicate rather than a strategy: its plan is byte-identical to the Survival Maximizer's
@@ -1700,6 +1760,25 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
   const salaryKnown = owners.some(o => o.salary > 0);
   const meta = { netBudget, derivedBudget, bridge, bridgeCapital, bridgeShortfall, annualIsaNeeded, liquidToday, salaryKnown, yearsToFirstRetire };
 
+  /*
+   * Bed & SIPP: a one-off personal contribution funded from ISA capital that is genuinely spare. Relief at
+   * source adds the basic rate inside the pension; any higher or additional-rate relief comes back as cash
+   * (this route saves no NIC). `spare` is the caller's judgement of what can be moved without leaving the
+   * household short, which is the only part the two players disagree about.
+   */
+  const bedAndSipp = (alloc, spare) => {
+    if (scope !== 'full' || !(spare > 0)) return null;
+    const o = owners[0];
+    const isaSelfBal = acc[o.ids.isa] ? acc[o.ids.isa].balance : 0;
+    const aaRoom = Math.max(0, Math.min(P.aaAt(o.salary), o.salary > 0 ? o.salary : P.pensionAllowance) - alloc.penByOwner[0]);
+    const gross = Math.min(aaRoom, spare / (1 - P.basicRate), isaSelfBal / (1 - P.basicRate));
+    if (!(gross > 250)) return null;
+    const net = gross * (1 - P.basicRate);
+    const reliefTotal = o.salary > 0 ? incomeTax(o.salary, P) - incomeTax(Math.max(0, o.salary - gross), P) : gross * P.higherRate;
+    const refund = Math.max(0, reliefTotal - gross * P.basicRate);
+    return { transfer: { net, gross, refund, fromId: o.ids.isa, toId: o.ids.pen, refundId: o.ids.cash }, reliefExtra: gross - net + refund };
+  };
+
   const mk = (id, name, description, alloc, extra = {}) => ({
     id, name, description,
     isaContrib: alloc.isaContrib, penContrib: alloc.penContrib, giaContrib: alloc.giaContrib, taxReliefSaved: alloc.taxReliefSaved,
@@ -1719,38 +1798,114 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
   // 2 survival maximizer: candidate grid, chosen by the caller
   const grid = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0].map(share => {
     const alloc = allocateBudget(ctx, netBudget, share, { balance });
-    return { share, alloc, planState: applyAllocationToPlan(plan, ctx, alloc) };
+    return {
+      share, alloc, label: `${Math.round(share * 100)}% ISA`,
+      describe: `Searched every ISA/pension split of the same budget; best survival at ${Math.round(share * 100)}% ISA / ${Math.round((1 - share) * 100)}% pension (net budget).`,
+      planState: applyAllocationToPlan(plan, ctx, alloc)
+    };
   });
   strategies.push({
-    id: 'survival', name: 'Survival Maximizer',
+    id: 'survival', name: 'Survival Maximizer', searchAxis: 'ISA share',
     description: 'Searches every ISA/pension split of the same budget (0%–100% in 10% steps) and keeps the split with the highest survival rate, tie-broken by the 10th-percentile pot.',
     candidates: grid, isaContrib: null, penContrib: null, taxReliefSaved: null, transferNet: 0, transferGross: 0, planState: null
   });
-  // 3 relief-first (+ bed & SIPP)
+  /*
+   * 3 bridge-sized relief. Relief-First's weakness is the one number it cannot get right: how much of the
+   * budget the pre-access bridge really needs. It sizes that at 0% real growth and then spreads it over
+   * every year to retirement, which on a twenty-year run asks for several times more ISA than the bridge
+   * will ever use, and pays for it out of pension relief. Taken to the other extreme, funding no bridge at
+   * all can cost seven points of survival.
+   *
+   * So this player does not pick a number. It works out the growth-aware requirement, then puts a handful
+   * of cover levels around it through the simulation and keeps whichever actually survives best, on the
+   * same paths as everyone else. The back-loaded candidates pay the bridge money in over the final years
+   * only, so the pension compounds alone for longer first.
+   */
+  {
+    // Multiples of the bridge target, which already carries the Config safety margin, so 1.0x is
+    // "exactly what Config asks for" and the rest bracket it either side.
+    const cover = [0, 0.75, 1.0, 1.35, 1.8, 2.4];
+    const lateYears = Math.max(1, Math.ceil(yearsToFirstRetire / 2));
+    const canBackLoad = bridge.gapYears > 0 && lateYears < yearsToFirstRetire;
+    const candidates = [];
+    /*
+     * Capital that can be moved into the pension today without stranding the bridge. Relief-First only
+     * attempts this when there is no gap at all; knowing the size of the bridge means this player can
+     * reserve exactly what the gap needs and still move the rest. `target` is the requirement measured at
+     * the retirement date, so it is discounted back before being held out of today's balances.
+     */
+    const spareForSipp = (sized) => {
+      const g = sized.bridge.rate;
+      const reserved = sized.target > 0 ? sized.target / Math.pow(1 + g, sized.yearsToRetire || yearsToFirstRetire) : 0;
+      return Math.max(0, liquidToday - emergencyFloor - reserved);
+    };
+    const pushLevel = (m) => {
+      const sized = bridgeIsaAnnual(ctx, { emergencyFloor, margin: m * margin });
+      const alloc = allocateBudget(ctx, netBudget, 0, { isaMin: sized.annual, balance });
+      const bs = bedAndSipp(alloc, spareForSipp(sized));
+      candidates.push({
+        share: null, cover: m, label: m === 0 ? 'No bridge' : `${m.toFixed(2).replace(/0$/, '')}x level`, alloc, sized,
+        transferNet: bs ? bs.transfer.net : 0, transferGross: bs ? bs.transfer.gross : 0, reliefExtra: bs ? bs.reliefExtra : 0,
+        describe: (m === 0
+          ? 'Everything to the pension, with nothing set aside for the bridge: on these paths that survived better than funding one.'
+          : `Everything to the pension except the bridge, sized at ${m.toFixed(2).replace(/0$/, '')}x the growth-adjusted target (${formatGBP(sized.annual)}/yr to the ISA) and paid in level over ${sized.years} years.`)
+          + (bs ? ` Spare ISA capital above the bridge reserve is moved into the pension as well.` : ''),
+        planState: applyAllocationToPlan(plan, ctx, alloc, bs ? { transfer: bs.transfer } : {})
+      });
+    };
+    const pushLate = (m) => {
+      const sized = bridgeIsaAnnual(ctx, { emergencyFloor, margin: m * margin, overYears: lateYears });
+      const early = allocateBudget(ctx, netBudget, 0, { balance });
+      const late = allocateBudget(ctx, netBudget, 0, { isaMin: sized.annual, balance });
+      const contribByYear = {};
+      const horizon = ctx.totalYears + 1;
+      const switchAt = yearsToFirstRetire - lateYears;
+      owners.forEach((o, i) => {
+        const penArr = [], isaArr = [];
+        const gPen = acc[o.ids.pen] ? acc[o.ids.pen].growth : 0, gIsa = acc[o.ids.isa] ? acc[o.ids.isa].growth : 0;
+        for (let t = 0; t < horizon; t++) {
+          const src = t >= switchAt ? late : early;
+          penArr.push(src.penByOwner[i] * Math.pow(1 + gPen, t));
+          isaArr.push(src.isaByOwner[i] * Math.pow(1 + gIsa, t));
+        }
+        contribByYear[o.ids.pen] = penArr; contribByYear[o.ids.isa] = isaArr;
+      });
+      const bs = bedAndSipp(late, spareForSipp(sized));
+      candidates.push({
+        share: null, cover: m, label: `${m.toFixed(2).replace(/0$/, '')}x last ${lateYears}y`, alloc: late, sized,
+        phase: { switchYears: lateYears, yearsToFirstRetire, early, late },
+        transferNet: bs ? bs.transfer.net : 0, transferGross: bs ? bs.transfer.gross : 0, reliefExtra: bs ? bs.reliefExtra : 0,
+        describe: `Pension-max for ${switchAt} year${switchAt === 1 ? '' : 's'}, then ${formatGBP(sized.annual)}/yr to the ISA over the final ${lateYears} to build the bridge, sized at ${m.toFixed(2).replace(/0$/, '')}x the growth-adjusted target.`
+          + (bs ? ' Spare ISA capital above the bridge reserve is moved into the pension as well.' : ''),
+        planState: applyAllocationToPlan(plan, ctx, late, bs ? { contribByYear, transfer: bs.transfer } : { contribByYear })
+      });
+    };
+    if (bridge.gapYears > 0) {
+      cover.forEach(pushLevel);
+      if (canBackLoad) [1.0, 1.35, 1.8].forEach(pushLate);
+    } else {
+      pushLevel(0);
+      candidates[0].describe = 'No pre-SIPP access gap to bridge, so there is nothing to size and the whole budget goes to the pension.';
+    }
+    strategies.push({
+      id: 'bridged', name: 'Bridge-Sized Relief', searchAxis: 'Bridge cover',
+      description: 'Pension-first, with only the bridge carved out. The requirement is worked out with growth counted on both what you already hold and what you add, then a range of cover levels is run through the simulation and the best-surviving one kept.',
+      candidates, isaContrib: null, penContrib: null, taxReliefSaved: null, transferNet: 0, transferGross: 0, planState: null
+    });
+  }
+  // 4 relief-first (+ bed & SIPP)
   {
     const alloc = allocateBudget(ctx, netBudget, 0, { isaMin: annualIsaNeeded, balance });
-    let transfer = null, reliefExtra = 0;
-    if (scope === 'full' && bridge.gapYears === 0) {
-      // Bed & SIPP: a one-off personal contribution funded from spare ISA capital. Relief at source adds the basic
-      // rate inside the pension; any higher/additional-rate relief is reclaimed as cash (no NIC saving on this route).
-      const spare = Math.max(0, liquidToday - emergencyFloor);
-      const o = owners[0];
-      const isaSelfBal = acc[o.ids.isa] ? acc[o.ids.isa].balance : 0;
-      const aaRoom = Math.max(0, Math.min(P.aaAt(o.salary), o.salary > 0 ? o.salary : P.pensionAllowance) - alloc.penByOwner[0]);
-      const gross = Math.min(aaRoom, spare / (1 - P.basicRate), isaSelfBal / (1 - P.basicRate));
-      if (gross > 250) {
-        const net = gross * (1 - P.basicRate);
-        const reliefTotal = o.salary > 0 ? incomeTax(o.salary, P) - incomeTax(Math.max(0, o.salary - gross), P) : gross * P.higherRate;
-        const refund = Math.max(0, reliefTotal - gross * P.basicRate);
-        transfer = { net, gross, refund, fromId: o.ids.isa, toId: o.ids.pen, refundId: o.ids.cash };
-        reliefExtra = gross - net + refund;
-      }
-    }
+    // This player only reaches for the transfer when there is no bridge to strand, so all spare liquid
+    // capital is fair game. Bridge-Sized Relief reserves the bridge and moves whatever is left over.
+    const bs = bridge.gapYears === 0 ? bedAndSipp(alloc, Math.max(0, liquidToday - emergencyFloor)) : null;
+    const transfer = bs ? bs.transfer : null;
+    const reliefExtra = bs ? bs.reliefExtra : 0;
     strategies.push(mk('relief', 'Relief-First' + (transfer ? ' + Bed & SIPP' : ''),
       `Routes the budget to pension first (subject to the pre-SIPP access bridge minimum) to capture maximum upfront ${owners.every(o => o.selfEmployed) ? 'tax relief' : 'tax and NIC relief'}` + (transfer ? '; also moves spare ISA capital into the pension.' : '.'),
       alloc, { transferNet: transfer ? Math.round(transfer.net) : 0, transferGross: transfer ? Math.round(transfer.gross) : 0, taxReliefSaved: alloc.taxReliefSaved + reliefExtra, planOpts: { transfer } }));
   }
-  // 4 bracket-smoothed pension sizing
+  // 5 bracket-smoothed pension sizing
   {
     const penFloor = owners.map(o => {
       const a = acc[o.ids.pen]; if (!a) return 0;
@@ -1771,7 +1926,7 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
       'Funds each pension only up to the pot whose sustainable withdrawal, alongside state pension, fills the basic-rate band; everything else goes to ISA so later-life withdrawals never hit 40%.',
       alloc, { penTargetGross: penFloor }));
   }
-  // 5 relief-first, bridge-last (time-phased)
+  // 6 relief-first, bridge-last (time-phased)
   {
     const reliefAlloc = allocateBudget(ctx, netBudget, 0, { balance });
     const isaAlloc = allocateBudget(ctx, netBudget, 1.0, { balance });
@@ -1894,7 +2049,7 @@ function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
 }
 
 // Namespace used by the UI (mirrors the modular engine.js exports)
-const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, luckyBand, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, nicFor, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, salaryAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSurvivalMaximizer, buildTournament, buildPolicyCandidates, pickBest };
+const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, luckyBand, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, nicFor, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, salaryAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSearchPlayer, bridgeIsaAnnual, liquidRealRate, buildTournament, buildPolicyCandidates, pickBest };
 export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, luckyBand, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans, buildPolicyCandidates, pickBest, accumulationOutlay, solveEscalation, applyEscalationToPlan };
 
 
@@ -1956,7 +2111,6 @@ const HISTORICAL_PRESETS = [
   { label: '2008 Global Financial Crisis', year: 2008 }
 ];
 
-const formatGBP = (v) => new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP', maximumFractionDigits: 0 }).format(Number.isFinite(v) ? v : 0);
 const fmtK = (v) => `£${Math.round((Number.isFinite(v) ? v : 0) / 1000).toLocaleString()}k`;
 const parseInputNumber = (val) => {
   if (val === '' || val === null || val === undefined) return '';
@@ -2257,22 +2411,28 @@ function WrapperStrategyTournament({ plan, ctx, seed, scenarios = [], activeScen
     try {
       for (let i = 0; i < total; i++) {
         let s = preview.strategies[i];
-        if (s.id === 'survival') {
-          setProgress({ label: `Player ${i + 1}/${total}: searching ISA/pension splits…`, value: i / total });
+        // Any player that carries candidates is searched the same way, on the same paths, so the two
+        // searching players are ranked against each other on equal terms.
+        if (s.candidates) {
+          setProgress({ label: `Player ${i + 1}/${total}: ${s.name}: searching…`, value: i / total });
           const evaluated = [];
           for (let k = 0; k < s.candidates.length; k++) {
             const c = s.candidates[k];
             const stats = E.monteCarlo(c.planState, { trials: SEARCH_TRIALS, seed });
             evaluated.push({ ...c, stats });
-            setProgress({ label: `Player ${i + 1}/${total}: split ${Math.round(c.share * 100)}% ISA → ${stats.successRate.toFixed(1)}% safe`, value: (i + (k + 1) / s.candidates.length * 0.6) / total });
+            setProgress({ label: `Player ${i + 1}/${total}: ${c.label} → ${stats.successRate.toFixed(1)}% safe`, value: (i + (k + 1) / s.candidates.length * 0.6) / total });
             await tick();
           }
           const best = E.pickBest(evaluated, 0.5, preAccessCap === 'any' ? Infinity : Number(preAccessCap));
+          const capNote = ` Bridge-risk cap ${preAccessCap === 'any' ? 'none' : 'at ' + preAccessCap + '%'}.`;
           s = {
-            ...s, chosenShare: best.share,
-            searchResults: evaluated.map(e => ({ share: e.share, successRate: e.stats.successRate, preAccess: e.stats.preNmpaFailRate, p10: e.stats.p10Terminal, median: e.stats.medianTerminal })),
-            isaContrib: best.alloc.isaContrib, penContrib: best.alloc.penContrib, giaContrib: best.alloc.giaContrib, taxReliefSaved: best.alloc.taxReliefSaved, planState: best.planState, escalation: best.escalation,
-            description: `Searched every ISA/pension split of the same budget; best survival at ${Math.round(best.share * 100)}% ISA / ${Math.round((1 - best.share) * 100)}% pension (bridge-risk cap ${preAccessCap === 'any' ? 'none' : preAccessCap + '%'}).`
+            ...s, chosenShare: best.share, chosenLabel: best.label,
+            searchResults: evaluated.map(e => ({ label: e.label, successRate: e.stats.successRate, preAccess: e.stats.preNmpaFailRate, p10: e.stats.p10Terminal, median: e.stats.medianTerminal })),
+            isaContrib: best.alloc.isaContrib, penContrib: best.alloc.penContrib, giaContrib: best.alloc.giaContrib,
+            taxReliefSaved: best.alloc.taxReliefSaved + (best.reliefExtra || 0),
+            transferNet: Math.round(best.transferNet || 0), transferGross: Math.round(best.transferGross || 0),
+            planState: best.planState, escalation: best.escalation, phase: best.phase || null,
+            description: (best.describe || s.description) + capNote
           };
         }
         setProgress({ label: `Player ${i + 1}/${total}: ${s.name}: ${TOURNAMENT_TRIALS.toLocaleString()} paths`, value: (i + 0.6) / total });
@@ -2309,7 +2469,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, scenarios = [], activeScen
             <Zap className="w-4 h-4 text-indigo-600 fill-indigo-600" /> Automated Strategy Tournament &amp; Optimizer
           </h3>
           <p className="text-xs text-slate-500 mt-0.5">
-            Five wrapper strategies with the same take-home budget, each tested on the same {TOURNAMENT_TRIALS.toLocaleString()} market paths (common random numbers) so differences are real, not noise.{selectedEntrants.length > 0 ? ` Plus ${selectedEntrants.length} saved scenario${selectedEntrants.length === 1 ? '' : 's'} entered as saved.` : ''}
+            Six wrapper strategies with the same take-home budget, each tested on the same {TOURNAMENT_TRIALS.toLocaleString()} market paths (common random numbers) so differences are real, not noise.{selectedEntrants.length > 0 ? ` Plus ${selectedEntrants.length} saved scenario${selectedEntrants.length === 1 ? '' : 's'} entered as saved.` : ''}
           </p>
         </div>
         <button type="button" onClick={onNavigateDocs} className="text-xs text-indigo-600 hover:text-indigo-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer self-start sm:self-auto">
@@ -2348,7 +2508,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, scenarios = [], activeScen
           <span className="text-[10px] text-slate-500 block mt-1">Savings ring-fenced from the bridge and from any Bed &amp; SIPP transfer; it shrinks what counts as available, rather than raising the target (that is the bridge safety margin in Config).</span>
         </div>
         <div>
-          <label className="text-slate-700 font-semibold block mb-1">Bridge-risk cap (Survival Maximizer)</label>
+          <label className="text-slate-700 font-semibold block mb-1">Bridge-risk cap (searching players)</label>
           <select value={preAccessCap} onChange={(e) => setPreAccessCap(e.target.value === 'any' ? 'any' : Number(e.target.value))} className="w-full p-2 bg-surface border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer">
             <option value={0}>0% pre-SIPP access failures</option>
             <option value={2}>≤ 2%</option>
@@ -2356,6 +2516,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, scenarios = [], activeScen
             <option value={10}>≤ 10%</option>
             <option value="any">No cap (total survival only)</option>
           </select>
+          <span className="text-[10px] text-slate-500 mt-1 block">Applies to the two players that search: Survival Maximizer and Bridge-Sized Relief. It rules out any candidate that buys total survival by accepting more risk of running dry before age {ctx.nmpa}.</span>
         </div>
         <div>
           <label className="text-slate-700 font-semibold block mb-1">Owner split of new money</label>
@@ -2451,9 +2612,9 @@ function WrapperStrategyTournament({ plan, ctx, seed, scenarios = [], activeScen
                     </div>
                     {res.searchResults && (
                       <details className="text-[10px] text-slate-500">
-                        <summary className="cursor-pointer font-semibold">Search results by ISA share</summary>
+                        <summary className="cursor-pointer font-semibold">Search results by {(res.searchAxis || 'candidate').toLowerCase()}</summary>
                         <div className="grid grid-cols-4 gap-x-2 mt-1 font-mono">
-                          {res.searchResults.map(r => <React.Fragment key={r.share}><span>{Math.round(r.share * 100)}%</span><span>{r.successRate.toFixed(1)}%</span><span>{r.preAccess.toFixed(1)}% pre</span><span>{fmtK(r.p10)}</span></React.Fragment>)}
+                          {res.searchResults.map(r => <React.Fragment key={r.label}><span className={r.label === res.chosenLabel ? 'font-bold text-slate-800' : ''}>{r.label}</span><span>{r.successRate.toFixed(1)}%</span><span>{r.preAccess.toFixed(1)}% pre</span><span>{fmtK(r.p10)}</span></React.Fragment>)}
                         </div>
                       </details>
                     )}
@@ -2762,7 +2923,7 @@ export default function App() {
     setPlan(prev => planFromSandbox(prev));
     flash('Sandbox applied to plan inputs');
   };
-  // Scores the five strategies against the sandbox figures instead of the saved plan, so a sandbox worth
+  // Scores the six strategies against the sandbox figures instead of the saved plan, so a sandbox worth
   // keeping can be tested before it is written back. The plan is frozen at the moment of the click — later
   // sandbox edits do not silently change what the displayed results were run on.
   const handleRunTournamentFromSandbox = () => {
@@ -2998,7 +3159,7 @@ export default function App() {
         <div className="flex items-center gap-2 flex-wrap">
           <button onClick={handleResetSandbox} disabled={!isSandboxModified} className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all border ${isSandboxModified ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300 cursor-pointer' : 'bg-slate-50 text-slate-300 border-slate-200 cursor-not-allowed'}`}><RotateCcw className="w-3.5 h-3.5" /> Reset Sandbox</button>
           <button onClick={handleApplySandboxToPlan} disabled={!isSandboxModified} className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs ${isSandboxModified ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 dark:from-[#C77A2E] dark:to-[#B0631E] dark:hover:from-[#B0631E] dark:hover:to-[#8A4C17] text-white cursor-pointer active:scale-95' : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'}`}><Check className="w-3.5 h-3.5" /> Apply to Plan Inputs</button>
-          <button onClick={handleRunTournamentFromSandbox} title="Score the five wrapper strategies against these sandbox figures instead of your saved plan inputs"
+          <button onClick={handleRunTournamentFromSandbox} title="Score the six wrapper strategies against these sandbox figures instead of your saved plan inputs"
             className="px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer active:scale-95"><Zap className="w-3.5 h-3.5" /> Re-run Tournament on Sandbox</button>
         </div>
       </div>
@@ -4078,11 +4239,11 @@ export default function App() {
 
             <div id="doc-tournament" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Zap className="w-4 h-4 text-indigo-600" /> Automated Strategy Tournament &amp; Optimisation Methodology</h2>
-              <p className="text-xs text-slate-600 leading-relaxed">The tournament compares five ways of splitting the same annual take-home budget between S&amp;S ISAs and pensions. Every player is run on the same {TOURNAMENT_TRIALS.toLocaleString()} market paths (common random numbers), so the ranking reflects the strategies rather than sampling luck. Any saved scenario can be entered as an extra player; those run exactly as saved and are not held to the same budget, which their cards state.</p>
+              <p className="text-xs text-slate-600 leading-relaxed">The tournament compares six ways of splitting the same annual take-home budget between S&amp;S ISAs and pensions. Every player is run on the same {TOURNAMENT_TRIALS.toLocaleString()} market paths (common random numbers), so the ranking reflects the strategies rather than sampling luck. Any saved scenario can be entered as an extra player; those run exactly as saved and are not held to the same budget, which their cards state.</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">1. Equal net budget</strong><p className="text-slate-500">Each strategy costs the same take-home pay. Pension money is grossed up using each owner's own salary (income tax + NIC relief, plus any employer NIC pass-through set in Config), capped by the annual allowance (£{P.pensionAllowance.toLocaleString()}) and salary; ISA money is capped at £{P.isaAllowance.toLocaleString()} per person; anything left over flows to a GIA.</p></div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">2. Conservative bridge sizing</strong><p className="text-slate-500">If spending starts before anyone can access a pension (age {nmpa}), the bridge reserve is the sum of net drawdown in those years (after guaranteed income and a working partner's take-home), uplifted by the safety margin ({E.num(plan?.config?.bridgeSafetyMargin, 30)}%) and assuming 0% real growth.</p></div>
-                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">3. The players</strong><p className="text-slate-500"><strong>Current Plan</strong> · <strong>Survival Maximizer</strong> (searches the ISA share from 0% to 100% and keeps the best survival, subject to the bridge-risk cap) · <strong>Relief-First</strong> (pension first, bridge minimum kept; with a Bed &amp; SIPP transfer of spare ISA capital in full scope) · <strong>Bracket-Smoothed Sizing</strong> (pension funded only to the pot whose sustainable withdrawal plus state pension fills the basic-rate band, the rest to ISA) · <strong>Relief-First, Bridge-Last</strong> (pension-max early, ISA-max in the final years before retirement).</p></div>
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">3. The players</strong><p className="text-slate-500"><strong>Current Plan</strong> · <strong>Survival Maximizer</strong> (searches the ISA share from 0% to 100% and keeps the best survival, subject to the bridge-risk cap) · <strong>Bridge-Sized Relief</strong> (pension-first, with only the pre-access bridge carved out: the requirement is sized with growth counted on both existing balances and new contributions, then cover levels either side of it are searched, some paid in level and some over the final years only, and spare ISA capital above the reserve is moved into the pension) · <strong>Relief-First</strong> (pension first, bridge minimum kept; with a Bed &amp; SIPP transfer of spare ISA capital in full scope) · <strong>Bracket-Smoothed Sizing</strong> (pension funded only to the pot whose sustainable withdrawal plus state pension fills the basic-rate band, the rest to ISA) · <strong>Relief-First, Bridge-Last</strong> (pension-max early, ISA-max in the final years before retirement).</p></div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">4. Reading the results</strong><p className="text-slate-500">Rank by survival first; ties within 0.5 points are broken by the 10th-percentile pot. Watch the pre-SIPP access failure rate: a strategy can win on total survival by accepting more bridge risk. The "Partner balancing" option steers new money to the partner with the smaller projected pension so both personal allowances can be used in retirement; it costs relief if that partner pays a lower marginal rate, so it does not always win.</p></div>
               </div>
             </div>
