@@ -171,7 +171,9 @@ const BLANK_PLAN = Object.freeze({
   },
   spending: {
     targetSpend: '',
-    taper1Age: '', taper1Rate: '', taper2Age: '', taper2Rate: '',
+    // spendBands: [{ id, fromAge, toAge, amount }] in "Myself" ages. Any year not covered by a band falls
+    // back to targetSpend, so an empty list means a flat spend for the whole retirement.
+    spendBands: [],
     drawdownStrategy: 'Phased Drawdown',
     decumulationPolicy: 'Bracket Fill Basic'
   },
@@ -211,6 +213,50 @@ const calculateYearFraction = (dateStr) => {
 };
 
 // Deep-normalise anything (old localStorage plans, imported JSON, undefined) into a valid plan object.
+/*
+ * Spending bands, and the migration from the two lifestyle tapers they replaced.
+ *
+ * Tapers could only ever step spending down by a percentage at two fixed ages. Bands say what a stretch of
+ * years actually costs, so a plan can rise as well as fall: a heavy early retirement, a quieter stretch,
+ * then care costs. A saved plan carrying tapers is converted to the identical set of bands here rather
+ * than being silently dropped, because the two tapers compounded and reproducing that by hand is a trap.
+ */
+function normaliseSpendBands(s, d) {
+  const clean = (arr) => arr.filter(isPlainObject).map(x => ({
+    id: String(x.id || 'sb_' + Math.random().toString(36).slice(2)),
+    fromAge: x.fromAge ?? '',
+    toAge: x.toAge ?? '',
+    amount: x.amount ?? ''
+  }));
+  if (Array.isArray(s.spendBands)) return clean(s.spendBands);
+
+  // legacy: rebuild the exact schedule the two tapers produced
+  const base = num(s.targetSpend, 0);
+  const t1Age = num(s.taper1Age, 0), t1Rate = clamp(num(s.taper1Rate, 0), 0, 100) / 100;
+  const t2Age = num(s.taper2Age, 0), t2Rate = clamp(num(s.taper2Rate, 0), 0, 100) / 100;
+  const hasT1 = t1Age > 0 && t1Rate > 0;
+  const hasT2 = t2Age > 0 && t2Rate > 0;
+  if (!base || (!hasT1 && !hasT2)) return [];
+  const terminal = num(d.terminalAge, 100);
+  const bands = [];
+  // taper 2 compounds on the post-taper-1 figure, which is what makes this worth migrating rather than
+  // leaving to the user to redo
+  const afterT1 = hasT1 ? base * (1 - t1Rate) : base;
+  const afterT2 = hasT2 ? afterT1 * (1 - t2Rate) : afterT1;
+  if (hasT1 && hasT2 && t2Age > t1Age) {
+    bands.push({ fromAge: t1Age, toAge: t2Age - 1, amount: Math.round(afterT1) });
+    bands.push({ fromAge: t2Age, toAge: terminal, amount: Math.round(afterT2) });
+  } else if (hasT1 && hasT2) {
+    // both set to the same age, or taper 2 earlier: they collapse to one step at the earlier age
+    bands.push({ fromAge: Math.min(t1Age, t2Age), toAge: terminal, amount: Math.round(afterT2) });
+  } else if (hasT1) {
+    bands.push({ fromAge: t1Age, toAge: terminal, amount: Math.round(afterT1) });
+  } else {
+    bands.push({ fromAge: t2Age, toAge: terminal, amount: Math.round(base * (1 - t2Rate)) });
+  }
+  return bands.map((b, i) => ({ id: 'sb_migrated_' + i, ...b }));
+}
+
 function normalizePlan(raw) {
   const src = isPlainObject(raw) ? raw : {};
   const d = isPlainObject(src.demographics) ? src.demographics : {};
@@ -219,7 +265,7 @@ function normalizePlan(raw) {
   const plan = {
     activeProfileView: ['Combined', 'Myself', 'Partner'].includes(src.activeProfileView) ? src.activeProfileView : 'Combined',
     demographics: { ...BLANK_PLAN.demographics, ...d },
-    spending: { ...BLANK_PLAN.spending, ...s },
+    spending: { ...BLANK_PLAN.spending, ...s, spendBands: normaliseSpendBands(s, d) },
     accounts: [],
     riskProfiles: {},
     // legacy plans carried taxTreatment: 'Taxable' | 'Tax-free'; 'Taxable' migrates to otherTaxable so an
@@ -242,9 +288,16 @@ function normalizePlan(raw) {
     oneOffCosts: Array.isArray(src.oneOffCosts) ? src.oneOffCosts.filter(isPlainObject).map(x => ({ id: String(x.id || 'cost_' + Math.random().toString(36).slice(2)), date: x.date || (x.year ? `${x.year}-01-01` : ''), year: num(x.year, x.date ? parseInt(String(x.date).slice(0, 4)) : ''), owner: x.owner === 'Partner' ? 'Partner' : 'Myself', amount: x.amount ?? '', desc: x.desc ?? '' })) : [],
     config: { ...DEFAULT_CONFIG, ...c }
   };
-  // React inputs need strings/numbers, never null/undefined/objects
-  const scrub = (obj) => { Object.keys(obj).forEach(k => { const v = obj[k]; if (v === null || v === undefined || typeof v === 'object') obj[k] = ''; }); };
-  scrub(plan.demographics); scrub(plan.spending); scrub(plan.config);
+  // React inputs need strings/numbers, never null/undefined/objects. `keep` names the fields that are
+  // legitimately structured (spendBands is a list, not an input) and must survive the scrub.
+  const scrub = (obj, keep = []) => {
+    Object.keys(obj).forEach(k => {
+      if (keep.includes(k)) return;
+      const v = obj[k];
+      if (v === null || v === undefined || typeof v === 'object') obj[k] = '';
+    });
+  };
+  scrub(plan.demographics); scrub(plan.spending, ['spendBands']); scrub(plan.config);
   if (typeof plan.config.harvestPersonalAllowance !== 'boolean') plan.config.harvestPersonalAllowance = plan.config.harvestPersonalAllowance === '' ? true : !!plan.config.harvestPersonalAllowance;
   if (!plan.config.valuationDate || isNaN(new Date(plan.config.valuationDate).getTime())) plan.config.valuationDate = todayISO();
   if (plan.demographics.planningMode !== 'single') plan.demographics.planningMode = 'couple';
@@ -726,12 +779,35 @@ function buildContext(rawPlan) {
     if (amt <= 0) return;
     oneOffCosts.set(y, (oneOffCosts.get(y) || 0) + amt);
   });
+  /*
+   * Spending bands, resolved once so the per-year lookup stays a cheap scan. Sorted by start age, with a
+   * blank end age running to the terminal age. Overlaps are reported rather than silently resolved: the
+   * lookup takes the first match, so an unnoticed overlap would quietly apply the wrong figure for years.
+   */
+  const spendBands = (s.spendBands || [])
+    .map(b => ({
+      fromAge: Math.round(num(b.fromAge, NaN)),
+      toAge: isBlank(b.toAge) ? terminalAge : Math.round(num(b.toAge, NaN)),
+      amount: Math.max(0, num(b.amount, 0))
+    }))
+    .filter(b => Number.isFinite(b.fromAge) && Number.isFinite(b.toAge))
+    .sort((a, b) => a.fromAge - b.fromAge);
+  spendBands.forEach((b, i) => {
+    if (b.toAge < b.fromAge) {
+      warnings.push(`Spending band starting at age ${b.fromAge} ends at ${b.toAge}, before it begins, so it is never applied.`);
+      return;
+    }
+    const prev = spendBands[i - 1];
+    if (prev && prev.toAge >= b.fromAge && prev.toAge >= prev.fromAge) {
+      warnings.push(`Spending bands overlap between ages ${b.fromAge} and ${Math.min(prev.toAge, b.toAge)}; the earlier band (£${Math.round(prev.amount).toLocaleString()}) wins for those years.`);
+    }
+  });
+
   const policy = DECUMULATION_POLICIES[s.decumulationPolicy] || DECUMULATION_POLICIES['Bracket Fill Basic'];
   const ctx = {
     plan, warnings, isCouple, P, owners, accounts, acc,
     ageSelf0, agePart0, terminalAge, totalYears, nmpa, spa, targetSpend,
-    taper1Age: num(s.taper1Age, 0), taper1Rate: clamp(num(s.taper1Rate, 0), 0, 100) / 100,
-    taper2Age: num(s.taper2Age, 0), taper2Rate: clamp(num(s.taper2Rate, 0), 0, 100) / 100,
+    spendBands,
     fullLumpSum: s.drawdownStrategy === 'Full 25% Lump Sum',
     policyKey: s.decumulationPolicy, policySteps: policy.steps, harvestPA: policy.harvest && !!c.harvestPersonalAllowance,
     pensionDeathTaxRate: clamp(num(c.pensionDeathTaxRate, 0), 0, 100) / 100,
@@ -744,12 +820,18 @@ function buildContext(rawPlan) {
   return ctx;
 }
 
-// Living-cost target at a given age of "Myself" (tapers compound, as documented).
+/*
+ * Living-cost target at a given age of "Myself". The first band covering the age wins, and any year no
+ * band covers falls back to the headline spend, so a partial set of bands only overrides the years it
+ * names. Bands are pre-sorted in buildContext, which is what makes "first match" stable and cheap here:
+ * this runs for every year of every Monte Carlo trial.
+ */
 function spendTargetAtAge(ctx, ageSelf) {
-  let sp = ctx.targetSpend;
-  if (ctx.taper1Age > 0 && ageSelf >= ctx.taper1Age && ctx.taper1Rate > 0) sp *= (1 - ctx.taper1Rate);
-  if (ctx.taper2Age > 0 && ageSelf >= ctx.taper2Age && ctx.taper2Rate > 0) sp *= (1 - ctx.taper2Rate);
-  return sp;
+  const bands = ctx.spendBands;
+  for (let i = 0; i < bands.length; i++) {
+    if (ageSelf >= bands[i].fromAge && ageSelf <= bands[i].toAge) return bands[i].amount;
+  }
+  return ctx.targetSpend;
 }
 
 const freshState = (ctx) => {
@@ -2469,6 +2551,17 @@ export default function App() {
   const updateSpending = (field, value) => setPlan(prev => ({ ...prev, spending: { ...(prev.spending || {}), [field]: (field === 'drawdownStrategy' || field === 'decumulationPolicy') ? value : parseInputNumber(value) } }));
   const updateConfig = (field, value) => setPlan(prev => ({ ...prev, config: { ...(prev.config || {}), [field]: (field === 'valuationDate' || typeof value === 'boolean') ? value : parseInputNumber(value) } }));
   const updateListItem = (listKey, id, patch) => setPlan(p => ({ ...p, [listKey]: (p[listKey] || []).map(i => i.id === id ? { ...i, ...patch } : i) }));
+  // spending bands live under plan.spending rather than at the top level, so they get their own helpers
+  // instead of teaching updateListItem to walk a nested path
+  const addSpendBand = () => setPlan(prev => {
+    const bands = prev.spending?.spendBands || [];
+    // a new band starts where the last one ended, which is what a person adding a second phase means
+    const last = bands[bands.length - 1];
+    const startAt = last && !E.isBlank(last.toAge) ? E.num(last.toAge, 0) + 1 : '';
+    return { ...prev, spending: { ...prev.spending, spendBands: [...bands, { id: 'sb_' + Date.now(), fromAge: startAt, toAge: '', amount: '' }] } };
+  });
+  const deleteSpendBand = (id) => setPlan(prev => ({ ...prev, spending: { ...prev.spending, spendBands: (prev.spending?.spendBands || []).filter(b => b.id !== id) } }));
+  const updateSpendBand = (id, patch) => setPlan(prev => ({ ...prev, spending: { ...prev.spending, spendBands: (prev.spending?.spendBands || []).map(b => b.id === id ? { ...b, ...patch } : b) } }));
   const addOtherIncome = () => setPlan(prev => ({ ...prev, otherIncomes: [...(prev.otherIncomes || []), { id: 'inc_' + Date.now(), name: '', owner: 'Myself', startAge: '', endAge: '', amount: '', incomeType: 'otherTaxable', notes: '' }] }));
   const deleteOtherIncome = (id) => setPlan(prev => ({ ...prev, otherIncomes: (prev.otherIncomes || []).filter(i => i.id !== id) }));
   const addOneOffContrib = () => { const y = new Date().getFullYear() + 1; setPlan(prev => ({ ...prev, oneOffContributions: [...(prev.oneOffContributions || []), { id: 'c_' + Date.now(), date: `${y}-01-01`, year: y, owner: 'Myself', category: 'Pensions', amount: '', desc: '', transferredFrom: 'External', stagedTargetWrapper: 'Pensions' }] })); };
@@ -3085,16 +3178,60 @@ export default function App() {
               </div>
 
               <div className="pt-3 border-t border-slate-100">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">Lifestyle spending tapers (optional)</span>
-                  <button type="button" onClick={() => goToDoc('doc-taper')} className="text-[11px] text-blue-600 hover:underline font-semibold flex items-center gap-1 cursor-pointer"><HelpCircle className="w-3.5 h-3.5" /> Go-go / slow-go / no-go years &rarr;</button>
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                  <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">Spending by age (optional)</span>
+                  <div className="flex items-center gap-3">
+                    <button type="button" onClick={() => goToDoc('doc-taper')} className="text-[11px] text-blue-600 hover:underline font-semibold flex items-center gap-1 cursor-pointer"><HelpCircle className="w-3.5 h-3.5" /> Go-go / slow-go / no-go years &rarr;</button>
+                    <button onClick={addSpendBand} className="px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer shadow-xs"><Plus className="w-3.5 h-3.5" /> Add Band</button>
+                  </div>
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
-                  <div><label className="text-slate-600 font-semibold block mb-1">Taper 1 from age (Myself)</label><input type="number" min="0" max="120" placeholder="e.g. 75" onFocus={handleFocus} value={plan?.spending?.taper1Age ?? ''} onChange={(e) => updateSpending('taper1Age', e.target.value)} className={inputCls} /></div>
-                  <div><label className="text-slate-600 font-semibold block mb-1">Taper 1 reduction (%)</label><input type="number" min="0" max="100" step="1" placeholder="e.g. 10" onFocus={handleFocus} value={plan?.spending?.taper1Rate ?? ''} onChange={(e) => updateSpending('taper1Rate', e.target.value)} className={inputCls} /></div>
-                  <div><label className="text-slate-600 font-semibold block mb-1">Taper 2 from age (Myself)</label><input type="number" min="0" max="120" placeholder="e.g. 85" onFocus={handleFocus} value={plan?.spending?.taper2Age ?? ''} onChange={(e) => updateSpending('taper2Age', e.target.value)} className={inputCls} /></div>
-                  <div><label className="text-slate-600 font-semibold block mb-1">Taper 2 reduction (%)</label><input type="number" min="0" max="100" step="1" placeholder="e.g. 10" onFocus={handleFocus} value={plan?.spending?.taper2Rate ?? ''} onChange={(e) => updateSpending('taper2Rate', e.target.value)} className={inputCls} /></div>
-                </div>
+                <p className="text-[11px] text-slate-500 mb-2 max-w-3xl">
+                  Set what a stretch of years actually costs, in today's money, instead of one figure for the whole
+                  retirement. Ages are &quot;Myself&quot; ages. Any year you do not cover falls back to the {isCouple ? 'joint ' : ''}living
+                  spend above, so you can name only the years that differ. Spending can rise as well as fall.
+                </p>
+                {(plan?.spending?.spendBands || []).length === 0 ? (
+                  <div className="text-xs text-slate-400 italic p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                    No bands set, so {formatGBP(E.num(plan?.spending?.targetSpend, 0))}/yr applies for the whole retirement.
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {(plan.spending.spendBands || []).map(band => {
+                      const from = E.num(band.fromAge, NaN);
+                      const to = E.isBlank(band.toAge) ? terminalAge : E.num(band.toAge, NaN);
+                      const badRange = Number.isFinite(from) && Number.isFinite(to) && to < from;
+                      const yrs = (Number.isFinite(from) && Number.isFinite(to) && !badRange) ? (to - from + 1) : null;
+                      return (
+                        <div key={band.id} className={`grid grid-cols-1 sm:grid-cols-4 gap-2 p-2.5 border rounded-xl text-xs items-center ${badRange ? 'bg-rose-50/60 border-rose-200' : 'bg-slate-50 border-slate-200'}`}>
+                          <div className="flex items-center gap-1">
+                            <span className="text-slate-500">Age</span>
+                            <input type="number" min="0" max="120" placeholder="From" onFocus={handleFocus} value={band.fromAge}
+                              onChange={(e) => updateSpendBand(band.id, { fromAge: parseInputNumber(e.target.value) })}
+                              className="w-14 p-1 bg-surface border border-slate-300 rounded font-mono text-center font-bold" />
+                            <span className="text-slate-400">to</span>
+                            <input type="number" min="0" max="120" placeholder={String(terminalAge)} onFocus={handleFocus} value={band.toAge}
+                              onChange={(e) => updateSpendBand(band.id, { toAge: parseInputNumber(e.target.value) })}
+                              className="w-14 p-1 bg-surface border border-slate-300 rounded font-mono text-center font-bold" />
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-slate-500">Spend</span>
+                            <input type="number" min="0" step="1000" placeholder="£/yr" onFocus={handleFocus} value={band.amount}
+                              onChange={(e) => updateSpendBand(band.id, { amount: parseInputNumber(e.target.value) })}
+                              className="w-28 p-1.5 bg-surface border border-slate-300 rounded font-mono text-blue-700 font-bold" />
+                          </div>
+                          <div className="text-[11px] text-slate-500 sm:col-span-1">
+                            {badRange
+                              ? <span className="text-rose-700 font-semibold">Ends before it starts</span>
+                              : yrs !== null ? `${yrs} year${yrs === 1 ? '' : 's'}${E.isBlank(band.toAge) ? ` (to age ${terminalAge})` : ''}` : 'Set a start age'}
+                          </div>
+                          <div className="flex justify-end">
+                            <button onClick={() => deleteSpendBand(band.id)} title="Remove this band" className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg cursor-pointer transition-colors"><Trash2 className="w-3.5 h-3.5" /></button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               {/* Advanced: optional figures most plans can leave blank */}
@@ -3862,7 +3999,7 @@ export default function App() {
               </ul>
 
               <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Modelled</h3>
-              <p className="text-xs text-slate-600 leading-relaxed">Income tax including the personal-allowance taper, employee Class 1 NIC and self-employed Class 4 NIC, the {Math.round(P.pclsProp * 100)}% tax-free element capped at the £{P.lsa.toLocaleString()} Lump Sum Allowance, the £{P.pensionAllowance.toLocaleString()} annual allowance with taper and three-year carry-forward, the relevant-earnings limit, the MPAA, ISA allowances, realisation-based CGT with its annual exempt amount and band split, state pension timing, the pre-SIPP access bridge, one-off deposits with multi-year staging, one-off costs, lifestyle spending tapers, salary-sacrifice relief including any employer NIC pass-through, and relief at source for the self-employed.</p>
+              <p className="text-xs text-slate-600 leading-relaxed">Income tax including the personal-allowance taper, employee Class 1 NIC and self-employed Class 4 NIC, the {Math.round(P.pclsProp * 100)}% tax-free element capped at the £{P.lsa.toLocaleString()} Lump Sum Allowance, the £{P.pensionAllowance.toLocaleString()} annual allowance with taper and three-year carry-forward, the relevant-earnings limit, the MPAA, ISA allowances, realisation-based CGT with its annual exempt amount and band split, state pension timing, the pre-SIPP access bridge, one-off deposits with multi-year staging, one-off costs, spending bands by age, salary-sacrifice relief including any employer NIC pass-through, and relief at source for the self-employed.</p>
 
               <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Not modelled yet</h3>
               <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
@@ -3877,14 +4014,16 @@ export default function App() {
             </div>
 
             <div id="doc-taper" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
-              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><HelpCircle className="w-4 h-4 text-blue-600" /> Lifestyle Spending Tapers</h2>
+              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><HelpCircle className="w-4 h-4 text-blue-600" /> Spending by Age</h2>
               <p className="text-xs text-slate-600 leading-relaxed">Retirement spending often isn't flat. It tends to move through phases:</p>
               <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
                 <li><strong>Go-Go Years:</strong> active travel, hobbies, home modifications and dining out in early retirement.</li>
-                <li><strong>Slow-Go Years (Taper 1):</strong> spending on travel and lifestyle moderates naturally.</li>
-                <li><strong>No-Go Years (Taper 2):</strong> a further decrease in leisure spending, partly offset by potential healthcare needs (not modelled; consider a one-off cost or a negative taper).</li>
+                <li><strong>Slow-Go Years:</strong> spending on travel and lifestyle moderates naturally.</li>
+                <li><strong>No-Go Years:</strong> leisure spending falls again, though care costs can more than reverse that.</li>
               </ul>
-              <p className="text-xs text-slate-600 leading-relaxed">Taper 2 applies to the post-Taper 1 figure: £40,000 with a 10% Taper 1 becomes £36,000, and a 10% Taper 2 then reduces that to £32,400. Tapers key off "Myself" ages.</p>
+              <p className="text-xs text-slate-600 leading-relaxed">Set these in Plan Inputs as bands: a start age, an end age and what those years cost in today's money. A band that names ages 58 to 67 at {formatGBP(45000)}, then 68 to 79 at {formatGBP(34000)}, then 80 onwards at {formatGBP(40000)}, says exactly that, including the rise at the end for care. Ages are "Myself" ages.</p>
+              <p className="text-xs text-slate-600 leading-relaxed">Bands only override the years they cover. Any year outside every band falls back to the headline living spend, so naming a single expensive stretch is enough; you do not have to describe the whole retirement. Leave the end age blank to run a band to the terminal age. If two bands overlap the earlier one wins for the shared years, and the model says so in the warnings rather than picking silently.</p>
+              <p className="text-xs text-slate-500 leading-relaxed">Bands replaced an older pair of percentage "tapers" that could only step spending down at two fixed ages. Any saved plan still carrying tapers is converted to the equivalent bands when it loads, so its projection is unchanged. The safe-spend solver scales the whole shape at once: it finds the multiple of your headline spend that survives, and every band moves with it in proportion.</p>
             </div>
 
             <div id="doc-risk-profiles" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
