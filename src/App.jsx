@@ -2464,6 +2464,24 @@ function WrapperStrategyTournament({ plan, ctx, seed, scenarios = [], activeScen
   const se = results && results.players.length ? results.players[0].stats.standardError : 0;
   const baselinePlayer = results ? results.players.find(p => p.id === 'baseline') : null;
 
+  // The updater closure runs during render, by which time React has cleared currentTarget, so the flag
+  // has to be read out of the event first.
+  const handleSettingsToggle = (e) => {
+    const open = e.currentTarget.open;
+    setState(prev => (prev.settingsOpen === open ? prev : { ...prev, settingsOpen: open }));
+  };
+
+  // What the collapsed settings header says. Defaults are named too, so the line always reads as a
+  // statement of what will be run rather than a list of things you happen to have changed.
+  const settingsSummary = [
+    budgetOverride === '' ? null : `budget £${Math.round(E.num(budgetOverride, 0)).toLocaleString()}/yr`,
+    scope === 'full' ? 'full reallocation' : 'contributions only',
+    `£${Math.round(E.num(emergencyFloor, 0)).toLocaleString()} buffer`,
+    preAccessCap === 'any' ? 'no bridge-risk cap' : `bridge risk ≤ ${preAccessCap}%`,
+    isCouple && balance === 'balanced' ? 'pensions balanced' : null,
+    selectedEntrants.length ? `${selectedEntrants.length} scenario${selectedEntrants.length === 1 ? '' : 's'} entered` : null
+  ].filter(Boolean).join(' · ');
+
   return (
     <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
@@ -2488,7 +2506,17 @@ function WrapperStrategyTournament({ plan, ctx, seed, scenarios = [], activeScen
         </div>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 text-xs font-sans p-3 bg-slate-50 border border-slate-200 rounded-xl">
+      {/*
+        * Five advanced controls that most plans leave alone, so they fold away. The summary line carries
+        * anything set away from its default, which is what stops a collapsed panel hiding a live setting.
+        */}
+      <details open={!!state.settingsOpen} onToggle={handleSettingsToggle}
+        className="bg-slate-50 border border-slate-200 rounded-xl">
+        <summary className="px-3 py-2.5 cursor-pointer text-xs font-semibold text-slate-700 select-none flex flex-wrap items-baseline gap-x-2">
+          <span>Tournament settings</span>
+          <span className="text-[10px] font-normal text-slate-500 font-mono">{settingsSummary}</span>
+        </summary>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 text-xs font-sans p-3">
         <div>
           <label className="text-slate-700 font-semibold block mb-1">Annual take-home budget (£ net)</label>
           <input type="number" min="0" step="250" value={budgetOverride} placeholder={meta ? `${Math.round(meta.derivedBudget).toLocaleString()} (from plan)` : ''} onChange={(e) => setBudgetOverride(e.target.value)}
@@ -2497,7 +2525,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, scenarios = [], activeScen
         </div>
         <div>
           <label className="text-slate-700 font-semibold block mb-1">Optimisation scope</label>
-          <select value={scope} onChange={(e) => setScope(e.target.value)} className="w-full p-2 bg-surface border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer">
+          <select id="tourn-scope" value={scope} onChange={(e) => setScope(e.target.value)} className="w-full p-2 bg-surface border border-slate-300 rounded-lg text-slate-800 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none cursor-pointer">
             <option value="contributions">Contributions only (rebalance future deposits)</option>
             <option value="full">Full reallocation (+ Bed &amp; SIPP transfer of spare ISA)</option>
           </select>
@@ -2536,7 +2564,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, scenarios = [], activeScen
       </div>
 
       {availableEntrants.length > 0 && (
-        <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-sans space-y-2">
+        <div className="px-3 pb-3 text-xs font-sans space-y-2">
           <div>
             <label className="text-slate-700 font-semibold block">Enter saved scenarios as extra players</label>
             <span className="text-[10px] text-slate-500 block mt-0.5">Each runs exactly as saved, on the same market paths. It is not held to the same take-home budget as the five strategies, so a scenario that simply contributes more will score better for that reason alone. The outlay is shown on its card.</span>
@@ -2556,20 +2584,21 @@ function WrapperStrategyTournament({ plan, ctx, seed, scenarios = [], activeScen
       )}
 
       {meta && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-[11px] font-mono">
-          <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Net budget tested</span><strong>£{Math.round(meta.netBudget).toLocaleString()}/yr</strong></div>
-          <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Pre-SIPP access gap</span><strong>{meta.bridge.gapYears} yr{meta.bridge.gapYears === 1 ? '' : 's'}</strong></div>
-          <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Bridge reserve target (+{Math.round(E.num(plan?.config?.bridgeSafetyMargin, 30))}%)</span><strong>{fmtK(meta.bridgeCapital)}</strong></div>
-          <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Liquid today above buffer</span><strong>{fmtK(Math.max(0, meta.liquidToday - E.num(emergencyFloor, 0)))}</strong></div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-[11px] font-mono px-3 pb-3">
+          <div className="p-2.5 bg-surface border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Net budget tested</span><strong>£{Math.round(meta.netBudget).toLocaleString()}/yr</strong></div>
+          <div className="p-2.5 bg-surface border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Pre-SIPP access gap</span><strong>{meta.bridge.gapYears} yr{meta.bridge.gapYears === 1 ? '' : 's'}</strong></div>
+          <div className="p-2.5 bg-surface border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Bridge reserve target (+{Math.round(E.num(plan?.config?.bridgeSafetyMargin, 30))}%)</span><strong>{fmtK(meta.bridgeCapital)}</strong></div>
+          <div className="p-2.5 bg-surface border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Liquid today above buffer</span><strong>{fmtK(Math.max(0, meta.liquidToday - E.num(emergencyFloor, 0)))}</strong></div>
         </div>
       )}
+      </details>
 
       <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between">
         {progress ? <div className="flex-1"><ProgressBar value={progress.value} label={progress.label} /></div> : <span className="text-[11px] text-slate-400">Seed {seed}. Change it in Config to test a different set of market paths.</span>}
         <button type="button" onClick={handleRun} disabled={isEvaluating || !preview || (meta && meta.netBudget <= 0)}
-          className="px-4 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 dark:from-[#A9781F] dark:to-[#2C5C8F] dark:hover:from-[#855D18] dark:hover:to-[#204568] text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
-          <Zap className="w-3.5 h-3.5 fill-amber-300 text-amber-300 dark:fill-[#FCD34D] dark:text-[#FCD34D]" />
-          {isEvaluating ? 'Evaluating…' : '⚡ Run Strategy Tournament'}
+          className="px-3.5 py-1.5 rounded-xl text-xs font-bold border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
+          <Zap className="w-3.5 h-3.5" />
+          {isEvaluating ? 'Evaluating…' : results ? 'Compare again' : 'Compare strategies now'}
         </button>
       </div>
       {meta && meta.netBudget <= 0 && <p className="text-xs text-rose-600">Enter ISA or pension contributions (or a take-home budget above) to run the tournament.</p>}
