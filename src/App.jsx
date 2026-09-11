@@ -3,7 +3,7 @@ import * as d3 from 'd3';
 import {
   TrendingUp, Layers, Check, RotateCcw, Dices, Zap, ShieldCheck, Target, Sliders, Download, Upload, Users, Wallet, Coins,
   Settings, Plus, Trash2, Table, FileSpreadsheet, CheckCircle2, AlertTriangle, Pencil, HelpCircle, BookOpen, History, Bookmark,
-  Save, Sparkles, ArrowUpRight, ArrowDownRight, Trophy, Info, Sun, Moon, Monitor
+  Save, Sparkles, ArrowUpRight, ArrowDownRight, Trophy, Info, Sun, Moon, Monitor, ChevronUp, ChevronDown
 } from 'lucide-react';
 // ============================================================================================
 // Monte-Carlo Retirement Planner v3.4 — single-file build (engine + UI).
@@ -103,6 +103,11 @@ const DEFAULT_CONFIG = {
   nicUpperEarningsLimit: 50270,
   nicMainRate: 8,
   nicUpperRate: 2,
+  // Self-employed National Insurance (Class 4). The lower and upper profits limits currently coincide with
+  // the Class 1 primary threshold and upper earnings limit, so those fields are shared; only the rates differ.
+  // Class 2 is not modelled: it stopped being a mandatory charge above the Small Profits Threshold in 2024.
+  class4MainRate: 6,
+  class4UpperRate: 2,
   // Salary sacrifice: employer NIC saving (15% from April 2025) and how much of it is passed into the pension
   employerNicRate: 15,
   employerNicPassThrough: 0,         // % of employer NIC saving added to the pension
@@ -150,6 +155,8 @@ const BLANK_PLAN = Object.freeze({
     currentAgeSelf: '', currentAgePart: '',
     retireAgeSelf: '', retireAgePart: '',
     salarySelf: '', salaryPart: '',
+    // 'employed' (Class 1 NIC, salary sacrifice relief) or 'self-employed' (Class 4 NIC, income tax relief only)
+    employmentSelf: 'employed', employmentPart: 'employed',
     cgtGainsUsedSelf: '', cgtGainsUsedPart: '',
     cfBroughtForwardSelf: '', cfBroughtForwardPart: '',
     // derived by resolveMpaa from the projection, not user-editable
@@ -277,6 +284,8 @@ function taxParams(cfgIn) {
   const nicUEL = Math.max(nicPT, num(cfg.nicUpperEarningsLimit, DEFAULT_CONFIG.nicUpperEarningsLimit));
   const nicMain = clamp(num(cfg.nicMainRate, DEFAULT_CONFIG.nicMainRate), 0, 99) / 100;
   const nicUpper = clamp(num(cfg.nicUpperRate, DEFAULT_CONFIG.nicUpperRate), 0, 99) / 100;
+  const c4Main = clamp(num(cfg.class4MainRate, DEFAULT_CONFIG.class4MainRate), 0, 99) / 100;
+  const c4Upper = clamp(num(cfg.class4UpperRate, DEFAULT_CONFIG.class4UpperRate), 0, 99) / 100;
   const erNic = clamp(num(cfg.employerNicRate, DEFAULT_CONFIG.employerNicRate), 0, 99) / 100;
   const erPass = clamp(num(cfg.employerNicPassThrough, DEFAULT_CONFIG.employerNicPassThrough), 0, 100) / 100;
   const pclsProp = clamp(num(cfg.pclsProportion, DEFAULT_CONFIG.pclsProportion), 0, 100) / 100;
@@ -301,7 +310,7 @@ function taxParams(cfgIn) {
   const basicWidth = Math.max(0, basicLimit - pa);                 // basic band measured in taxable income
   const higherTop = Math.max(basicWidth, higherLimit - paAt(higherLimit)); // higher band upper limit in taxable income
   const taperEnd = taperRate > 0 ? thr + pa / taperRate : Infinity;
-  return { __isParams: true, pa, thr, taperRate, basicLimit, higherLimit, basicRate, higherRate, addRate, nicPT, nicUEL, nicMain, nicUpper, erNic, erPass, pclsProp, lsa, isaAllowance, pensionAllowance, pensionNoEarningsLimit, mpaaLimit, aaTaperThr, aaTaperRate, aaTaperFloor, aaAt, cgtEnabled, cgtAnnualExempt, cgtBasicRate, cgtHigherRate, paAt, basicWidth, higherTop, taperEnd };
+  return { __isParams: true, pa, thr, taperRate, basicLimit, higherLimit, basicRate, higherRate, addRate, nicPT, nicUEL, nicMain, nicUpper, c4Main, c4Upper, erNic, erPass, pclsProp, lsa, isaAllowance, pensionAllowance, pensionNoEarningsLimit, mpaaLimit, aaTaperThr, aaTaperRate, aaTaperFloor, aaAt, cgtEnabled, cgtAnnualExempt, cgtBasicRate, cgtHigherRate, paAt, basicWidth, higherTop, taperEnd };
 }
 
 function incomeTax(gross, cfg) {
@@ -315,15 +324,21 @@ function incomeTax(gross, cfg) {
   return basic * p.basicRate + higher * p.higherRate + add * p.addRate;
 }
 function calculateUKNetIncome(gross, cfg) { const g = Math.max(0, num(gross, 0)); return g - incomeTax(g, cfg); }
-function employeeNIC(gross, cfg) {
+/*
+ * National Insurance on earned income. Employees pay Class 1; the self-employed pay Class 4, which shares
+ * the same two thresholds but charges a lower main rate. Pass `selfEmployed` to price trading profit.
+ */
+function nicFor(gross, cfg, selfEmployed = false) {
   const p = taxParams(cfg);
   const g = Math.max(0, num(gross, 0));
+  const main = selfEmployed ? p.c4Main : p.nicMain;
+  const upper = selfEmployed ? p.c4Upper : p.nicUpper;
   let nic = 0;
-  if (g > p.nicPT) nic += (Math.min(g, p.nicUEL) - p.nicPT) * p.nicMain;
-  if (g > p.nicUEL) nic += (g - p.nicUEL) * p.nicUpper;
+  if (g > p.nicPT) nic += (Math.min(g, p.nicUEL) - p.nicPT) * main;
+  if (g > p.nicUEL) nic += (g - p.nicUEL) * upper;
   return nic;
 }
-function calculateUKTaxAndNIC(income, cfg) { return incomeTax(income, cfg) + employeeNIC(income, cfg); }
+function calculateUKTaxAndNIC(income, cfg, selfEmployed = false) { return incomeTax(income, cfg) + nicFor(income, cfg, selfEmployed); }
 
 // Income-tax breakpoints (gross income) where the marginal rate changes; used by the analytic solver.
 function taxBreakpoints(p) {
@@ -336,14 +351,25 @@ function taxBreakpoints(p) {
 }
 
 /*
- * Salary sacrifice economics. `sacrifice` is the gross salary given up; the pension receives the sacrifice
- * plus any employer NIC saving passed through. Net cost is the reduction in take-home pay.
+ * Pension contribution economics, for both ways of getting relief.
+ *
+ * Employed (salary sacrifice): `sacrifice` is the gross salary given up, so relief comes at the marginal
+ * rate of income tax AND employee NIC, and the pension receives the sacrifice plus any employer NIC saving
+ * passed through.
+ *
+ * Self-employed (relief at source): a personal contribution cannot be sacrificed out of trading profit, so
+ * Class 4 NIC is charged on the profit either way and the only relief is income tax — at the marginal rate,
+ * plus any personal allowance restored, which is what differencing the income tax charge captures. There is
+ * no employer, so the pass-through factor is forced to 1 whatever the config says.
  */
-function calculateMarginalRelief(salaryInput, sacrificeInput, cfg) {
+function passThroughFactor(p, selfEmployed = false) { return selfEmployed ? 1 : 1 + p.erNic * p.erPass; }
+
+function calculateMarginalRelief(salaryInput, sacrificeInput, cfg, selfEmployed = false) {
   const p = taxParams(cfg);
   const sacrifice = Math.max(0, num(sacrificeInput, 0));
-  const passFactor = 1 + p.erNic * p.erPass;
-  const assumedRate = p.higherRate + p.nicUpper; // used when salary unknown
+  const passFactor = passThroughFactor(p, selfEmployed);
+  // used when earnings are unknown: income tax only for the self-employed, tax + NIC for an employee
+  const assumedRate = selfEmployed ? p.higherRate : p.higherRate + p.nicUpper;
   if (sacrifice <= 0) return { netCost: 0, taxSaved: 0, reliefRate: assumedRate * 100, pensionCredit: 0, sacrifice: 0 };
   const salary = num(salaryInput, 0);
   if (salary <= 0) {
@@ -351,33 +377,35 @@ function calculateMarginalRelief(salaryInput, sacrificeInput, cfg) {
     return { netCost: sacrifice - taxSaved, taxSaved, reliefRate: assumedRate * 100, pensionCredit: sacrifice * passFactor, sacrifice, assumed: true };
   }
   const g = Math.min(sacrifice, salary);
-  const taxSaved = calculateUKTaxAndNIC(salary, p) - calculateUKTaxAndNIC(salary - g, p);
+  const taxSaved = selfEmployed
+    ? incomeTax(salary, p) - incomeTax(salary - g, p)
+    : calculateUKTaxAndNIC(salary, p) - calculateUKTaxAndNIC(salary - g, p);
   return { netCost: g - taxSaved, taxSaved, reliefRate: g > 0 ? (taxSaved / g) * 100 : 0, pensionCredit: g * passFactor, sacrifice: g, capped: g < sacrifice };
 }
 // Net take-home cost of a pension contribution (the amount landing in the pension, incl. employer pass-through).
-function netCostOfPensionContrib(contrib, salaryInput, cfg) {
+function netCostOfPensionContrib(contrib, salaryInput, cfg, selfEmployed = false) {
   const p = taxParams(cfg);
-  const passFactor = 1 + p.erNic * p.erPass;
-  return calculateMarginalRelief(salaryInput, Math.max(0, num(contrib, 0)) / passFactor, cfg).netCost;
+  const passFactor = passThroughFactor(p, selfEmployed);
+  return calculateMarginalRelief(salaryInput, Math.max(0, num(contrib, 0)) / passFactor, cfg, selfEmployed).netCost;
 }
 // Pension credit obtainable for a given net take-home cost (inverse of the above), capped at maxCredit.
-function grossUpNet(netAmount, salaryInput, cfg, maxCredit = Infinity) {
+function grossUpNet(netAmount, salaryInput, cfg, maxCredit = Infinity, selfEmployed = false) {
   const net = Math.max(0, num(netAmount, 0));
   if (net <= 0) return 0;
   const p = taxParams(cfg);
-  const passFactor = 1 + p.erNic * p.erPass;
+  const passFactor = passThroughFactor(p, selfEmployed);
   const salary = num(salaryInput, 0);
   let credit;
   if (salary <= 0) {
-    credit = (net / Math.max(0.01, 1 - (p.higherRate + p.nicUpper))) * passFactor;
+    credit = (net / Math.max(0.01, 1 - (selfEmployed ? p.higherRate : p.higherRate + p.nicUpper))) * passFactor;
   } else {
     // netCost(sacrifice) is increasing; bisection on sacrifice in [0, salary]
     let lo = 0, hi = salary;
-    if (calculateMarginalRelief(salary, hi, p).netCost <= net) credit = hi * passFactor;
+    if (calculateMarginalRelief(salary, hi, p, selfEmployed).netCost <= net) credit = hi * passFactor;
     else {
       for (let i = 0; i < 48; i++) {
         const mid = (lo + hi) / 2;
-        if (calculateMarginalRelief(salary, mid, p).netCost < net) lo = mid; else hi = mid;
+        if (calculateMarginalRelief(salary, mid, p, selfEmployed).netCost < net) lo = mid; else hi = mid;
       }
       credit = ((lo + hi) / 2) * passFactor;
     }
@@ -385,22 +413,22 @@ function grossUpNet(netAmount, salaryInput, cfg, maxCredit = Infinity) {
   return Math.min(credit, Math.max(0, maxCredit));
 }
 // Additional pension credit purchasable for `netAmount` on top of an existing `baseCredit` (marginal pricing).
-function grossUpNetIncremental(netAmount, salaryInput, cfg, baseCredit = 0, maxAdditional = Infinity) {
+function grossUpNetIncremental(netAmount, salaryInput, cfg, baseCredit = 0, maxAdditional = Infinity, selfEmployed = false) {
   const net = Math.max(0, num(netAmount, 0));
   if (net <= 0 || !(maxAdditional > 0)) return 0;
   const base = Math.max(0, num(baseCredit, 0));
-  if (base <= 0) return grossUpNet(net, salaryInput, cfg, maxAdditional);
+  if (base <= 0) return grossUpNet(net, salaryInput, cfg, maxAdditional, selfEmployed);
   const p = taxParams(cfg);
-  const passFactor = 1 + p.erNic * p.erPass;
+  const passFactor = passThroughFactor(p, selfEmployed);
   const salary = num(salaryInput, 0);
-  const costBase = netCostOfPensionContrib(base, salaryInput, p);
+  const costBase = netCostOfPensionContrib(base, salaryInput, p, selfEmployed);
   const maxTotal = salary > 0 ? Math.min(base + maxAdditional, salary * passFactor) : base + maxAdditional;
   if (maxTotal <= base) return 0;
-  if (netCostOfPensionContrib(maxTotal, salaryInput, p) - costBase <= net) return maxTotal - base;
+  if (netCostOfPensionContrib(maxTotal, salaryInput, p, selfEmployed) - costBase <= net) return maxTotal - base;
   let lo = base, hi = maxTotal;
   for (let i = 0; i < 48; i++) {
     const mid = (lo + hi) / 2;
-    if (netCostOfPensionContrib(mid, salaryInput, p) - costBase < net) lo = mid; else hi = mid;
+    if (netCostOfPensionContrib(mid, salaryInput, p, selfEmployed) - costBase < net) lo = mid; else hi = mid;
   }
   return (lo + hi) / 2 - base;
 }
@@ -554,6 +582,8 @@ function buildContext(rawPlan) {
     age0: o === 'self' ? ageSelf0 : agePart0,
     retireAge: o === 'self' ? retireSelf : retirePart,
     salary: Math.max(0, num(o === 'self' ? d.salarySelf : d.salaryPart, 0)),
+    // trading profit rather than salary: Class 4 NIC, and pension relief at the income tax rate only
+    selfEmployed: (o === 'self' ? d.employmentSelf : d.employmentPart) === 'self-employed',
     cgtGainsUsed: Math.max(0, num(o === 'self' ? d.cgtGainsUsedSelf : d.cgtGainsUsedPart, 0)),
     // unused annual allowance from the three tax years before the projection starts
     cfBroughtForward: Math.max(0, num(o === 'self' ? d.cfBroughtForwardSelf : d.cfBroughtForwardPart, 0)),
@@ -567,7 +597,9 @@ function buildContext(rawPlan) {
     const ownerAA = P.aaAt(o.salary);
     if (pen && pen.contrib > ownerAA) warnings.push(`${o.label}: pension contribution £${Math.round(pen.contrib).toLocaleString()} exceeds the annual allowance £${Math.round(ownerAA).toLocaleString()}${ownerAA < P.pensionAllowance ? ` (tapered from £${P.pensionAllowance.toLocaleString()} because earnings exceed £${P.aaTaperThr.toLocaleString()})` : ''}.`);
     if (isa && isa.contrib > P.isaAllowance) warnings.push(`${o.label}: ISA contribution £${Math.round(isa.contrib).toLocaleString()} exceeds the ISA allowance £${P.isaAllowance.toLocaleString()}.`);
-    if (o.salary > 0 && pen && pen.contrib > o.salary) warnings.push(`${o.label}: pension contribution exceeds salary.`);
+    if (o.salary > 0 && pen && pen.contrib > o.salary) warnings.push(`${o.label}: pension contribution exceeds ${o.selfEmployed ? 'trading profit' : 'salary'}.`);
+    // the pass-through only exists because an employer saves NIC on sacrificed salary; a sole trader has neither
+    if (o.selfEmployed && P.erPass > 0) warnings.push(`${o.label}: employer NIC pass-through is set to ${Math.round(P.erPass * 100)}% in Config, but the self-employed have no employer — it is ignored for this person.`);
     const gia = acc[o.ids.other];
     if (P.cgtEnabled && gia && gia.balance > 0 && isBlank(plan.accounts.find(a => a.id === o.ids.other)?.unrealisedGain)) {
       warnings.push(`${o.label}: no unrealised gain entered for Other Investments, so the £${Math.round(gia.balance).toLocaleString()} balance is treated as all cost and only future growth is taxed. Set it under Advanced inputs if the holding has an embedded gain.`);
@@ -856,8 +888,9 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
       if (!working[o.key] || o.salary <= 0) return;
       const pen = acc[o.ids.pen];
       const penContrib = pen ? contribAtYear(pen, t) : 0;
-      const sacrifice = Math.min(o.salary, penContrib / (1 + P.erNic * P.erPass));
-      const takeHome = o.salary - sacrifice - calculateUKTaxAndNIC(o.salary - sacrifice, P);
+      // pay less tax, NIC and the net cost of the pension contribution — which prices sacrifice for an
+      // employee and relief at source for the self-employed, whose NIC is charged on the whole profit
+      const takeHome = o.salary - calculateUKTaxAndNIC(o.salary, P, o.selfEmployed) - netCostOfPensionContrib(penContrib, o.salary, P, o.selfEmployed);
       const nonPensionContribs = (contribThisYear[o.key] / frac) - penContrib;
       workingTakeHome += Math.max(0, takeHome - nonPensionContribs) * frac;
     });
@@ -1303,10 +1336,10 @@ function allocateBudget(ctx, netBudget, isaShare, { isaMin = 0, balance = 'propo
   // pension gross per owner with caps; overflow cascades to the other owner
   const penGross = owners.map(() => 0);
   const penNetUsed = owners.map(() => 0);
-  const passFactor = 1 + P.erNic * P.erPass;
+  // the self-employed have no employer, so no pass-through can inflate the earnings cap for them
   const capOf = (o) => Math.min(
     mpaaAppliesAtYear(P, o, 0) ? P.mpaaLimit : P.aaAt(o.salary),
-    o.salary > 0 ? o.salary * passFactor : P.pensionAllowance
+    o.salary > 0 ? o.salary * passThroughFactor(P, o.selfEmployed) : P.pensionAllowance
   );
   let penNetRemaining = penNet;
   const order = owners.map((o, i) => i).sort((a, b) => penW[b] - penW[a]);
@@ -1316,10 +1349,10 @@ function allocateBudget(ctx, netBudget, isaShare, { isaMin = 0, balance = 'propo
     const o = owners[i];
     const cap = Math.max(0, capOf(o) - penGross[i]);
     if (cap <= 0) return 0;
-    const credit = grossUpNetIncremental(netAmt, o.salary, P, penGross[i], cap);
+    const credit = grossUpNetIncremental(netAmt, o.salary, P, penGross[i], cap, o.selfEmployed);
     if (credit <= 0) return 0;
     penGross[i] += credit;
-    const total = netCostOfPensionContrib(penGross[i], o.salary, P);
+    const total = netCostOfPensionContrib(penGross[i], o.salary, P, o.selfEmployed);
     const delta = total - penNetUsed[i];
     penNetUsed[i] = total;
     return delta;
@@ -1330,7 +1363,7 @@ function allocateBudget(ctx, netBudget, isaShare, { isaMin = 0, balance = 'propo
   if (penFloorGross) {
     owners.forEach((o, i) => {
       if (penGross[i] > penFloorGross[i]) {
-        const excessNet = penNetUsed[i] - netCostOfPensionContrib(penFloorGross[i], o.salary, P);
+        const excessNet = penNetUsed[i] - netCostOfPensionContrib(penFloorGross[i], o.salary, P, o.selfEmployed);
         penGross[i] = penFloorGross[i]; penNetUsed[i] -= excessNet; penNetRemaining += excessNet;
       }
     });
@@ -1395,7 +1428,7 @@ function accumulationOutlay(rawPlan, rateOverride = null) {
           c = stripped * Math.pow(1 + rateOverride, t);
         }
         if (!(c > 0)) continue;
-        net += cat === 'pen' ? netCostOfPensionContrib(c, o.salary, cfg) : c;
+        net += cat === 'pen' ? netCostOfPensionContrib(c, o.salary, cfg, o.selfEmployed) : c;
       }
     });
   });
@@ -1410,16 +1443,20 @@ function accumulationOutlay(rawPlan, rateOverride = null) {
  * across the whole accumulation period and not just in year one.
  */
 function solveEscalation(planState, targetOutlay, { tol = 1, maxIter = 60 } = {}) {
-  const before = accumulationOutlay(planState);
+  // the bisection below prices the same plan ~120 times, so build its context once and reuse it:
+  // rebuilding per evaluation cost ~90ms per tournament, paid on every keystroke through the preview memo
+  const ctx = planState && planState.P ? planState : buildContext(planState);
+  const before = accumulationOutlay(ctx);
   if (!(targetOutlay > 0) || !(before > 0)) return { rate: null, before, after: before };
-  const at = (r) => accumulationOutlay(planState, r);
+  const at = (r) => accumulationOutlay(ctx, r);
   let lo = -0.9, hi = 1.0;
   // outlay rises monotonically with the escalation rate, so bisection is sound
   if (at(lo) > targetOutlay || at(hi) < targetOutlay) return { rate: null, before, after: before };
   for (let i = 0; i < maxIter; i++) {
     const mid = (lo + hi) / 2;
-    if (at(mid) < targetOutlay) lo = mid; else hi = mid;
-    if (Math.abs(at(mid) - targetOutlay) <= tol) { lo = hi = mid; break; }
+    const outlay = at(mid);
+    if (outlay < targetOutlay) lo = mid; else hi = mid;
+    if (Math.abs(outlay - targetOutlay) <= tol) { lo = hi = mid; break; }
   }
   // round to the precision the plan actually stores (0.01pp) and re-price there, so the figure reported
   // to the user is the one the projection runs on — at 0.1pp the rounding alone drifts ~0.5% of outlay
@@ -1511,7 +1548,7 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
 
   const currentPen = owners.map(o => acc[o.ids.pen] ? acc[o.ids.pen].contrib : 0);
   const currentIsa = owners.map(o => acc[o.ids.isa] ? acc[o.ids.isa].contrib : 0);
-  const currentPenNet = owners.reduce((s, o, i) => s + netCostOfPensionContrib(currentPen[i], o.salary, cfg), 0);
+  const currentPenNet = owners.reduce((s, o, i) => s + netCostOfPensionContrib(currentPen[i], o.salary, cfg, o.selfEmployed), 0);
   const currentIsaNet = currentIsa.reduce((a, b) => a + b, 0);
   const derivedBudget = currentIsaNet + currentPenNet;
   const netBudget = netBudgetOverride !== null && netBudgetOverride !== '' ? Math.max(0, num(netBudgetOverride, 0)) : derivedBudget;
@@ -1576,7 +1613,7 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
       }
     }
     strategies.push(mk('relief', 'Relief-First' + (transfer ? ' + Bed & SIPP' : ''),
-      'Routes the budget to pension first (subject to the pre-SIPP access bridge minimum) to capture maximum upfront tax and NIC relief' + (transfer ? '; also moves spare ISA capital into the pension.' : '.'),
+      `Routes the budget to pension first (subject to the pre-SIPP access bridge minimum) to capture maximum upfront ${owners.every(o => o.selfEmployed) ? 'tax relief' : 'tax and NIC relief'}` + (transfer ? '; also moves spare ISA capital into the pension.' : '.'),
       alloc, { transferNet: transfer ? Math.round(transfer.net) : 0, transferGross: transfer ? Math.round(transfer.gross) : 0, taxReliefSaved: alloc.taxReliefSaved + reliefExtra, planOpts: { transfer } }));
   }
   // 5 bracket-smoothed pension sizing
@@ -1704,7 +1741,7 @@ function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
 }
 
 // Namespace used by the UI (mirrors the modular engine.js exports)
-const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, employeeNIC, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSurvivalMaximizer, buildTournament, buildPolicyCandidates, pickBest };
+const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, nicFor, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSurvivalMaximizer, buildTournament, buildPolicyCandidates, pickBest };
 export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans, buildPolicyCandidates, pickBest, accumulationOutlay, solveEscalation, applyEscalationToPlan };
 
 
@@ -1828,7 +1865,9 @@ const sentenceCase = (s) => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
  * Every strategy spends the same net budget, so the reconciliation clause matters: pension figures
  * are gross and ISA figures net, which is why the rise and the fall do not match pound for pound.
  */
-function summarizeStrategyChange(res, baselinePlayer, { isCouple = false, meta = null, threshold = 50 } = {}) {
+function summarizeStrategyChange(res, baselinePlayer, { isCouple = false, meta = null, threshold = 50, selfEmployedOnly = false } = {}) {
+  // the self-employed get income tax relief only, so calling it NIC relief would be wrong for them
+  const reliefWord = selfEmployedOnly ? 'tax relief' : 'tax and NIC relief';
   if (!res) return [];
   if (res.id === 'baseline') return ['Your plan exactly as entered — the benchmark every other strategy is measured against.'];
   if (!res.planState || !baselinePlayer?.planState) return [];
@@ -1869,8 +1908,8 @@ function summarizeStrategyChange(res, baselinePlayer, { isCouple = false, meta =
     // usual "same take-home cost" reconciliation would be a lie
     const overridden = meta && Math.abs(E.num(meta.netBudget, 0) - E.num(meta.derivedBudget, 0)) >= threshold;
     let tail = overridden ? ` — on the ${formatGBP(meta.netBudget)}/yr take-home budget you set, against ${formatGBP(meta.derivedBudget)}/yr in your plan today` : ' — the same take-home cost';
-    if (reliefDelta >= threshold) tail += `, with ${formatGBP(reliefDelta)}/yr more tax and NIC relief`;
-    else if (reliefDelta <= -threshold) tail += `, giving up ${formatGBP(Math.abs(reliefDelta))}/yr of tax and NIC relief`;
+    if (reliefDelta >= threshold) tail += `, with ${formatGBP(reliefDelta)}/yr more ${reliefWord}`;
+    else if (reliefDelta <= -threshold) tail += `, giving up ${formatGBP(Math.abs(reliefDelta))}/yr of ${reliefWord}`;
     lines.push(`${sentenceCase(joinClauses(parts))}${tail}.`);
     if (overflowed) lines.push('The GIA overflow is budget that no longer fits inside the ISA and pension allowances.');
   }
@@ -1891,24 +1930,31 @@ function summarizeStrategyChange(res, baselinePlayer, { isCouple = false, meta =
   return lines;
 }
 
-function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, onApplyStrategyToPlan, onNavigateDocs }) {
+function WrapperStrategyTournament({ plan, ctx, seed, state, setState, cancelRef, onApplyStrategyToSandbox, onApplyStrategyToPlan, onNavigateDocs }) {
   const P = ctx.P;
   const isCouple = ctx.isCouple;
-  const [scope, setScope] = useState('contributions');
-  const [emergencyFloor, setEmergencyFloor] = useState(25000);
-  const [budgetOverride, setBudgetOverride] = useState('');
-  const [balance, setBalance] = useState('proportional');
-  const [preAccessCap, setPreAccessCap] = useState(5);
-  const [results, setResults] = useState(null);
-  const [progress, setProgress] = useState(null);
-  const [isEvaluating, setIsEvaluating] = useState(false);
+  // Settings, results and run progress are owned by App so they outlive this component's unmount on a tab
+  // switch; these accessors keep the rest of the component reading like ordinary local state.
+  const { scope, emergencyFloor, budgetOverride, balance, preAccessCap, results, progress, isEvaluating } = state;
+  const setField = (key) => (value) => setState(prev => ({ ...prev, [key]: value }));
+  const setScope = setField('scope');
+  const setEmergencyFloor = setField('emergencyFloor');
+  const setBudgetOverride = setField('budgetOverride');
+  const setBalance = setField('balance');
+  const setPreAccessCap = setField('preAccessCap');
+  const setResults = setField('results');
+  const setProgress = setField('progress');
+  const setIsEvaluating = setField('isEvaluating');
   const [confirmApplyId, setConfirmApplyId] = useState(null);
-  const cancelRef = useRef(false);
+  // A sandbox run is scored against the frozen sandbox plan rather than the saved inputs.
+  const selfEmployedOnly = ctx.owners.length > 0 && ctx.owners.every(o => o.selfEmployed);
+  const usingSandbox = !!state.basePlan;
+  const basePlan = state.basePlan || plan;
 
   const preview = useMemo(() => {
-    try { return E.buildTournament(E.resolveMpaa(plan), { emergencyFloor: E.num(emergencyFloor, 0), scope, netBudgetOverride: budgetOverride === '' ? null : budgetOverride, balance }); }
+    try { return E.buildTournament(E.resolveMpaa(basePlan), { emergencyFloor: E.num(emergencyFloor, 0), scope, netBudgetOverride: budgetOverride === '' ? null : budgetOverride, balance }); }
     catch (e) { return null; }
-  }, [plan, emergencyFloor, scope, budgetOverride, balance]);
+  }, [basePlan, emergencyFloor, scope, budgetOverride, balance]);
   const meta = preview?.meta;
   const salaryMissing = ctx.owners.filter(o => o.salary <= 0).map(o => o.label);
   // balancing steers new money to the smaller pension, which throws away relief when that owner sits in
@@ -1957,6 +2003,14 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
     }
   };
 
+  // "Re-run on sandbox" arrives as a token rather than a direct call, because the click happens in the
+  // sandbox panel which may be on another tab. Clearing the token first makes the run fire exactly once.
+  useEffect(() => {
+    if (!state.autoRun || !preview || isEvaluating) return;
+    setState(prev => ({ ...prev, autoRun: 0 }));
+    handleRun();
+  }, [state.autoRun, preview]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const se = results && results.players.length ? results.players[0].stats.standardError : 0;
   const baselinePlayer = results ? results.players.find(p => p.id === 'baseline') : null;
 
@@ -1976,12 +2030,20 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
         </button>
       </div>
 
+      {usingSandbox && (
+        <div className="flex flex-wrap items-center justify-between gap-2 p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs">
+          <span className="text-amber-900 flex items-center gap-2"><Sparkles className="w-3.5 h-3.5 text-amber-600" /><strong className="font-bold">Scoring your sandbox figures</strong>, not your saved plan inputs. The sandbox is frozen as it was when you started this run.</span>
+          <button type="button" onClick={() => setState(prev => ({ ...prev, basePlan: null, results: null }))}
+            className="px-2.5 py-1 rounded-lg font-semibold bg-surface hover:bg-slate-100 text-slate-700 border border-slate-300 cursor-pointer">Back to plan inputs</button>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 text-xs font-sans p-3 bg-slate-50 border border-slate-200 rounded-xl">
         <div>
           <label className="text-slate-700 font-semibold block mb-1">Annual take-home budget (£ net)</label>
           <input type="number" min="0" step="250" value={budgetOverride} placeholder={meta ? `${Math.round(meta.derivedBudget).toLocaleString()} (from plan)` : ''} onChange={(e) => setBudgetOverride(e.target.value)}
             className="w-full p-2 bg-surface border border-slate-300 rounded-lg font-mono text-slate-900 font-bold focus:ring-1 focus:ring-indigo-500 focus:outline-none" />
-          <span className="text-[10px] text-slate-500 block mt-1">Derived from current ISA + net cost of pension contributions{salaryMissing.length ? ` (salary missing for ${salaryMissing.join(', ')} — ${Math.round((P.higherRate + P.nicUpper) * 100)}% relief assumed)` : ''}.</span>
+          <span className="text-[10px] text-slate-500 block mt-1">Derived from current ISA + net cost of pension contributions{salaryMissing.length ? ` (salary missing for ${salaryMissing.join(', ')} — ${Math.round((selfEmployedOnly ? P.higherRate : P.higherRate + P.nicUpper) * 100)}% relief assumed)` : ''}.</span>
         </div>
         <div>
           <label className="text-slate-700 font-semibold block mb-1">Optimization scope</label>
@@ -2049,7 +2111,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
             {results.players.map((res) => {
               const isBest = res.id === results.bestId;
               const st = res.stats;
-              const summaryLines = summarizeStrategyChange(res, baselinePlayer, { isCouple, meta: results.meta });
+              const summaryLines = summarizeStrategyChange(res, baselinePlayer, { isCouple, meta: results.meta, selfEmployedOnly });
               return (
                 <div key={res.id} className={`p-4 rounded-2xl border flex flex-col justify-between space-y-3 ${isBest ? 'bg-emerald-50/60 border-emerald-300 shadow-sm' : res.id === 'baseline' ? 'bg-slate-50 border-slate-200' : 'bg-surface border-indigo-100 shadow-xs'}`}>
                   <div className="space-y-2">
@@ -2067,7 +2129,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, onApplyStrategyToSandbox, 
                       <div className="flex justify-between"><span className="text-slate-500">S&amp;S ISA:</span><strong className="text-teal-700">£{Math.round(res.isaContrib || 0).toLocaleString()}/yr{res.phase && res.phase.switchYears > 0 ? ' avg' : ''}</strong></div>
                       <div className="flex justify-between"><span className="text-slate-500">Pension:</span><strong className="text-blue-700">£{Math.round(res.penContrib || 0).toLocaleString()}/yr{res.phase && res.phase.switchYears > 0 ? ' avg' : ''}</strong></div>
                       {res.giaContrib > 0 && <div className="flex justify-between"><span className="text-slate-500">GIA overflow:</span><strong className="text-amber-700">£{Math.round(res.giaContrib).toLocaleString()}/yr</strong></div>}
-                      {res.taxReliefSaved > 0 && <div className="flex justify-between text-emerald-700 font-bold"><span className="font-sans">Tax &amp; NIC relief:</span><span>+£{Math.round(res.taxReliefSaved).toLocaleString()}/yr</span></div>}
+                      {res.taxReliefSaved > 0 && <div className="flex justify-between text-emerald-700 font-bold"><span className="font-sans">{selfEmployedOnly ? 'Tax relief:' : 'Tax & NIC relief:'}</span><span>+£{Math.round(res.taxReliefSaved).toLocaleString()}/yr</span></div>}
                       {res.transferNet > 0 && <div className="flex justify-between text-indigo-700 font-bold"><span>Bed &amp; SIPP:</span><span>£{Math.round(res.transferNet).toLocaleString()} &rarr; £{Math.round(res.transferGross).toLocaleString()}</span></div>}
                       {res.phase && res.phase.switchYears > 0 && <div className="flex justify-between text-slate-600"><span className="font-sans">Phasing:</span><span>pension-max {res.phase.yearsToFirstRetire - res.phase.switchYears}y → ISA-max {res.phase.switchYears}y</span></div>}
                       <div className="flex justify-between pt-1 border-t border-slate-100"><span className="text-slate-500 font-sans">Median pot @ {ctx.terminalAge}:</span><span className="font-bold text-slate-800">{fmtK(st.medianTerminal)}</span></div>
@@ -2159,6 +2221,19 @@ export default function App() {
   const [sandboxRetire, setSandboxRetire] = useState(() => sandboxRetireFromPlan(plan));
   useEffect(() => { if (!sandboxCustomized) setSandboxAccounts(sandboxFromPlan(plan)); }, [plan?.accounts, sandboxCustomized]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (!sandboxCustomized) setSandboxRetire(sandboxRetireFromPlan(plan)); }, [plan?.demographics?.retireAgeSelf, plan?.demographics?.retireAgePart, sandboxCustomized]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The tournament lives inside the Monte Carlo tab, which unmounts on every tab switch. Its settings and
+  // results are held here instead so a run that took a minute to produce survives a trip to another tab —
+  // and so a run left in flight can still land its results when the user navigates away mid-evaluation.
+  // `basePlan` holds a frozen copy of the sandbox when the user scores the tournament against it rather than
+  // the saved plan inputs; `autoRun` is a token the component watches to start that run on arrival.
+  const [tournament, setTournament] = useState({
+    scope: 'contributions', emergencyFloor: 25000, budgetOverride: '', balance: 'proportional', preAccessCap: 5,
+    results: null, progress: null, isEvaluating: false, basePlan: null, autoRun: 0
+  });
+  const tournamentCancelRef = useRef(false);
+  // The Monte Carlo tab leads with the tournament, so its sandbox copy starts collapsed.
+  const [sandboxOpen, setSandboxOpen] = useState(false);
 
   useEffect(() => { safeStorageSet(STORAGE_KEY, JSON.stringify(plan)); }, [plan]);
   useEffect(() => { safeStorageSet(SCENARIOS_STORAGE_KEY, JSON.stringify(scenarios)); }, [scenarios]);
@@ -2342,21 +2417,33 @@ export default function App() {
   };
 
   // ------------------------------------------------------------ sandbox
+  // The sandbox as a plan object: the saved plan with its contributions, escalation and retirement ages
+  // replaced by the sandbox figures. Used both to write the sandbox back and to score it in the tournament.
+  const planFromSandbox = (prev) => ({
+    ...prev,
+    demographics: { ...prev.demographics, retireAgeSelf: sandboxRetire.self, ...(isCouple ? { retireAgePart: sandboxRetire.part } : {}) },
+    accounts: (prev.accounts || []).map(acc => {
+      const sb = sandboxAccounts[acc.id];
+      if (!sb) return acc;
+      const out = { ...acc, contrib: sb.contrib, growth: sb.growth };
+      if (sb.balance !== undefined) out.balance = sb.balance;
+      if (sb.contribByYear) out.contribByYear = sb.contribByYear; else delete out.contribByYear;
+      return out;
+    })
+  });
   const handleApplySandboxToPlan = () => {
     setSandboxCustomized(false);
-    setPlan(prev => ({
-      ...prev,
-      demographics: { ...prev.demographics, retireAgeSelf: sandboxRetire.self, ...(isCouple ? { retireAgePart: sandboxRetire.part } : {}) },
-      accounts: (prev.accounts || []).map(acc => {
-        const sb = sandboxAccounts[acc.id];
-        if (!sb) return acc;
-        const out = { ...acc, contrib: sb.contrib, growth: sb.growth };
-        if (sb.balance !== undefined) out.balance = sb.balance;
-        if (sb.contribByYear) out.contribByYear = sb.contribByYear; else delete out.contribByYear;
-        return out;
-      })
-    }));
+    setPlan(prev => planFromSandbox(prev));
     flash('Sandbox applied to plan inputs');
+  };
+  // Scores the six strategies against the sandbox figures instead of the saved plan, so a sandbox worth
+  // keeping can be tested before it is written back. The plan is frozen at the moment of the click — later
+  // sandbox edits do not silently change what the displayed results were run on.
+  const handleRunTournamentFromSandbox = () => {
+    const base = E.normalizePlan(clone(planFromSandbox(plan)));
+    setTournament(prev => ({ ...prev, basePlan: base, results: null, autoRun: prev.autoRun + 1 }));
+    setActiveTab('simulation');
+    flash('Running the tournament on your sandbox figures', 4000);
   };
   const handleResetSandbox = () => { setSandboxCustomized(false); setSandboxAccounts(sandboxFromPlan(plan)); setSandboxRetire(sandboxRetireFromPlan(plan)); };
   const updateSandboxRetire = (key, value) => {
@@ -2556,19 +2643,34 @@ export default function App() {
     { id: 'dark', Icon: Moon, title: 'Control Room (dark)' },
   ];
 
-  // One sandbox shared by the Trajectory and Monte Carlo tabs: both render this same element, so it is
+  // One sandbox shared by the Trajectory and Monte Carlo tabs: both render this same markup, so it is
   // backed by a single piece of state and an edit made in one tab is already present in the other.
-  const sandboxPanel = (
+  // On the Monte Carlo tab it sits below the tournament and starts collapsed, since the tournament is
+  // what that tab is for and the sandbox is the follow-on.
+  const renderSandboxPanel = ({ collapsible = false } = {}) => (
     <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-5">
-      <div className="pb-3 border-b border-slate-100">
-        <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Sparkles className="w-4 h-4 text-amber-500" /> Contribution &amp; Escalation Sandbox</h3>
-        <p className="text-xs text-slate-500 mt-0.5">Test contributions, escalation rates and tournament strategies without modifying your base plan inputs.</p>
+      <div className={collapsible && !sandboxOpen ? '' : 'pb-3 border-b border-slate-100'}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Sparkles className="w-4 h-4 text-amber-500" /> Sandbox</h3>
+            <p className="text-xs text-slate-500 mt-0.5">Test contributions, escalation rates and tournament strategies without modifying your base plan inputs.</p>
+          </div>
+          {collapsible && (
+            <button type="button" onClick={() => setSandboxOpen(o => !o)} className="shrink-0 px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 cursor-pointer">
+              {sandboxOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              {sandboxOpen ? 'Hide' : isSandboxModified ? 'Show (edited)' : 'Show'}
+            </button>
+          )}
+        </div>
       </div>
+      {collapsible && !sandboxOpen ? null : <>
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 pb-3 border-y border-slate-100">
         <div><h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Wrapper Sandbox Controls</h4><span className="text-[11px] text-slate-500">Adjust retirement ages and individual wrappers below, or reset back to your baseline plan inputs.</span></div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <button onClick={handleResetSandbox} disabled={!isSandboxModified} className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all border ${isSandboxModified ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300 cursor-pointer' : 'bg-slate-50 text-slate-300 border-slate-200 cursor-not-allowed'}`}><RotateCcw className="w-3.5 h-3.5" /> Reset Sandbox</button>
           <button onClick={handleApplySandboxToPlan} disabled={!isSandboxModified} className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs ${isSandboxModified ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 dark:from-[#C77A2E] dark:to-[#B0631E] dark:hover:from-[#B0631E] dark:hover:to-[#8A4C17] text-white cursor-pointer active:scale-95' : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'}`}><Check className="w-3.5 h-3.5" /> Apply to Plan Inputs</button>
+          <button onClick={handleRunTournamentFromSandbox} title="Score the six wrapper strategies against these sandbox figures instead of your saved plan inputs"
+            className="px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer active:scale-95"><Zap className="w-3.5 h-3.5" /> Re-run Tournament on Sandbox</button>
         </div>
       </div>
       <div className="p-4 bg-slate-50/80 border border-slate-200 rounded-2xl space-y-3">
@@ -2641,6 +2743,7 @@ export default function App() {
           </tbody>
         </table>
       </div>
+      </>}
     </div>
   );
 
@@ -2742,8 +2845,8 @@ export default function App() {
                 {isCouple && <div><label className="text-slate-600 font-semibold block mb-1">Current Age (Partner)</label><input type="number" min="0" max="120" placeholder="e.g. 40" onFocus={handleFocus} value={plan?.demographics?.currentAgePart ?? ''} onChange={(e) => updateDemographics('currentAgePart', e.target.value)} className={inputCls} /></div>}
                 <div><label className="text-slate-600 font-semibold block mb-1">Retirement Age (Myself)</label><input type="number" min="0" max="120" placeholder="e.g. 60" onFocus={handleFocus} value={plan?.demographics?.retireAgeSelf ?? ''} onChange={(e) => updateDemographics('retireAgeSelf', e.target.value)} className={inputCls} /></div>
                 {isCouple && <div><label className="text-slate-600 font-semibold block mb-1">Retirement Age (Partner)</label><input type="number" min="0" max="120" placeholder="e.g. 60" onFocus={handleFocus} value={plan?.demographics?.retireAgePart ?? ''} onChange={(e) => updateDemographics('retireAgePart', e.target.value)} className={inputCls} /></div>}
-                <div><label className="text-slate-600 font-semibold block mb-1">Gross Salary (Myself £/yr)</label><input type="number" min="0" step="1000" placeholder="for tax relief & bridging" onFocus={handleFocus} value={plan?.demographics?.salarySelf ?? ''} onChange={(e) => updateDemographics('salarySelf', e.target.value)} className={inputCls} /></div>
-                {isCouple && <div><label className="text-slate-600 font-semibold block mb-1">Gross Salary (Partner £/yr)</label><input type="number" min="0" step="1000" placeholder="for tax relief & bridging" onFocus={handleFocus} value={plan?.demographics?.salaryPart ?? ''} onChange={(e) => updateDemographics('salaryPart', e.target.value)} className={inputCls} /></div>}
+                <div><label className="text-slate-600 font-semibold block mb-1">{plan?.demographics?.employmentSelf === 'self-employed' ? 'Annual Profit — self-employment (Myself £/yr)' : 'Gross Salary (Myself £/yr)'}</label><input type="number" min="0" step="1000" placeholder="for tax relief & bridging" onFocus={handleFocus} value={plan?.demographics?.salarySelf ?? ''} onChange={(e) => updateDemographics('salarySelf', e.target.value)} className={inputCls} /></div>
+                {isCouple && <div><label className="text-slate-600 font-semibold block mb-1">{plan?.demographics?.employmentPart === 'self-employed' ? 'Annual Profit — self-employment (Partner £/yr)' : 'Gross Salary (Partner £/yr)'}</label><input type="number" min="0" step="1000" placeholder="for tax relief & bridging" onFocus={handleFocus} value={plan?.demographics?.salaryPart ?? ''} onChange={(e) => updateDemographics('salaryPart', e.target.value)} className={inputCls} /></div>}
                 <div><label className="text-slate-600 font-semibold block mb-1">Expected State Pension (Myself £/yr)</label><input type="number" min="0" step="250" placeholder="e.g. 11500" onFocus={handleFocus} value={plan?.demographics?.statePensionSelf ?? ''} onChange={(e) => updateDemographics('statePensionSelf', e.target.value)} className={inputCls} /></div>
                 {isCouple && <div><label className="text-slate-600 font-semibold block mb-1">Expected State Pension (Partner £/yr)</label><input type="number" min="0" step="250" placeholder="e.g. 11500" onFocus={handleFocus} value={plan?.demographics?.statePensionPart ?? ''} onChange={(e) => updateDemographics('statePensionPart', e.target.value)} className={inputCls} /></div>}
                 <div className="sm:col-span-2">
@@ -2785,6 +2888,24 @@ export default function App() {
                       <input type="number" min="0" step="1" placeholder="6" onFocus={handleFocus} value={plan?.config?.cashBufferMonths ?? ''} onChange={(e) => updateConfig('cashBufferMonths', e.target.value)} className={inputCls} />
                       <span className="text-[10px] text-slate-400 mt-1 block">Months of spending held back in cash before surplus income is swept into the ISA.</span>
                     </div>
+                    {ctx.owners.map(o => {
+                      const field = o.key === 'self' ? 'employmentSelf' : 'employmentPart';
+                      const isSE = plan?.demographics?.[field] === 'self-employed';
+                      return (
+                        <div key={`emp_${o.key}`}>
+                          <label className="text-slate-600 font-semibold block mb-1">Employment type ({o.label})</label>
+                          <select value={isSE ? 'self-employed' : 'employed'} onChange={(e) => updateDemographics(field, e.target.value)} className={`${inputCls} cursor-pointer`}>
+                            <option value="employed">Employed (Class 1 NIC, salary sacrifice)</option>
+                            <option value="self-employed">Self-employed (Class 4 NIC, relief at source)</option>
+                          </select>
+                          <span className="text-[10px] text-slate-400 mt-1 block">
+                            {isSE
+                              ? `The salary box above is read as annual trading profit. Pension contributions get income tax relief only — no NIC saving${P.erPass > 0 ? ', and the employer NIC pass-through in Config does not apply' : ''}.`
+                              : 'Pension contributions are priced as salary sacrifice: income tax and employee NIC relief.'}
+                          </span>
+                        </div>
+                      );
+                    })}
                     {ctx.owners.map(o => (
                       <div key={`cf_${o.key}`}>
                         <label className="text-slate-600 font-semibold block mb-1">Pension allowance carried forward ({o.label} £)</label>
@@ -3163,6 +3284,7 @@ export default function App() {
                   ['personalAllowance', 'Personal Allowance (£)'], ['paTaperThreshold', 'PA Taper Threshold (£)'], ['paTaperRate', 'PA Taper Rate (% of excess)'], ['basicBandLimit', 'Higher Rate Starts At (£ income)'],
                   ['basicTaxRate', 'Basic Rate (%)'], ['higherBandLimit', 'Additional Rate Starts At (£ income)'], ['higherTaxRate', 'Higher Rate (%)'], ['additionalTaxRate', 'Additional Rate (%)'],
                   ['nicPrimaryThreshold', 'NIC Primary Threshold (£)'], ['nicUpperEarningsLimit', 'NIC Upper Earnings Limit (£)'], ['nicMainRate', 'NIC Main Rate (%)'], ['nicUpperRate', 'NIC Upper Rate (%)'],
+                  ['class4MainRate', 'Class 4 Main Rate (%, self-employed)'], ['class4UpperRate', 'Class 4 Upper Rate (%, self-employed)'],
                   ['employerNicRate', 'Employer NIC Rate (%)'], ['pclsProportion', 'PCLS Tax-Free (%)'], ['pclsMaxCap', 'Lump Sum Allowance (£ LSA)'],
                   ['isaAnnualAllowance', 'ISA Allowance (£/person/yr)'], ['pensionAnnualAllowance', 'Pension Annual Allowance (£/person/yr)'], ['pensionNoEarningsLimit', 'Pension Limit With No Earnings (£/person/yr)'], ['mpaaLimit', 'Money Purchase Annual Allowance (£/person/yr)'], ['pensionTaperThreshold', 'Annual Allowance Taper Threshold (£ earnings)'], ['pensionTaperRate', 'Annual Allowance Taper Rate (%)'], ['pensionTaperFloor', 'Tapered Annual Allowance Floor (£)'], ['cgtAnnualExempt', 'CGT Annual Exempt Amount (£/person/yr)'], ['cgtBasicRate', 'CGT Rate — Basic Band (%)'], ['cgtHigherRate', 'CGT Rate — Higher/Additional Band (%)']
                 ].map(([field, label]) => (
@@ -3262,7 +3384,7 @@ export default function App() {
               </div>
             </div>
 
-            {sandboxPanel}
+            {renderSandboxPanel()}
           </div>
         )}
 
@@ -3317,8 +3439,8 @@ export default function App() {
               </div>
             )}
 
-            {sandboxPanel}
-            <WrapperStrategyTournament plan={plan} ctx={ctx} seed={mcSeed} onApplyStrategyToSandbox={handleApplyStrategyToSandbox} onApplyStrategyToPlan={handleApplyStrategyToPlan} onNavigateDocs={() => goToDoc('doc-tournament')} />
+            <WrapperStrategyTournament plan={plan} ctx={ctx} seed={mcSeed} state={tournament} setState={setTournament} cancelRef={tournamentCancelRef} onApplyStrategyToSandbox={handleApplyStrategyToSandbox} onApplyStrategyToPlan={handleApplyStrategyToPlan} onNavigateDocs={() => goToDoc('doc-tournament')} />
+            {renderSandboxPanel({ collapsible: true })}
           </div>
         )}
 
@@ -3459,15 +3581,16 @@ export default function App() {
                 <li><strong>CGT is realisation-based.</strong> Gains are booked only when the GIA is actually sold, using a running cost basis. Gains are wiped by the uplift on death, so nothing is charged on whatever remains at the terminal age.</li>
                 <li><strong>The tournament holds contributions equal.</strong> Every strategy is re-priced to cost the same total over the accumulation years as your current plan, by solving its contribution escalation. Without this a strategy could win simply by asking you to pay in more.</li>
                 <li><strong>Allowance harvesting is a bequest tool.</strong> It never improves survival — it moves money from a pot taxed on death into one that is not. It is worth nothing unless you set a pension death tax rate, and close calls are broken on the pot left <em>after</em> that tax.</li>
+                <li><strong>The self-employed get income tax relief only.</strong> A sole trader cannot salary sacrifice, so a personal contribution saves income tax at the marginal rate but no NIC, and no employer NIC can be passed through. That is 40% relief for a higher-rate trader against 42% for an employee, and 20% against 28% in the basic band — set the employment type per person in Advanced inputs.</li>
                 <li><strong>Allowances are frozen in real terms</strong> at the Config figures. Any future rise in the ISA or pension allowance is not modelled, so long staging schedules are deliberately cautious.</li>
               </ul>
 
               <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Modelled</h3>
-              <p className="text-xs text-slate-600 leading-relaxed">Income tax including the personal-allowance taper, employee NIC, the {Math.round(P.pclsProp * 100)}% tax-free element capped at the £{P.lsa.toLocaleString()} Lump Sum Allowance, the £{P.pensionAllowance.toLocaleString()} annual allowance with taper and three-year carry-forward, the relevant-earnings limit, the MPAA, ISA allowances, realisation-based CGT with its annual exempt amount and band split, state pension timing, the pre-SIPP access bridge, one-off deposits with multi-year staging, one-off costs, lifestyle spending tapers, and salary-sacrifice relief including any employer NIC pass-through.</p>
+              <p className="text-xs text-slate-600 leading-relaxed">Income tax including the personal-allowance taper, employee Class 1 NIC and self-employed Class 4 NIC, the {Math.round(P.pclsProp * 100)}% tax-free element capped at the £{P.lsa.toLocaleString()} Lump Sum Allowance, the £{P.pensionAllowance.toLocaleString()} annual allowance with taper and three-year carry-forward, the relevant-earnings limit, the MPAA, ISA allowances, realisation-based CGT with its annual exempt amount and band split, state pension timing, the pre-SIPP access bridge, one-off deposits with multi-year staging, one-off costs, lifestyle spending tapers, salary-sacrifice relief including any employer NIC pass-through, and relief at source for the self-employed.</p>
 
               <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Not modelled yet</h3>
               <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
-                <li><strong>Self-employment:</strong> Class 2 and Class 4 NIC differ from the employee rates used here, and there is no employer NIC to pass through.</li>
+                <li><strong>Lumpy self-employed profits.</strong> Trading profit is carried as one figure with an escalation rate, like a salary. Real self-employment swings year to year, and a bad year can waste an annual allowance that carry-forward only partly recovers. <strong>Class 2 NIC</strong> is also not charged: it stopped being mandatory above the Small Profits Threshold in 2024, and the voluntary route for those below it does not change a projection. Payments on account, the trading allowance, capital allowances and incorporation are all out of scope.</li>
                 <li><strong>Scottish and Welsh income tax</strong> — rates and bands are rest-of-UK throughout.</li>
                 <li><strong>Inheritance tax on the estate.</strong> The pension death tax setting applies a haircut to leftover pension only, so it represents the <em>extra</em> tax a pension suffers relative to an ISA, not IHT on everything.</li>
                 <li><strong>Defined benefit pensions</strong> beyond entering them as a taxable income stream; no accrual, revaluation or transfer values.</li>
