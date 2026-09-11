@@ -1660,15 +1660,23 @@ function resolveSurvivalMaximizer(strategy, { trials = 400, seed = 12345, preAcc
 }
 
 /*
- * Strategy tournament — builds the six players. Every player invests the same net take-home budget.
+ * Strategy tournament — builds the five players. Every player invests the same net take-home budget.
  *   1 Current Plan            : as entered
  *   2 Survival Maximizer      : grid search over the ISA share (evaluated by the caller with common random numbers)
- *   3 Liquidity-First         : fill ISA allowances first, remainder to pension
- *   4 Relief-First            : pension first (subject to the pre-access bridge minimum), + Bed & SIPP in full scope
- *   5 Bracket-Smoothed Sizing : pension sized so retirement withdrawals + state pension stay inside the basic band
- *   6 Relief-First, Bridge-Last: pension-max early, switch to ISA-max for the final years to build the bridge
+ *   3 Relief-First            : pension first (subject to the pre-access bridge minimum), + Bed & SIPP in full scope
+ *   4 Bracket-Smoothed Sizing : pension sized so retirement withdrawals + state pension stay inside the basic band
+ *   5 Relief-First, Bridge-Last: pension-max early, switch to ISA-max for the final years to build the bridge
+ *
+ * There used to be a sixth, Liquidity-First, which put the whole budget into ISAs. It was removed because
+ * it was a duplicate rather than a strategy: its plan is byte-identical to the Survival Maximizer's
+ * 100%-ISA grid point, so the search already covers that allocation and reports it in the split table.
+ * Across a 106-scenario sweep it also finished last in 88 of them and never won.
+ *
+ * `entrants` adds saved scenarios as extra players. Those are NOT held to the baseline outlay: a saved
+ * scenario differs in more than allocation, so normalising it would rewrite the thing being compared.
+ * Each carries its own accumulation outlay instead, for the UI to show alongside the baseline's.
  */
-function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributions', netBudgetOverride = null, balance = 'proportional' } = {}) {
+function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributions', netBudgetOverride = null, balance = 'proportional', entrants = [] } = {}) {
   const ctx = buildContext(rawPlan);
   const plan = ctx.plan;
   const { P, owners, acc } = ctx;
@@ -1718,10 +1726,7 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
     description: 'Searches every ISA/pension split of the same budget (0%–100% in 10% steps) and keeps the split with the highest survival rate, tie-broken by the 10th-percentile pot.',
     candidates: grid, isaContrib: null, penContrib: null, taxReliefSaved: null, transferNet: 0, transferGross: 0, planState: null
   });
-  // 3 liquidity-first
-  strategies.push(mk('liquidity', 'Liquidity-First', 'Fills ISA allowances first for maximum penalty-free, tax-free access; only the remainder goes to pension.',
-    allocateBudget(ctx, netBudget, 1.0, { balance })));
-  // 4 relief-first (+ bed & SIPP)
+  // 3 relief-first (+ bed & SIPP)
   {
     const alloc = allocateBudget(ctx, netBudget, 0, { isaMin: annualIsaNeeded, balance });
     let transfer = null, reliefExtra = 0;
@@ -1745,7 +1750,7 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
       `Routes the budget to pension first (subject to the pre-SIPP access bridge minimum) to capture maximum upfront ${owners.every(o => o.selfEmployed) ? 'tax relief' : 'tax and NIC relief'}` + (transfer ? '; also moves spare ISA capital into the pension.' : '.'),
       alloc, { transferNet: transfer ? Math.round(transfer.net) : 0, transferGross: transfer ? Math.round(transfer.gross) : 0, taxReliefSaved: alloc.taxReliefSaved + reliefExtra, planOpts: { transfer } }));
   }
-  // 5 bracket-smoothed pension sizing
+  // 4 bracket-smoothed pension sizing
   {
     const penFloor = owners.map(o => {
       const a = acc[o.ids.pen]; if (!a) return 0;
@@ -1766,7 +1771,7 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
       'Funds each pension only up to the pot whose sustainable withdrawal, alongside state pension, fills the basic-rate band; everything else goes to ISA so later-life withdrawals never hit 40%.',
       alloc, { penTargetGross: penFloor }));
   }
-  // 6 relief-first, bridge-last (time-phased)
+  // 5 relief-first, bridge-last (time-phased)
   {
     const reliefAlloc = allocateBudget(ctx, netBudget, 0, { balance });
     const isaAlloc = allocateBudget(ctx, netBudget, 1.0, { balance });
@@ -1815,6 +1820,25 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
     if (s.id === 'baseline') return;
     if (s.candidates) { s.candidates = s.candidates.map(c => ({ ...c, ...normalise(c.planState) })); return; }
     if (s.planState) Object.assign(s, normalise(s.planState));
+  });
+
+  // Saved scenarios enter after the normalisation above, deliberately: they run exactly as saved.
+  entrants.forEach((ent, i) => {
+    let entPlan, outlay = null;
+    try { entPlan = normalizePlan(JSON.parse(JSON.stringify(ent.plan))); } catch (e) { return; }
+    try { outlay = accumulationOutlay(buildContext(entPlan)); } catch (e) { outlay = null; }
+    const entCouple = entPlan.demographics.planningMode === 'couple';
+    const sumCat = (cat) => entPlan.accounts
+      .filter(a => a.id.startsWith(cat + '_') && (entCouple || a.owner === 'Myself'))
+      .reduce((t, a) => t + num(a.contrib, 0), 0);
+    strategies.push({
+      id: `entrant_${ent.id || i}`, name: ent.name || `Scenario ${i + 1}`, isEntrant: true,
+      description: 'A saved scenario, run exactly as saved. It is not held to the same take-home budget as the other players, so read its outlay before its survival rate.',
+      entrantOutlay: outlay, baselineOutlay,
+      isaContrib: sumCat('isa'), penContrib: sumCat('pen'), giaContrib: sumCat('other'),
+      taxReliefSaved: null, transferNet: 0, transferGross: 0, escalation: null,
+      planState: entPlan
+    });
   });
   return { ctx, meta, strategies };
 }
@@ -2095,6 +2119,30 @@ function summarizeStrategyChange(res, baselinePlayer, { isCouple = false, meta =
   const reliefWord = selfEmployedOnly ? 'tax relief' : 'tax and NIC relief';
   if (!res) return [];
   if (res.id === 'baseline') return ['Your plan exactly as entered: the benchmark every other strategy is measured against.'];
+  // A saved scenario can differ in spend, ages and balances as well as contributions, so a contribution
+  // diff would describe only part of it. Name what actually differs, and lead with the budget.
+  if (res.isEntrant) {
+    const lines = [];
+    const a = baselinePlayer?.planState, b = res.planState;
+    if (res.entrantOutlay !== null && res.entrantOutlay !== undefined && res.baselineOutlay > 0) {
+      const d = res.entrantOutlay - res.baselineOutlay;
+      lines.push(Math.abs(d) < 50
+        ? `Costs the same to fund as your current plan, about ${formatGBP(res.entrantOutlay)}/yr, so this is a like-for-like comparison.`
+        : `Costs ${formatGBP(Math.abs(d))}/yr ${d > 0 ? 'more' : 'less'} to fund than your current plan (${formatGBP(res.entrantOutlay)}/yr against ${formatGBP(res.baselineOutlay)}/yr), so the survival rate is not like-for-like.`);
+    }
+    if (a && b) {
+      const diffs = [];
+      const dA = a.demographics, dB = b.demographics;
+      if (E.num(dA.retireAgeSelf, 0) !== E.num(dB.retireAgeSelf, 0)) diffs.push(`retires at ${E.num(dB.retireAgeSelf, 0)} rather than ${E.num(dA.retireAgeSelf, 0)}`);
+      if (E.num(a.spending.targetSpend, 0) !== E.num(b.spending.targetSpend, 0)) diffs.push(`spends ${formatGBP(E.num(b.spending.targetSpend, 0))}/yr rather than ${formatGBP(E.num(a.spending.targetSpend, 0))}`);
+      if (E.num(dA.terminalAge, 0) !== E.num(dB.terminalAge, 0)) diffs.push(`runs to age ${E.num(dB.terminalAge, 0)} rather than ${E.num(dA.terminalAge, 0)}`);
+      const balA = (a.accounts || []).reduce((t, x) => t + E.num(x.balance, 0), 0);
+      const balB = (b.accounts || []).reduce((t, x) => t + E.num(x.balance, 0), 0);
+      if (Math.abs(balB - balA) > 500) diffs.push(`starts with ${formatGBP(balB)} rather than ${formatGBP(balA)}`);
+      if (diffs.length) lines.push(`It also ${diffs.join(', ')}.`);
+    }
+    return lines;
+  }
   if (!res.planState || !baselinePlayer?.planState) return [];
   const diff = E.diffStrategyPlans(baselinePlayer.planState, res.planState, { threshold });
   const lines = [];
@@ -2155,12 +2203,12 @@ function summarizeStrategyChange(res, baselinePlayer, { isCouple = false, meta =
   return lines;
 }
 
-function WrapperStrategyTournament({ plan, ctx, seed, state, setState, cancelRef, onApplyStrategyToSandbox, onApplyStrategyToPlan, onNavigateDocs }) {
+function WrapperStrategyTournament({ plan, ctx, seed, scenarios = [], activeScenarioId, state, setState, cancelRef, onApplyStrategyToSandbox, onApplyStrategyToPlan, onNavigateDocs }) {
   const P = ctx.P;
   const isCouple = ctx.isCouple;
   // Settings, results and run progress are owned by App so they outlive this component's unmount on a tab
   // switch; these accessors keep the rest of the component reading like ordinary local state.
-  const { scope, emergencyFloor, budgetOverride, balance, preAccessCap, results, progress, isEvaluating } = state;
+  const { scope, emergencyFloor, budgetOverride, balance, preAccessCap, entrantIds, results, progress, isEvaluating } = state;
   const setField = (key) => (value) => setState(prev => ({ ...prev, [key]: value }));
   const setScope = setField('scope');
   const setEmergencyFloor = setField('emergencyFloor');
@@ -2176,10 +2224,24 @@ function WrapperStrategyTournament({ plan, ctx, seed, state, setState, cancelRef
   const usingSandbox = !!state.basePlan;
   const basePlan = state.basePlan || plan;
 
+  // Any saved scenario other than the one currently loaded can be entered as an extra player. The loaded
+  // one is already the baseline, so offering it again would only produce a duplicate of Current Plan.
+  const availableEntrants = useMemo(
+    () => scenarios.filter(s => s.id !== activeScenarioId),
+    [scenarios, activeScenarioId]);
+  const selectedEntrants = useMemo(
+    () => availableEntrants.filter(s => (entrantIds || []).includes(s.id)),
+    [availableEntrants, entrantIds]);
+  const toggleEntrant = (id) => setState(prev => {
+    const cur = prev.entrantIds || [];
+    return { ...prev, entrantIds: cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id] };
+  });
+
   const preview = useMemo(() => {
-    try { return E.buildTournament(E.resolveMpaa(basePlan), { emergencyFloor: E.num(emergencyFloor, 0), scope, netBudgetOverride: budgetOverride === '' ? null : budgetOverride, balance }); }
+    const entrants = selectedEntrants.map(s => ({ id: s.id, name: s.name, plan: s.data }));
+    try { return E.buildTournament(E.resolveMpaa(basePlan), { emergencyFloor: E.num(emergencyFloor, 0), scope, netBudgetOverride: budgetOverride === '' ? null : budgetOverride, balance, entrants }); }
     catch (e) { return null; }
-  }, [basePlan, emergencyFloor, scope, budgetOverride, balance]);
+  }, [basePlan, emergencyFloor, scope, budgetOverride, balance, selectedEntrants]);
   const meta = preview?.meta;
   const salaryMissing = ctx.owners.filter(o => o.salary <= 0).map(o => o.label);
   // balancing steers new money to the smaller pension, which throws away relief when that owner sits in
@@ -2247,7 +2309,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, state, setState, cancelRef
             <Zap className="w-4 h-4 text-indigo-600 fill-indigo-600" /> Automated Strategy Tournament &amp; Optimizer
           </h3>
           <p className="text-xs text-slate-500 mt-0.5">
-            Six wrapper strategies with the same take-home budget, each tested on the same {TOURNAMENT_TRIALS.toLocaleString()} market paths (common random numbers) so differences are real, not noise.
+            Five wrapper strategies with the same take-home budget, each tested on the same {TOURNAMENT_TRIALS.toLocaleString()} market paths (common random numbers) so differences are real, not noise.{selectedEntrants.length > 0 ? ` Plus ${selectedEntrants.length} saved scenario${selectedEntrants.length === 1 ? '' : 's'} entered as saved.` : ''}
           </p>
         </div>
         <button type="button" onClick={onNavigateDocs} className="text-xs text-indigo-600 hover:text-indigo-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer self-start sm:self-auto">
@@ -2309,6 +2371,26 @@ function WrapperStrategyTournament({ plan, ctx, seed, state, setState, cancelRef
         </div>
       </div>
 
+      {availableEntrants.length > 0 && (
+        <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-sans space-y-2">
+          <div>
+            <label className="text-slate-700 font-semibold block">Enter saved scenarios as extra players</label>
+            <span className="text-[10px] text-slate-500 block mt-0.5">Each runs exactly as saved, on the same market paths. It is not held to the same take-home budget as the five strategies, so a scenario that simply contributes more will score better for that reason alone. The outlay is shown on its card.</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {availableEntrants.map(s => {
+              const on = (entrantIds || []).includes(s.id);
+              return (
+                <button key={s.id} type="button" onClick={() => toggleEntrant(s.id)}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors cursor-pointer ${on ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-surface text-slate-700 border-slate-300 hover:bg-slate-100'}`}>
+                  {on ? '✓ ' : '+ '}{s.name}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {meta && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-[11px] font-mono">
           <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl"><span className="text-slate-500 font-sans block">Net budget tested</span><strong>£{Math.round(meta.netBudget).toLocaleString()}/yr</strong></div>
@@ -2339,10 +2421,10 @@ function WrapperStrategyTournament({ plan, ctx, seed, state, setState, cancelRef
               const st = res.stats;
               const summaryLines = summarizeStrategyChange(res, baselinePlayer, { isCouple, meta: results.meta, selfEmployedOnly });
               return (
-                <div key={res.id} className={`p-4 rounded-2xl border flex flex-col justify-between space-y-3 ${isBest ? 'bg-emerald-50/60 border-emerald-300 shadow-sm' : res.id === 'baseline' ? 'bg-slate-50 border-slate-200' : 'bg-surface border-indigo-100 shadow-xs'}`}>
+                <div key={res.id} className={`p-4 rounded-2xl border flex flex-col justify-between space-y-3 ${isBest ? 'bg-emerald-50/60 border-emerald-300 shadow-sm' : res.id === 'baseline' ? 'bg-slate-50 border-slate-200' : res.isEntrant ? 'bg-surface border-amber-200 shadow-xs' : 'bg-surface border-indigo-100 shadow-xs'}`}>
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-bold text-slate-900 leading-tight flex items-center gap-1">{isBest && <Trophy className="w-3.5 h-3.5 text-emerald-600" />}{res.name}</span>
+                      <span className="text-xs font-bold text-slate-900 leading-tight flex items-center gap-1">{isBest && <Trophy className="w-3.5 h-3.5 text-emerald-600" />}{res.name}{res.isEntrant && <span className="ml-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[9px] font-bold uppercase tracking-wider">Saved scenario</span>}</span>
                       <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${st.successRate >= 90 ? 'bg-emerald-100 text-emerald-800' : st.successRate >= 75 ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-800'}`}>{st.successRate.toFixed(1)}% Safe</span>
                     </div>
                     <p className="text-[11px] text-slate-500 leading-normal">{res.description}</p>
@@ -2358,6 +2440,9 @@ function WrapperStrategyTournament({ plan, ctx, seed, state, setState, cancelRef
                       {res.taxReliefSaved > 0 && <div className="flex justify-between text-emerald-700 font-bold"><span className="font-sans">{selfEmployedOnly ? 'Tax relief:' : 'Tax & NIC relief:'}</span><span>+£{Math.round(res.taxReliefSaved).toLocaleString()}/yr</span></div>}
                       {res.transferNet > 0 && <div className="flex justify-between text-indigo-700 font-bold"><span>Bed &amp; SIPP:</span><span>£{Math.round(res.transferNet).toLocaleString()} &rarr; £{Math.round(res.transferGross).toLocaleString()}</span></div>}
                       {res.phase && res.phase.switchYears > 0 && <div className="flex justify-between text-slate-600"><span className="font-sans">Phasing:</span><span>pension-max {res.phase.yearsToFirstRetire - res.phase.switchYears}y → ISA-max {res.phase.switchYears}y</span></div>}
+                      {res.isEntrant && res.entrantOutlay !== null && res.entrantOutlay !== undefined && (
+                        <div className="flex justify-between"><span className="text-slate-500 font-sans">Yearly outlay:</span><strong className={Math.abs(res.entrantOutlay - res.baselineOutlay) < 50 ? 'text-slate-700' : 'text-amber-700'}>£{Math.round(res.entrantOutlay).toLocaleString()}/yr vs £{Math.round(res.baselineOutlay).toLocaleString()}</strong></div>
+                      )}
                       <div className="flex justify-between pt-1 border-t border-slate-100"><span className="text-slate-500 font-sans">Median pot @ {ctx.terminalAge}:</span><span className="font-bold text-slate-800">{fmtK(st.medianTerminal)}</span></div>
                       <div className="flex justify-between"><span className="text-slate-500 font-sans">10th %ile pot:</span><span className="font-bold text-slate-800">{fmtK(st.p10Terminal)}</span></div>
                       {ctx.pensionDeathTaxRate > 0 && <div className="flex justify-between"><span className="text-slate-500 font-sans">Median pot net of pension death tax:</span><span className="font-bold text-slate-800">{fmtK(st.medianTerminalNet)}</span></div>}
@@ -2373,7 +2458,9 @@ function WrapperStrategyTournament({ plan, ctx, seed, state, setState, cancelRef
                       </details>
                     )}
                   </div>
-                  {res.id !== 'baseline' && (
+                  {res.isEntrant ? (
+                    <p className="text-[10px] text-slate-500 leading-snug">A scenario differs in more than its contributions, so there is nothing here to copy across. Load it from the scenario selector at the top of the page to work on it.</p>
+                  ) : res.id !== 'baseline' && (
                     <div className="space-y-1.5">
                       <button type="button" onClick={() => onApplyStrategyToSandbox(res)} className="w-full py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold transition-colors cursor-pointer">Apply to Sandbox</button>
                       {/* overwriting entered inputs is destructive, so it takes a second deliberate click */}
@@ -2456,7 +2543,7 @@ export default function App() {
   // the saved plan inputs; `autoRun` is a token the component watches to start that run on arrival.
   const [tournament, setTournament] = useState({
     scope: 'contributions', emergencyFloor: 25000, budgetOverride: '', balance: 'proportional', preAccessCap: 5,
-    results: null, progress: null, isEvaluating: false, basePlan: null, autoRun: 0
+    entrantIds: [], results: null, progress: null, isEvaluating: false, basePlan: null, autoRun: 0
   });
   const tournamentCancelRef = useRef(false);
   // Both tabs render the same sandbox, but each remembers its own expanded state: the Trajectory tab is
@@ -2675,7 +2762,7 @@ export default function App() {
     setPlan(prev => planFromSandbox(prev));
     flash('Sandbox applied to plan inputs');
   };
-  // Scores the six strategies against the sandbox figures instead of the saved plan, so a sandbox worth
+  // Scores the five strategies against the sandbox figures instead of the saved plan, so a sandbox worth
   // keeping can be tested before it is written back. The plan is frozen at the moment of the click — later
   // sandbox edits do not silently change what the displayed results were run on.
   const handleRunTournamentFromSandbox = () => {
@@ -2911,7 +2998,7 @@ export default function App() {
         <div className="flex items-center gap-2 flex-wrap">
           <button onClick={handleResetSandbox} disabled={!isSandboxModified} className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all border ${isSandboxModified ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300 cursor-pointer' : 'bg-slate-50 text-slate-300 border-slate-200 cursor-not-allowed'}`}><RotateCcw className="w-3.5 h-3.5" /> Reset Sandbox</button>
           <button onClick={handleApplySandboxToPlan} disabled={!isSandboxModified} className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs ${isSandboxModified ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 dark:from-[#C77A2E] dark:to-[#B0631E] dark:hover:from-[#B0631E] dark:hover:to-[#8A4C17] text-white cursor-pointer active:scale-95' : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'}`}><Check className="w-3.5 h-3.5" /> Apply to Plan Inputs</button>
-          <button onClick={handleRunTournamentFromSandbox} title="Score the six wrapper strategies against these sandbox figures instead of your saved plan inputs"
+          <button onClick={handleRunTournamentFromSandbox} title="Score the five wrapper strategies against these sandbox figures instead of your saved plan inputs"
             className="px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer active:scale-95"><Zap className="w-3.5 h-3.5" /> Re-run Tournament on Sandbox</button>
         </div>
       </div>
@@ -3860,7 +3947,7 @@ export default function App() {
               </div>
             )}
 
-            <WrapperStrategyTournament plan={plan} ctx={ctx} seed={mcSeed} state={tournament} setState={setTournament} cancelRef={tournamentCancelRef} onApplyStrategyToSandbox={handleApplyStrategyToSandbox} onApplyStrategyToPlan={handleApplyStrategyToPlan} onNavigateDocs={() => goToDoc('doc-tournament')} />
+            <WrapperStrategyTournament plan={plan} ctx={ctx} seed={mcSeed} scenarios={scenarios} activeScenarioId={activeScenarioId} state={tournament} setState={setTournament} cancelRef={tournamentCancelRef} onApplyStrategyToSandbox={handleApplyStrategyToSandbox} onApplyStrategyToPlan={handleApplyStrategyToPlan} onNavigateDocs={() => goToDoc('doc-tournament')} />
             {renderSandboxPanel({ tab: 'simulation' })}
           </div>
         )}
@@ -3991,11 +4078,11 @@ export default function App() {
 
             <div id="doc-tournament" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Zap className="w-4 h-4 text-indigo-600" /> Automated Strategy Tournament &amp; Optimisation Methodology</h2>
-              <p className="text-xs text-slate-600 leading-relaxed">The tournament compares six ways of splitting the same annual take-home budget between S&amp;S ISAs and pensions. Every player is run on the same {TOURNAMENT_TRIALS.toLocaleString()} market paths (common random numbers), so the ranking reflects the strategies rather than sampling luck.</p>
+              <p className="text-xs text-slate-600 leading-relaxed">The tournament compares five ways of splitting the same annual take-home budget between S&amp;S ISAs and pensions. Every player is run on the same {TOURNAMENT_TRIALS.toLocaleString()} market paths (common random numbers), so the ranking reflects the strategies rather than sampling luck. Any saved scenario can be entered as an extra player; those run exactly as saved and are not held to the same budget, which their cards state.</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">1. Equal net budget</strong><p className="text-slate-500">Each strategy costs the same take-home pay. Pension money is grossed up using each owner's own salary (income tax + NIC relief, plus any employer NIC pass-through set in Config), capped by the annual allowance (£{P.pensionAllowance.toLocaleString()}) and salary; ISA money is capped at £{P.isaAllowance.toLocaleString()} per person; anything left over flows to a GIA.</p></div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">2. Conservative bridge sizing</strong><p className="text-slate-500">If spending starts before anyone can access a pension (age {nmpa}), the bridge reserve is the sum of net drawdown in those years (after guaranteed income and a working partner's take-home), uplifted by the safety margin ({E.num(plan?.config?.bridgeSafetyMargin, 30)}%) and assuming 0% real growth.</p></div>
-                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">3. The players</strong><p className="text-slate-500"><strong>Current Plan</strong> · <strong>Survival Maximizer</strong> (searches the ISA share from 0% to 100% and keeps the best survival, subject to the bridge-risk cap) · <strong>Liquidity-First</strong> (ISA allowances first) · <strong>Relief-First</strong> (pension first, bridge minimum kept; with a Bed &amp; SIPP transfer of spare ISA capital in full scope) · <strong>Bracket-Smoothed Sizing</strong> (pension funded only to the pot whose sustainable withdrawal plus state pension fills the basic-rate band, the rest to ISA) · <strong>Relief-First, Bridge-Last</strong> (pension-max early, ISA-max in the final years before retirement).</p></div>
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">3. The players</strong><p className="text-slate-500"><strong>Current Plan</strong> · <strong>Survival Maximizer</strong> (searches the ISA share from 0% to 100% and keeps the best survival, subject to the bridge-risk cap) · <strong>Relief-First</strong> (pension first, bridge minimum kept; with a Bed &amp; SIPP transfer of spare ISA capital in full scope) · <strong>Bracket-Smoothed Sizing</strong> (pension funded only to the pot whose sustainable withdrawal plus state pension fills the basic-rate band, the rest to ISA) · <strong>Relief-First, Bridge-Last</strong> (pension-max early, ISA-max in the final years before retirement).</p></div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><strong className="text-slate-800 block">4. Reading the results</strong><p className="text-slate-500">Rank by survival first; ties within 0.5 points are broken by the 10th-percentile pot. Watch the pre-SIPP access failure rate: a strategy can win on total survival by accepting more bridge risk. The "Partner balancing" option steers new money to the partner with the smaller projected pension so both personal allowances can be used in retirement; it costs relief if that partner pays a lower marginal rate, so it does not always win.</p></div>
               </div>
             </div>
