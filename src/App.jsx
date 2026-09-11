@@ -643,7 +643,6 @@ function buildContext(rawPlan) {
     const [cat, owner] = a.id.split('_');
     const real = clamp(num(prof.real, 0), -50, 50) / 100;
     const vol = clamp(num(prof.volatility, 12), 0, 100) / 100;
-    const band = luckyBand(real, vol, totalYears);
     return {
       id: a.id, cat, owner, ownerLabel: a.owner,
       balance: Math.max(0, num(a.balance, 0)),
@@ -654,10 +653,6 @@ function buildContext(rawPlan) {
       contribByYear: Array.isArray(a.contribByYear) ? a.contribByYear.map(v => Math.max(0, num(v, 0))) : null,
       risk: a.risk,
       real: real,
-      // Derived, not entered: the annualised rate whose terminal wealth sits at the 90th/10th percentile
-      // of this tier's own log-normal distribution over the plan's horizon. See luckyBand.
-      lucky: band.lucky,
-      unlucky: band.unlucky,
       vol,
       equityWeight: RISK_EQUITY_WEIGHTS[a.risk] !== undefined ? RISK_EQUITY_WEIGHTS[a.risk] : 0.9,
       isCash: a.risk === 'Cash Equivalents'
@@ -888,7 +883,7 @@ const giaDispose = (state, balanceBefore, ownerKey, amount) => {
 };
 
 /*
- * market: 'expected' | 'lucky' | 'unlucky' | { historical: true, startYear } | { z: number }
+ * market: 'expected' | { historical: true, startYear } | { z: number }
  * Advances `state` by one year (index t) and returns the audit row for that year.
  */
 function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
@@ -1171,9 +1166,7 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
   // 8. compounding (year 0 pro-rated)
   ctx.accounts.forEach(a => {
     let g = a.real;
-    if (market === 'lucky') g = a.lucky;
-    else if (market === 'unlucky') g = a.unlucky;
-    else if (isHistorical) g = (histPoint && !a.isCash) ? (a.equityWeight * histPoint.s + (1 - a.equityWeight) * histPoint.b) / 100 : a.real;
+    if (isHistorical) g = (histPoint && !a.isCash) ? (a.equityWeight * histPoint.s + (1 - a.equityWeight) * histPoint.b) / 100 : a.real;
     else if (typeof market === 'object' && market !== null && market.z !== undefined) {
       // log-return with median equal to the stated expected (geometric) real return
       g = Math.exp(Math.log(1 + a.real) + a.vol * market.z) - 1;
@@ -1265,14 +1258,22 @@ function evaluateRows(ctx, rows) {
 }
 
 // One Monte Carlo path. `zs` is the pre-drawn standard-normal shock per year (common random numbers).
-function runTrial(ctx, zs, spendOverride = null) {
+function runTrial(ctx, zs, spendOverride = null, collectPath = false) {
   const state = freshState(ctx);
   let failed = false, failAge = null, preNmpaFailed = false, minPot = Infinity, lifetimeTax = 0;
   let terminalRow = null;
+  /*
+   * Opt-in, and the default matters: optimizeSpend calls this a few hundred times while bisecting and
+   * buildTournament runs a full simulation per player plus two candidate searches. None of them wants
+   * to pay for a path it will not read, so only the fan chart asks.
+   */
+  const path = collectPath ? new Float64Array(ctx.totalYears + 1) : null;
   for (let t = 0; t <= ctx.totalYears; t++) {
     const row = stepYear(ctx, state, t, { z: zs[t] }, spendOverride);
     lifetimeTax += row.taxPaid + (row.cgtPaid || 0);
     if (row.totalCombined < minPot) minPot = row.totalCombined;
+    // floored the same way terminalPot is, so the last entry of a path is exactly the terminal pot
+    if (path) path[t] = Math.max(0, row.totalCombined);
     if (!failed && (row.unmetDemand > FAIL_TOLERANCE || row.preNmpaInsolvent)) {
       failed = true; failAge = row.ageSelf; preNmpaFailed = row.preNmpaInsolvent || !ctx.owners.some(o => (o.key === 'self' ? row.ageSelf : row.agePart) >= ctx.nmpa);
     }
@@ -1281,7 +1282,9 @@ function runTrial(ctx, zs, spendOverride = null) {
   const terminalPot = Math.max(0, terminalRow.totalCombined);
   if (!failed && ctx.solvencyFloor > 0 && terminalPot < ctx.solvencyFloor) { failed = true; failAge = terminalRow.ageSelf; }
   const terminalPotNet = Math.max(0, terminalPot - Math.max(0, terminalRow.pensions) * ctx.pensionDeathTaxRate);
-  return { survived: !failed, failAge, preNmpaFailed, terminalPot, terminalPotNet, minPot, lifetimeTax };
+  const out = { survived: !failed, failAge, preNmpaFailed, terminalPot, terminalPotNet, minPot, lifetimeTax };
+  if (path) out.path = path;
+  return out;
 }
 
 function pathsForSeed(seed, trials, years) {
@@ -1299,9 +1302,29 @@ function summarizeTrials(results) {
   const q = (arr, p) => arr.length ? arr[Math.min(arr.length - 1, Math.floor(arr.length * p))] : 0;
   const successCount = results.filter(r => r.survived).length;
   const successRate = (successCount / n) * 100;
+  /*
+   * Per-year percentile bands, when the caller asked runTrial to keep each path. Deliberately the same
+   * `q` as the terminal figures below: the right-hand edge of the fan is then the same number as the
+   * p10/median/p90 tiles, rather than merely close to it, and a reader can check one against the other.
+   *
+   * Paths that run dry sit at zero and stay there, which is the point. The p10 line reaching the axis
+   * at some age is the plain statement that one plan in ten is broke by then.
+   */
+  let bands = null;
+  if (results[0] && results[0].path) {
+    const years = results[0].path.length;
+    const col = new Float64Array(n);
+    bands = [];
+    for (let t = 0; t < years; t++) {
+      for (let i = 0; i < n; i++) col[i] = results[i].path[t];
+      col.sort();                       // typed-array sort is numeric, and in place costs nothing
+      bands.push({ t, p10: q(col, 0.10), p50: q(col, 0.50), p90: q(col, 0.90) });
+    }
+  }
   return {
     trials: n,
     successRate,
+    bands,
     standardError: Math.sqrt(Math.max(0, successRate * (100 - successRate) / n)),
     p10Terminal: q(pots, 0.10), medianTerminal: q(pots, 0.50), p90Terminal: q(pots, 0.90),
     p10TerminalNet: q(potsNet, 0.10), medianTerminalNet: q(potsNet, 0.50), p90TerminalNet: q(potsNet, 0.90),
@@ -1313,10 +1336,10 @@ function summarizeTrials(results) {
 }
 
 // Synchronous Monte Carlo. For UI responsiveness call runTrial in chunks instead (see App).
-function monteCarlo(planOrCtx, { trials = 5000, seed = 12345, spendOverride = null } = {}) {
+function monteCarlo(planOrCtx, { trials = 5000, seed = 12345, spendOverride = null, collectPaths = false } = {}) {
   const ctx = planOrCtx && planOrCtx.P ? planOrCtx : buildContext(planOrCtx);
   const paths = pathsForSeed(seed, trials, ctx.totalYears);
-  const results = paths.map(zs => runTrial(ctx, zs, spendOverride));
+  const results = paths.map(zs => runTrial(ctx, zs, spendOverride, collectPaths));
   return { ...summarizeTrials(results), spend: spendOverride !== null ? spendOverride : ctx.targetSpend };
 }
 
@@ -2064,9 +2087,7 @@ const SEARCH_TRIALS = 400;
 // Three themes: 'classic' (the original stock look, kept as an opt-in third option),
 // 'light' (Riviera Ledger) and 'dark' (Control Room).
 const SERIES_CONFIG = [
-  { id: 'lucky', label: 'Lucky (90th %ile)', colors: { classic: '#059669', light: '#2F7A4F', dark: '#3FD68C' }, strokeWidth: 2.5, dash: 'none', defaultActive: true },
   { id: 'expected', label: 'Expected (Real)', colors: { classic: '#2563eb', light: '#2C5C8F', dark: '#3D74E8' }, strokeWidth: 3, dash: 'none', defaultActive: true },
-  { id: 'unlucky', label: 'Unlucky (10th %ile)', colors: { classic: '#dc2626', light: '#B33B3B', dark: '#FF6B6B' }, strokeWidth: 2.5, dash: '5,4', defaultActive: true },
   { id: 'nominal', label: 'Combined (Nominal)', colors: { classic: '#7c3aed', light: '#6D28D9', dark: '#8B7CF6' }, strokeWidth: 2, dash: '4,3', defaultActive: false },
   { id: 'pensions', label: 'Combined Pensions', colors: { classic: '#0284c7', light: '#0284C7', dark: '#4FC3F0' }, strokeWidth: 2, dash: 'none', defaultActive: true },
   { id: 'isas', label: 'Combined ISAs', colors: { classic: '#0d9488', light: '#0D9488', dark: '#3FDBC7' }, strokeWidth: 2, dash: 'none', defaultActive: true },
@@ -2075,9 +2096,9 @@ const SERIES_CONFIG = [
 ];
 
 const CHART_PALETTE = {
-  classic: { gridMajor: '#f1f5f9', gridMinor: '#f8fafc', axisText: '#64748b', hoverCrosshair: '#94a3b8', sandboxDash: '#f59e0b', historicalLine: '#6366f1', trajectoryHoverFill: '#2563eb', historicalHoverFill: '#6366f1', hoverDotStroke: '#ffffff' },
-  light:   { gridMajor: '#DCDFD2', gridMinor: '#E6E8DE', axisText: '#5C6B72', hoverCrosshair: '#8A9098', sandboxDash: '#B0631E', historicalLine: '#A9781F', trajectoryHoverFill: '#2C5C8F', historicalHoverFill: '#A9781F', hoverDotStroke: '#FBFAF4' },
-  dark:    { gridMajor: '#1e232b', gridMinor: '#171b21', axisText: '#8a939b', hoverCrosshair: '#5b636c', sandboxDash: '#e89a4a', historicalLine: '#8b7cf6', trajectoryHoverFill: '#3D74E8', historicalHoverFill: '#8b7cf6', hoverDotStroke: '#14171B' },
+  classic: { gridMajor: '#f1f5f9', gridMinor: '#f8fafc', axisText: '#64748b', hoverCrosshair: '#94a3b8', sandboxDash: '#f59e0b', historicalLine: '#6366f1', trajectoryHoverFill: '#2563eb', historicalHoverFill: '#6366f1', hoverDotStroke: '#ffffff', fanBand: 'rgba(37, 99, 235, 0.16)', fanEdge: 'rgba(37, 99, 235, 0.45)', fanMedian: '#1d4ed8' },
+  light:   { gridMajor: '#DCDFD2', gridMinor: '#E6E8DE', axisText: '#5C6B72', hoverCrosshair: '#8A9098', sandboxDash: '#B0631E', historicalLine: '#A9781F', trajectoryHoverFill: '#2C5C8F', historicalHoverFill: '#A9781F', hoverDotStroke: '#FBFAF4', fanBand: 'rgba(44, 92, 143, 0.18)', fanEdge: 'rgba(44, 92, 143, 0.5)', fanMedian: '#2C5C8F' },
+  dark:    { gridMajor: '#1e232b', gridMinor: '#171b21', axisText: '#8a939b', hoverCrosshair: '#5b636c', sandboxDash: '#e89a4a', historicalLine: '#8b7cf6', trajectoryHoverFill: '#3D74E8', historicalHoverFill: '#8b7cf6', hoverDotStroke: '#14171B', fanBand: 'rgba(61, 116, 232, 0.22)', fanEdge: 'rgba(61, 116, 232, 0.55)', fanMedian: '#6F9BFF' },
 };
 
 const MARKER_PALETTE = {
@@ -2125,13 +2146,13 @@ const safeStorageRemove = (k) => { try { localStorage.removeItem(k); } catch (e)
 // Chunked Monte Carlo so the UI can repaint a progress bar between batches.
 // `shouldStop` is checked between chunks, so a cancel lands within a chunk rather than at the end of the
 // run. The partial result is still summarised and returned, because the caller discards it either way.
-async function runMonteCarloAsync(ctx, { trials, seed, spendOverride = null, onProgress, shouldStop = null }) {
+async function runMonteCarloAsync(ctx, { trials, seed, spendOverride = null, onProgress, shouldStop = null, collectPaths = false }) {
   const paths = E.pathsForSeed(seed, trials, ctx.totalYears);
   const results = [];
   const CHUNK = 250;
   for (let i = 0; i < trials; i += CHUNK) {
     const end = Math.min(trials, i + CHUNK);
-    for (let j = i; j < end; j++) results.push(E.runTrial(ctx, paths[j], spendOverride));
+    for (let j = i; j < end; j++) results.push(E.runTrial(ctx, paths[j], spendOverride, collectPaths));
     if (onProgress) onProgress(results.length / trials);
     await tick();
     if (shouldStop && shouldStop()) break;
@@ -2795,9 +2816,7 @@ export default function App() {
 
   const timelineData = useMemo(() => {
     const exp = E.simulateDeterministic(ctx, 'expected');
-    const lucky = E.simulateDeterministic(ctx, 'lucky');
-    const unlucky = E.simulateDeterministic(ctx, 'unlucky');
-    return exp.map((r, i) => ({ ...r, lucky: lucky[i].totalCombined, unlucky: unlucky[i].totalCombined, nominal: r.totalCombined * Math.pow(1 + ctx.inflation, r.t) }));
+    return exp.map(r => ({ ...r, nominal: r.totalCombined * Math.pow(1 + ctx.inflation, r.t) }));
   }, [ctx]);
   const deterministicVerdict = useMemo(() => E.evaluateRows(ctx, timelineData), [ctx, timelineData]);
 
@@ -2873,7 +2892,7 @@ export default function App() {
   const xScale = useMemo(() => d3.scaleLinear().domain([currentAge, Math.max(currentAge + 1, effectiveMaxVisibleAge)]).range([0, innerWidth]), [currentAge, effectiveMaxVisibleAge, innerWidth]);
   const maxY = useMemo(() => {
     let max = 0;
-    visibleData.forEach(d => { if (activeSeries.lucky && d.lucky > max) max = d.lucky; if (activeSeries.expected && d.expected > max) max = d.expected; if (activeSeries.nominal && d.nominal > max) max = d.nominal; });
+    visibleData.forEach(d => { if (activeSeries.expected && d.expected > max) max = d.expected; if (activeSeries.nominal && d.nominal > max) max = d.nominal; });
     if (isSandboxModified) sandboxTimeline.forEach(d => { if (d.ageSelf <= effectiveMaxVisibleAge && d.totalCombined > max) max = d.totalCombined; });
     return Math.max(max * 1.08, 100000);
   }, [visibleData, activeSeries, isSandboxModified, sandboxTimeline, effectiveMaxVisibleAge]);
@@ -2888,6 +2907,39 @@ export default function App() {
     return d3.line().x(d => xScale(d.ageSelf)).y(d => yScale(d.totalCombined)).curve(d3.curveMonotoneX)(sandboxTimeline.filter(d => d.ageSelf <= effectiveMaxVisibleAge));
   }, [isSandboxModified, sandboxTimeline, effectiveMaxVisibleAge, xScale, yScale]);
   const histXScale = useMemo(() => d3.scaleLinear().domain([currentAge, Math.max(currentAge + 1, terminalAge)]).range([0, innerWidth]), [currentAge, terminalAge, innerWidth]);
+  /*
+   * The Monte Carlo fan: the 10th to 90th percentile of simulated wealth at every year, not a line any
+   * one path follows. Its own scales, because the spread of 5,000 outcomes reaches far above the single
+   * expected curve next door and sharing a y-axis would flatten one of them.
+   *
+   * `bands` only exists when a run asked runTrial to keep its paths, which is stage 1 alone.
+   */
+  const fanBands = simResult?.bands || null;
+  const fanData = useMemo(
+    () => (fanBands ? fanBands.map(b => ({ ...b, ageSelf: currentAge + b.t })) : []),
+    [fanBands, currentAge]);
+  const fanYScale = useMemo(() => {
+    const max = fanData.reduce((m, d) => Math.max(m, d.p90), 0);
+    return d3.scaleLinear().domain([0, max || 1]).range([innerHeight, 0]).nice();
+  }, [fanData, innerHeight]);
+  const fanPaths = useMemo(() => {
+    if (!fanData.length) return null;
+    const x = (d) => histXScale(d.ageSelf);
+    return {
+      band: d3.area().x(x).y0(d => fanYScale(d.p10)).y1(d => fanYScale(d.p90)).curve(d3.curveMonotoneX)(fanData),
+      median: d3.line().x(x).y(d => fanYScale(d.p50)).curve(d3.curveMonotoneX)(fanData),
+      lower: d3.line().x(x).y(d => fanYScale(d.p10)).curve(d3.curveMonotoneX)(fanData),
+      upper: d3.line().x(x).y(d => fanYScale(d.p90)).curve(d3.curveMonotoneX)(fanData)
+    };
+  }, [fanData, histXScale, fanYScale]);
+  // The first age at which a tenth of the paths are broke. Worth naming: it is the most actionable thing
+  // on the chart, and a smooth deterministic line could never have produced it.
+  const fanRuinAge = useMemo(() => {
+    const hit = fanData.find(d => d.p10 <= 0);
+    return hit ? hit.ageSelf : null;
+  }, [fanData]);
+  const [hoveredFanPoint, setHoveredFanPoint] = useState(null);
+
   const histMaxY = useMemo(() => Math.max(Math.max(0, ...historicalTimeline.map(d => d.totalCombined)) * 1.12, 100000), [historicalTimeline]);
   const histYScale = useMemo(() => d3.scaleLinear().domain([0, histMaxY]).range([innerHeight, 0]).nice(), [histMaxY, innerHeight]);
   const histLinePath = useMemo(() => d3.line().x(d => histXScale(d.ageSelf)).y(d => histYScale(d.totalCombined)).curve(d3.curveMonotoneX)(historicalTimeline), [historicalTimeline, histXScale, histYScale]);
@@ -3062,7 +3114,7 @@ export default function App() {
     setSimProgress({ label, value: scale.from });
     await tick();
     const stats = await runMonteCarloAsync(ctx, {
-      trials: MC_TRIALS, seed: mcSeed, shouldStop: () => mcCancelRef.current,
+      trials: MC_TRIALS, seed: mcSeed, shouldStop: () => mcCancelRef.current, collectPaths: true,
       onProgress: (f) => setSimProgress({ label, value: scale.from + (scale.to - scale.from) * f })
     });
     if (mcCancelRef.current) return null;
@@ -4075,8 +4127,8 @@ export default function App() {
           <div className="space-y-6">
             <div className="p-4 bg-blue-50/80 border border-blue-200 rounded-2xl text-xs text-slate-700 space-y-1.5 shadow-2xs">
               <div className="flex items-center gap-2 font-bold text-blue-950 text-sm"><Layers className="w-4 h-4 text-blue-600" /> Deterministic Portfolio Trajectory &amp; Sandbox</div>
-              <p className="leading-relaxed"><strong>What it does:</strong> Models compound wealth paths and tax-wrapper decumulation using steady real rates of return. The lucky and unlucky <em>rates</em> are calculated from each tier's volatility and your own horizon, so each is a genuine 90th and 10th percentile of the annualised return. The <em>pots</em> they reach are a different matter: see below. Use the Sandbox to test contributions and salary sacrifice ratios.</p>
-              <p className="text-slate-500 text-[11px] leading-relaxed"><strong>How to read the bands, and where the unlucky one misleads:</strong> no real path runs at a constant rate. Because it is the <em>average</em> rate that diversifies over time and not the total, the band narrows in annual terms the longer the horizon while the gap in pounds keeps widening. The catch is that a smooth line carries no sequence-of-returns risk, and that only hurts on the way down: a bad run of years early in retirement forces selling units cheaply and the damage never comes back. Measured against the simulation, the lucky line lands within a couple of percent of the 10-in-100 best pot, but <strong>the unlucky line finishes well above the 10-in-100 worst one</strong>, by around 16% over a 32-year drawdown and more over longer ones. Treat it as a gentle downside, and take the real one from the 10th-percentile pot on the Monte Carlo tab.</p>
+              <p className="leading-relaxed"><strong>What it does:</strong> Models compound wealth paths and tax-wrapper decumulation at one steady real rate per wrapper, recalculated live as you type. It is the fast view: change a contribution or a retirement age in the Sandbox and the whole projection moves with you.</p>
+              <p className="text-slate-500 text-[11px] leading-relaxed"><strong>What it deliberately does not show:</strong> a range. This tab used to draw a lucky and an unlucky line either side of the expected one, and they were removed because a constant rate cannot carry sequence-of-returns risk. That only bites on the way down, once you are withdrawing: a bad run of years early in retirement forces selling units cheaply and the loss never comes back. Measured against the simulation the upper line was fine, but the lower one finished a mean 23% above the 10-in-100 worst outcome, and 70% above it at worst. A smooth curve is the wrong shape for that question, so the range now comes from the Monte Carlo tab, where it is read off {MC_TRIALS.toLocaleString()} actual paths.</p>
               <p className={`text-[11px] font-semibold ${deterministicVerdict.survived ? 'text-emerald-700' : 'text-rose-700'}`}>
                 {deterministicVerdict.survived ? `Expected path survives to ${terminalAge}` : `Expected path fails at age ${deterministicVerdict.failAge} (${deterministicVerdict.failReason === 'pre-access' ? 'pre-SIPP access bridge exhausted' : deterministicVerdict.failReason === 'floor' ? 'below the bequest floor' : 'spending shortfall'})`}; lifetime tax {formatGBP(deterministicVerdict.lifetimeTax)}{P.cgtEnabled ? ' (income tax + CGT)' : ''}.
               </p>
@@ -4093,8 +4145,13 @@ export default function App() {
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Expected Terminal Pot</div><div className="text-2xl font-black font-mono text-blue-600 mt-2">{formatGBP(chartDisplayData[chartDisplayData.length - 1]?.expected)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Target className="w-3.5 h-3.5 text-blue-600" /> Constant expected real growth to age {terminalAge}</div></div>
-              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Lucky Scenario (90th %ile)</div><div className="text-2xl font-black font-mono text-emerald-600 mt-2">{formatGBP(timelineData[timelineData.length - 1]?.lucky)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><TrendingUp className="w-3.5 h-3.5 text-emerald-600" /> Steady 90th-percentile return to age {terminalAge}</div></div>
-              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Unlucky Scenario (10th %ile)</div><div className="text-2xl font-black font-mono text-rose-600 mt-2">{formatGBP(timelineData[timelineData.length - 1]?.unlucky)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><ShieldCheck className="w-3.5 h-3.5 text-rose-600" /> Steady 10th-percentile return, before sequence risk</div></div>
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Expected Pot at Retirement</div><div className="text-2xl font-black font-mono text-indigo-600 mt-2">{formatGBP(timelineData.find(r => r.ageSelf === ctx.owners[0].retireAge)?.totalCombined)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><TrendingUp className="w-3.5 h-3.5 text-indigo-600" /> The year contributions stop, at age {ctx.owners[0].retireAge}</div></div>
+              {/*
+                * Where the two deterministic band lines used to sit. A single constant rate cannot carry
+                * sequence-of-returns risk, so its downside finished well above the simulated one; the
+                * honest range is a distribution, and it lives one tab across.
+                */}
+              <button type="button" onClick={() => setActiveTab('simulation')} className="text-left bg-slate-50 border border-slate-200 p-5 rounded-2xl shadow-xs hover:border-indigo-200 hover:bg-surface transition-colors cursor-pointer group"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">How good or bad could it get?</div><div className="text-base font-bold text-slate-800 mt-2 group-hover:text-indigo-700">Run the Monte Carlo &rarr;</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Dices className="w-3.5 h-3.5 text-indigo-600" /> One smooth line cannot show the spread. {MC_TRIALS.toLocaleString()} simulated paths can.</div></button>
             </div>
 
             <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
@@ -4126,8 +4183,6 @@ export default function App() {
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-1 font-mono">
                       {activeSeries.expected && <div className="text-blue-600 font-bold">Projected Pot: {formatGBP(hoveredPoint.expected)}</div>}
                       {isSandboxModified && <div className="text-amber-600 font-bold">Sandbox Pot: {formatGBP(sandboxTimeline.find(d => d.ageSelf === hoveredPoint.ageSelf)?.totalCombined)}</div>}
-                      {activeSeries.lucky && <div className="text-emerald-600">Lucky: {formatGBP(hoveredPoint.lucky)}</div>}
-                      {activeSeries.unlucky && <div className="text-rose-600">Unlucky: {formatGBP(hoveredPoint.unlucky)}</div>}
                       {activeSeries.pensions && <div className="text-sky-600">Pensions: {formatGBP(hoveredPoint.pensions)}</div>}
                       {activeSeries.isas && <div className="text-teal-600">ISAs: {formatGBP(hoveredPoint.isas)}</div>}
                       <div className="text-slate-600">Tax this year: {formatGBP(hoveredPoint.taxPaid)}</div>
@@ -4259,6 +4314,55 @@ export default function App() {
                     <div><strong className="font-bold">Pre-Pension Bridge Exhaustion in {simResult.preNmpaFailRate.toFixed(1)}% of paths:</strong> non-pension investments (S&amp;S ISAs, other investments and cash) ran out while pension money was still locked (access age {nmpa}). Consider shifting contributions to your S&amp;S ISA, a later retirement age, or the strategy comparison below.</div>
                   </div>
                 )}
+              </div>
+            )}
+
+            {fanPaths && (
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Dices className="w-4 h-4 text-indigo-600" /> The range of outcomes, year by year</h3>
+                    <span className="text-xs text-slate-500">Where {simResult.trials.toLocaleString()} simulated paths put your total pot at each age, spending {formatGBP(simResult.spend)} a year. Real purchasing power.</span>
+                  </div>
+                  <div className="flex items-center gap-3 text-[11px] bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl">
+                    <span className="flex items-center gap-1.5"><span className="w-3 h-2.5 rounded-sm" style={{ background: cp.fanBand, border: `1px solid ${cp.fanEdge}` }} />10th&ndash;90th</span>
+                    <span className="flex items-center gap-1.5"><span className="w-3.5 h-0.5 rounded" style={{ background: cp.fanMedian }} />Median</span>
+                  </div>
+                </div>
+                <div className="relative overflow-x-auto">
+                  <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="w-full h-auto select-none" onMouseLeave={() => setHoveredFanPoint(null)}>
+                    <g transform={`translate(${margin.left}, ${margin.top})`}>
+                      {fanYScale.ticks(6).map((t, i) => <g key={i} transform={`translate(0, ${fanYScale(t)})`}><line x2={innerWidth} stroke={cp.gridMajor} strokeDasharray="3,3" /><text x={-10} dy="0.32em" fill={cp.axisText} fontSize="10" textAnchor="end" fontFamily="monospace">£{(t / 1000).toFixed(0)}k</text></g>)}
+                      {histXScale.ticks(10).map((t, i) => <g key={i} transform={`translate(${histXScale(t)}, 0)`}><line y2={innerHeight} stroke={cp.gridMinor} /><text y={innerHeight + 20} fill={cp.axisText} fontSize="11" textAnchor="middle" fontFamily="monospace">{t}</text></g>)}
+                      {markers(histXScale)}
+                      <path d={fanPaths.band} fill={cp.fanBand} stroke="none" />
+                      <path d={fanPaths.lower} fill="none" stroke={cp.fanEdge} strokeWidth="1.5" strokeDasharray="5,4" />
+                      <path d={fanPaths.upper} fill="none" stroke={cp.fanEdge} strokeWidth="1.5" strokeDasharray="5,4" />
+                      <path d={fanPaths.median} fill="none" stroke={cp.fanMedian} strokeWidth="3" strokeLinecap="round" />
+                      <rect width={innerWidth} height={innerHeight} fill="transparent" onMouseMove={(e) => { const rect = e.currentTarget.getBoundingClientRect(); const age = Math.round(histXScale.invert((e.clientX - rect.left) * (innerWidth / Math.max(1, rect.width)))); setHoveredFanPoint(fanData.find(d => d.ageSelf === age) || null); }} />
+                      {hoveredFanPoint && (
+                        <g transform={`translate(${histXScale(hoveredFanPoint.ageSelf)}, 0)`}>
+                          <line y2={innerHeight} stroke={cp.hoverCrosshair} strokeWidth="1" strokeDasharray="2,2" />
+                          <circle cy={fanYScale(hoveredFanPoint.p50)} r="4" fill={cp.fanMedian} stroke={cp.hoverDotStroke} strokeWidth="2" />
+                        </g>
+                      )}
+                    </g>
+                  </svg>
+                  {hoveredFanPoint && (
+                    <div className="absolute top-2 right-2 bg-surface/95 border border-slate-200 rounded-xl p-2.5 text-[11px] font-mono shadow-sm pointer-events-none">
+                      <div className="font-bold text-slate-800 font-sans mb-1">Age {hoveredFanPoint.ageSelf}</div>
+                      <div className="text-emerald-700">90th: {formatGBP(hoveredFanPoint.p90)}</div>
+                      <div className="text-slate-800">Median: {formatGBP(hoveredFanPoint.p50)}</div>
+                      <div className="text-rose-700">10th: {formatGBP(hoveredFanPoint.p10)}</div>
+                    </div>
+                  )}
+                </div>
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  {fanRuinAge !== null
+                    ? <><strong className="text-rose-700">The lower edge reaches zero at age {fanRuinAge}:</strong> one plan in ten has run dry by then. </>
+                    : <><strong className="text-emerald-700">The lower edge never reaches zero:</strong> more than nine plans in ten still hold something at age {terminalAge}. </>}
+                  The band widens because nothing cancels out the early years. No single path follows any of these three lines, and none of them is a forecast: each is a percentile of where {simResult.trials.toLocaleString()} paths had landed by that age, so the right-hand edge is the same 10th, 50th and 90th percentile pot reported below.
+                </p>
               </div>
             )}
 
@@ -4420,6 +4524,12 @@ export default function App() {
                   <p className="text-slate-500">Holds your spending and your budget fixed and re-splits the budget between wrappers, scoring each strategy on identical market paths. It is the slowest stage because it runs several full simulations, and two of its players search a range of candidates first. The methodology and the players are documented below.</p>
                 </div>
               </div>
+              <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1 text-xs">
+                <strong className="text-slate-800 block">The range chart, and why it is not a pair of lines</strong>
+                <p className="text-slate-500">Stage 1 keeps every simulated path, not just its ending, so the chart can show where all {MC_TRIALS.toLocaleString()} of them stood at each age: the shaded band is the 10th to 90th percentile, the solid line the median. Read the right-hand edge and you get the same three pot figures reported underneath it, because both use the same quantile. No path follows any of the three lines, and the band widens with age because nothing cancels out the early years.</p>
+                <p className="text-slate-500">The Trajectory tab used to answer this with two deterministic lines run at a steady 90th and 10th percentile rate. The upper one was close to the simulated 90th-percentile pot. The lower one was not: it finished a mean 23% above the simulated 10th-percentile pot, and 70% above it at worst. The reason is sequence-of-returns risk, which only bites while you are withdrawing. A bad run of years early in retirement forces selling units cheaply and the loss never comes back, and a constant rate has no bad years to express that with. Holding one household fixed and changing only the length of drawdown isolates it: −2.5% over 7 years, +16.3% over 32, −0.9% with no withdrawals at all, and 0.3% once volatility is set to nearly zero. So the lines went, and the distribution took their place.</p>
+                <p className="text-slate-500">Where the lower edge touches zero, a tenth of the paths have run dry by that age. That is a statement no smooth line could have made.</p>
+              </div>
               <p className="text-xs text-slate-600 leading-relaxed"><strong className="text-slate-800">Reading any of it honestly.</strong> Every figure is in today&rsquo;s money. The headline carries a &plusmn; sampling error: at {MC_TRIALS.toLocaleString()} trials a difference smaller than that is noise, so treat 94.2% and 95.1% as the same answer. Check the <strong>pre-SIPP access failure</strong> line separately: a plan can survive overall while still stranding you before age {nmpa}, which is a bridging problem, not a saving-enough problem. A path counts as failed in any year that living costs or a one-off cost cannot be met from an accessible wrapper, or if the terminal pot ends below your bequest floor. Paths are seeded, so the same seed reproduces the result exactly; change the seed in Config to test a different draw of markets.</p>
               <p className="text-[11px] text-slate-500 leading-relaxed">No stage changes your plan on its own. Applying a strategy from stage 3 is a separate, deliberate click.</p>
             </div>
@@ -4490,7 +4600,7 @@ export default function App() {
 
             <div id="doc-risk-profiles" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-blue-600" /> Asset Allocations, Return Bounds &amp; Volatility (σ)</h2>
-              <p className="text-xs text-slate-600 leading-relaxed">Each wrapper is assigned a risk tier with an expected real return (treated as the median annual rate) and a volatility used by the Monte Carlo. The lucky and unlucky rates on the deterministic chart are calculated from those two figures and the plan horizon, as exp(ln(1 + expected) ± 1.2816·σ/√T) − 1, so each <em>rate</em> is the stated percentile of the annualised return rather than a fixed margin above and below the mean. The <em>pot</em> a line reaches is only the matching percentile of wealth while nothing is being withdrawn: in decumulation the unlucky line finishes materially above the simulated 10th-percentile pot, because a constant rate cannot express sequence-of-returns risk and a real bad path sells units at low prices. All wrappers move together (one market factor scaled by each tier's σ); the historical backtest blends real US equity and bond returns by the tier's equity weight ({Object.entries(E.RISK_EQUITY_WEIGHTS).map(([k, v]) => `${k.replace(' Risk', '')} ${Math.round(v * 100)}%`).join(', ')}).</p>
+              <p className="text-xs text-slate-600 leading-relaxed">Each wrapper is assigned a risk tier with an expected real return (treated as the median annual rate) and a volatility used by the Monte Carlo. The 10th and 90th percentile columns beside them are calculated from those two figures and the plan horizon, as exp(ln(1 + expected) ± 1.2816·σ/√T) − 1: over your horizon the annualised return lands between them eight times in ten. They are there to make a volatility figure legible, and they drive no chart. Nothing turns them into a percentile <em>pot</em>, because that leap is the one that fails once withdrawals start. All wrappers move together (one market factor scaled by each tier's σ); the historical backtest blends real US equity and bond returns by the tier's equity weight ({Object.entries(E.RISK_EQUITY_WEIGHTS).map(([k, v]) => `${k.replace(' Risk', '')} ${Math.round(v * 100)}%`).join(', ')}).</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                 {Object.entries(activeRiskMatrix).map(([k, v]) => (
                   <div key={k} className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><span className="font-bold text-slate-800">{k} ({v.label})</span><p className="text-slate-500">Expected real {E.num(v.real, 0).toFixed(2)}% pa, σ = {E.num(v.volatility, 0).toFixed(1)}%.</p></div>
