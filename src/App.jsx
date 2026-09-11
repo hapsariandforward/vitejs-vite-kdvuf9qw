@@ -4209,17 +4209,29 @@ export default function App() {
                     <div className={`p-3 rounded-2xl border shrink-0 ${simResult.successRate >= 90 ? 'bg-emerald-100 border-emerald-300 text-emerald-700' : simResult.successRate >= 75 ? 'bg-amber-100 border-amber-300 text-amber-700' : 'bg-rose-100 border-rose-300 text-rose-700'}`}>{simResult.successRate >= 90 ? <CheckCircle2 className="w-6 h-6" /> : <AlertTriangle className="w-6 h-6" />}</div>
                   )}
                   <div className="min-w-0 space-y-1.5">
-                    {simResult && (
+                    {simResult && (simResult.spend > 0 ? (
                       <p className="text-sm text-slate-900 leading-snug">
                         Your <strong className="font-mono font-bold">{formatGBP(simResult.spend)}</strong> a year held in <strong className={`font-mono font-bold ${simResult.successRate >= 90 ? 'text-emerald-700' : simResult.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}`}>{simResult.successRate.toFixed(1)}%</strong> of {simResult.trials.toLocaleString()} paths.
                       </p>
-                    )}
+                    ) : (
+                      // Spending nothing survives everything, so quoting 100% here would read as reassurance
+                      // about a plan that has not been entered yet.
+                      <p className="text-sm text-slate-900 leading-snug">
+                        Your net living spend is blank, so there is nothing to test. Enter it in Plan Inputs and run this again.
+                      </p>
+                    ))}
                     {safeMaxResult && (
                       <p className="text-sm text-slate-900 leading-snug">
-                        You could take up to <strong className="font-mono font-bold text-indigo-700">{formatGBP(safeMaxResult.spend)}</strong> a year and still clear {safeMaxResult.confidence}%
-                        {simResult && Math.abs(safeMaxResult.spend - simResult.spend) >= 250 && (
-                          <span className="text-slate-600">, {formatGBP(Math.abs(safeMaxResult.spend - simResult.spend))} a year {safeMaxResult.spend > simResult.spend ? 'more' : 'less'} than you entered</span>
-                        )}.
+                        {safeMaxResult.spend > 0 ? (
+                          <>
+                            You could take up to <strong className="font-mono font-bold text-indigo-700">{formatGBP(safeMaxResult.spend)}</strong> a year and still clear {safeMaxResult.confidence}%
+                            {simResult && simResult.spend > 0 && Math.abs(safeMaxResult.spend - simResult.spend) >= 250 && (
+                              <span className="text-slate-600">, {formatGBP(Math.abs(safeMaxResult.spend - simResult.spend))} a year {safeMaxResult.spend > simResult.spend ? 'more' : 'less'} than you entered</span>
+                            )}.
+                          </>
+                        ) : (
+                          <>No level of spending at all clears {safeMaxResult.confidence}%, so the solver returned nothing.</>
+                        )}
                         {safeMaxResult.note && <span className="block text-[11px] text-rose-700 font-semibold mt-0.5">{safeMaxResult.note}</span>}
                       </p>
                     )}
