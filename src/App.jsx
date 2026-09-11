@@ -2058,6 +2058,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, state, setState, cancelRef
             <span className="font-mono font-bold text-indigo-700">£{Math.round(E.num(emergencyFloor, 0)).toLocaleString()}</span>
           </div>
           <input type="range" min="0" max="100000" step="2500" value={E.num(emergencyFloor, 0)} onChange={(e) => setEmergencyFloor(Number(e.target.value))} className="w-full accent-indigo-600 cursor-pointer mt-2" />
+          <span className="text-[10px] text-slate-500 block mt-1">Savings ring-fenced from the bridge and from any Bed &amp; SIPP transfer — it shrinks what counts as available, rather than raising the target (that is the bridge safety margin in Config).</span>
         </div>
         <div>
           <label className="text-slate-700 font-semibold block mb-1">Bridge-risk cap (Survival Maximizer)</label>
@@ -3243,7 +3244,7 @@ export default function App() {
                 <div><label className="text-slate-600 font-semibold block mb-1">Headline Inflation CPI (% pa)</label><input type="number" step="0.1" placeholder="2.5" onFocus={handleFocus} value={plan?.config?.inflation ?? ''} onChange={(e) => updateConfig('inflation', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Only used for the nominal display series.</span></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">Personal Pension Access Age (NMPA)</label><input type="number" min="0" max="120" placeholder="58" onFocus={handleFocus} value={plan?.demographics?.privatePensionAge ?? ''} onChange={(e) => updateDemographics('privatePensionAge', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Statutory NMPA is 55 today and 57 from April 2028.</span></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">State Pension Start Age</label><input type="number" min="0" max="120" placeholder="68" onFocus={handleFocus} value={plan?.demographics?.statePensionAge ?? ''} onChange={(e) => updateDemographics('statePensionAge', e.target.value)} className={inputCls} /></div>
-                <div><label className="text-slate-600 font-semibold block mb-1">Tournament bridge safety margin (%)</label><input type="number" min="0" step="5" placeholder="30" onFocus={handleFocus} value={plan?.config?.bridgeSafetyMargin ?? ''} onChange={(e) => updateConfig('bridgeSafetyMargin', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Uplift on the pre-SIPP access reserve, assuming 0% real growth.</span></div>
+                <div><label className="text-slate-600 font-semibold block mb-1">Tournament bridge safety margin (%)</label><input type="number" min="0" step="5" placeholder="30" onFocus={handleFocus} value={plan?.config?.bridgeSafetyMargin ?? ''} onChange={(e) => updateConfig('bridgeSafetyMargin', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Uplift on the pre-SIPP access reserve, assuming 0% real growth. This scales the bridge <em>target</em> upwards; the tournament's emergency buffer instead holds savings back from counting towards it.</span></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">Pension death-tax haircut (%)</label><input type="number" min="0" max="100" step="5" placeholder="0" onFocus={handleFocus} value={plan?.config?.pensionDeathTaxRate ?? ''} onChange={(e) => updateConfig('pensionDeathTaxRate', e.target.value)} className={inputCls} /><span className="text-[10px] text-slate-400 mt-1 block">Applied to pension left at age {terminalAge} for the "net" pot figures only (IHT from April 2027 / beneficiary income tax).</span></div>
                 <div><label className="text-slate-600 font-semibold block mb-1">Monte Carlo seed</label><div className="flex gap-1"><input type="number" value={mcSeed} onChange={(e) => setMcSeed(Math.max(1, parseInt(e.target.value) || 1))} className={inputCls} /><button type="button" onClick={() => setMcSeed(Math.floor(Math.random() * 1e9) + 1)} className="px-2 bg-slate-100 border border-slate-300 rounded-lg text-[11px] font-semibold cursor-pointer hover:bg-slate-200">Reseed</button></div><span className="text-[10px] text-slate-400 mt-1 block">Same seed = same market paths (reproducible, fair comparisons).</span></div>
               </div>
@@ -3398,7 +3399,17 @@ export default function App() {
             </div>
 
             <div className="bg-surface border border-slate-200/90 rounded-2xl p-5 shadow-xs flex flex-wrap items-center justify-between gap-3">
-              <div><h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Run Multi-Path Simulation</h3><span className="text-[11px] text-slate-500">Run {MC_TRIALS.toLocaleString()} stochastic trials or calculate your sustainable safe spending limit.</span></div>
+              <div className="max-w-2xl">
+                <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Run Multi-Path Simulation</h3>
+                <span className="text-[11px] text-slate-500 block mt-0.5 leading-relaxed">
+                  <strong className="text-slate-700">Test Current Spend</strong> runs your target spend from Plan Inputs through {MC_TRIALS.toLocaleString()} random market paths and reports the share that lasted to age {terminalAge}.{' '}
+                  <strong className="text-slate-700">Safe Max Annual Spend</strong> works backwards instead: it solves for the largest spend that still survives at the confidence you pick, so it takes longer.{' '}
+                  <strong className="text-slate-700">Confidence</strong> applies only to that second button — a lower setting returns a higher spend for more risk.
+                </span>
+                <button type="button" onClick={() => goToDoc('doc-mc-buttons')} className="text-[11px] text-blue-600 hover:text-blue-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer mt-1.5">
+                  <HelpCircle className="w-3.5 h-3.5" /> How the two buttons differ, and how to read the result &rarr;
+                </button>
+              </div>
               <div className="flex items-center gap-2 flex-wrap">
                 <div className="flex items-center bg-slate-100 border border-slate-200 rounded-xl p-1 text-xs">
                   <span className="text-slate-500 px-2 font-medium">Confidence:</span>
@@ -3544,6 +3555,30 @@ export default function App() {
         {/* TAB 7: DOCS */}
         {activeTab === 'docs' && (
           <div className="space-y-6">
+            <div id="doc-mc-buttons" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Dices className="w-4 h-4 text-blue-600" /> The Two Monte Carlo Buttons</h2>
+              <p className="text-xs text-slate-600 leading-relaxed">Both run the same engine on the same {MC_TRIALS.toLocaleString()} randomized market paths. They differ in which side of the equation is held fixed: one fixes your spending and reports the risk, the other fixes the risk and reports the spending.</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                  <strong className="text-slate-800 block">Test Current Spend — "will this plan hold?"</strong>
+                  <p className="text-slate-500">Takes the target living expenditure from Plan Inputs exactly as entered and runs it through {MC_TRIALS.toLocaleString()} paths. The answer is a <strong>survival rate</strong>: the share of paths that funded every year to age {terminalAge} without running dry and finished above your bequest floor. Use it once you know roughly what you want to spend. The confidence selector does nothing here — this button reports the probability rather than targeting one.</p>
+                </div>
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                  <strong className="text-slate-800 block">Safe Max Annual Spend — "how much can I spend?"</strong>
+                  <p className="text-slate-500">Ignores your target figure and solves for the <strong>largest annual spend</strong> that still survives at the confidence level you pick. It bisects on the spending amount, re-running the full simulation at each step, which is why it takes longer than the first button. At 95% it finds the spend that fails in no more than 1 path in 20.</p>
+                </div>
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                  <strong className="text-slate-800 block">The confidence selector (85 / 90 / 95%)</strong>
+                  <p className="text-slate-500">Only affects Safe Max Annual Spend. It is the survival rate you are willing to accept, so a <em>lower</em> confidence returns a <em>higher</em> spending figure — 85% buys you more income now in exchange for a 1-in-7 chance of running short. 95% is the conventional planning benchmark.</p>
+                </div>
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                  <strong className="text-slate-800 block">Reading either result honestly</strong>
+                  <p className="text-slate-500">Every figure is in today's money. The headline carries a ± sampling error: at {MC_TRIALS.toLocaleString()} trials a difference smaller than that is noise, so treat 94.2% and 95.1% as the same answer. Check the <strong>pre-SIPP access failure</strong> line separately — a plan can survive overall while still stranding you before age {nmpa}, which is a bridging problem, not a saving-enough problem. Paths are seeded, so the same seed reproduces the result exactly; change the seed in Config to test a different draw of markets.</p>
+                </div>
+              </div>
+              <p className="text-[11px] text-slate-500 leading-relaxed">Neither button changes your plan. To change <em>where</em> the money goes rather than how much you spend, use the strategy tournament below them.</p>
+            </div>
+
             <div id="doc-tournament" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Zap className="w-4 h-4 text-indigo-600" /> Automated Strategy Tournament &amp; Optimization Methodology</h2>
               <p className="text-xs text-slate-600 leading-relaxed">The tournament compares six ways of splitting the same annual take-home budget between S&amp;S ISAs and pensions. Every player is run on the same {TOURNAMENT_TRIALS.toLocaleString()} market paths (common random numbers), so the ranking reflects the strategies rather than sampling luck.</p>
