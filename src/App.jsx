@@ -2123,7 +2123,9 @@ const safeStorageSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e)
 const safeStorageRemove = (k) => { try { localStorage.removeItem(k); } catch (e) { /* ignore */ } };
 
 // Chunked Monte Carlo so the UI can repaint a progress bar between batches.
-async function runMonteCarloAsync(ctx, { trials, seed, spendOverride = null, onProgress }) {
+// `shouldStop` is checked between chunks, so a cancel lands within a chunk rather than at the end of the
+// run. The partial result is still summarised and returned, because the caller discards it either way.
+async function runMonteCarloAsync(ctx, { trials, seed, spendOverride = null, onProgress, shouldStop = null }) {
   const paths = E.pathsForSeed(seed, trials, ctx.totalYears);
   const results = [];
   const CHUNK = 250;
@@ -2132,6 +2134,7 @@ async function runMonteCarloAsync(ctx, { trials, seed, spendOverride = null, onP
     for (let j = i; j < end; j++) results.push(E.runTrial(ctx, paths[j], spendOverride));
     if (onProgress) onProgress(results.length / trials);
     await tick();
+    if (shouldStop && shouldStop()) break;
   }
   return { ...E.summarizeTrials(results), spend: spendOverride !== null ? spendOverride : ctx.targetSpend };
 }
@@ -2737,10 +2740,17 @@ export default function App() {
   const [hoveredHistPoint, setHoveredHistPoint] = useState(null);
 
   const [targetConfidence, setTargetConfidence] = useState(90);
+  // One run, three stages. `simResult` is always the plan exactly as entered; `safeMaxResult` is the
+  // solve, which describes a different spend and so cannot share the same card. Keeping them apart is
+  // what stops the metric tiles quietly changing meaning depending on which button was pressed last.
   const [simResult, setSimResult] = useState(null);
+  const [safeMaxResult, setSafeMaxResult] = useState(null);
+  const [mcStages, setMcStages] = useState({ safeMax: true, tournament: true });
+  const [mcDetailOpen, setMcDetailOpen] = useState(true);
   const [simProgress, setSimProgress] = useState(null);
   const [isSimulating, setIsSimulating] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
+  const mcCancelRef = useRef(false);
   const [policyResults, setPolicyResults] = useState(null);
   const [policyProgress, setPolicyProgress] = useState(null);
   const [isPolicySearching, setIsPolicySearching] = useState(false);
@@ -2894,7 +2904,7 @@ export default function App() {
     const selected = scenarios.find(s => s.id === id);
     if (!selected) return;
     const data = E.normalizePlan(selected.data);
-    setSandboxCustomized(false); setActiveScenarioId(id); setPlan(data); setSimResult(null); setSandboxAccounts(sandboxFromPlan(data)); setSandboxRetire(sandboxRetireFromPlan(data));
+    setSandboxCustomized(false); setActiveScenarioId(id); setPlan(data); setSimResult(null); setSafeMaxResult(null); setSandboxAccounts(sandboxFromPlan(data)); setSandboxRetire(sandboxRetireFromPlan(data));
   };
   const handleDeleteScenario = (idToDelete) => {
     if (scenarios.length <= 1) { window.alert('At least one scenario must be retained.'); return; }
@@ -2998,14 +3008,14 @@ export default function App() {
       try {
         const parsed = JSON.parse(event.target.result);
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
-        setSandboxCustomized(false); setPlan(E.normalizePlan(parsed)); setSimResult(null); flash('Plan imported');
+        setSandboxCustomized(false); setPlan(E.normalizePlan(parsed)); setSimResult(null); setSafeMaxResult(null); flash('Plan imported');
       } catch (err) { window.alert('Invalid JSON configuration file.'); }
     };
     reader.readAsText(file, 'UTF-8');
     e.target.value = '';
   };
   const handleResetDefaults = () => {
-    if (window.confirm('Reset all inputs back to blank?')) { setSandboxCustomized(false); setPlan(E.normalizePlan(null)); safeStorageRemove(STORAGE_KEY); setSimResult(null); }
+    if (window.confirm('Reset all inputs back to blank?')) { setSandboxCustomized(false); setPlan(E.normalizePlan(null)); safeStorageRemove(STORAGE_KEY); setSimResult(null); setSafeMaxResult(null); }
   };
   const handleExportCSV = () => {
     if (!timelineData.length) return;
@@ -3017,39 +3027,104 @@ export default function App() {
   };
 
   // ------------------------------------------------------------ Monte Carlo
-  const handleRunMC = async () => {
-    setIsSimulating(true); setSimProgress({ label: `Testing ${MC_TRIALS.toLocaleString()} paths…`, value: 0 });
+  // Stage 1: the plan exactly as entered. Fast, and the only stage that always runs.
+  const runStageTest = async (scale = { from: 0, to: 1 }) => {
+    const label = `Testing ${MC_TRIALS.toLocaleString()} paths against your current spend…`;
+    setSimProgress({ label, value: scale.from });
     await tick();
-    try {
-      const stats = await runMonteCarloAsync(ctx, { trials: MC_TRIALS, seed: mcSeed, onProgress: (f) => setSimProgress({ label: `Testing ${MC_TRIALS.toLocaleString()} paths…`, value: f }) });
-      setSimResult({ type: 'test', title: 'Monte Carlo Stress Test', ...stats, spend: ctx.targetSpend });
-    } finally { setIsSimulating(false); setSimProgress(null); }
+    const stats = await runMonteCarloAsync(ctx, {
+      trials: MC_TRIALS, seed: mcSeed, shouldStop: () => mcCancelRef.current,
+      onProgress: (f) => setSimProgress({ label, value: scale.from + (scale.to - scale.from) * f })
+    });
+    if (mcCancelRef.current) return null;
+    const res = { ...stats, spend: ctx.targetSpend };
+    setSimResult(res);
+    return res;
   };
-  const handleOptimize = async () => {
-    setIsOptimizing(true); setSimProgress({ label: 'Solving for the safe maximum spend…', value: 0 });
+
+  /*
+   * Stage 2: the same engine run backwards. Stage 1 fixes the spending and reports the risk; this fixes
+   * the risk and reports the spending. It bisects on the spend, re-running the search at each step, then
+   * confirms the answer over the full path count, which is why it costs more than stage 1.
+   */
+  const runStageSafeMax = async (confidence, scale = { from: 0, to: 1 }) => {
+    const span = scale.to - scale.from;
+    setSimProgress({ label: `Solving for the most you could spend at ${confidence}%…`, value: scale.from });
     await tick();
-    try {
-      const paths = E.pathsForSeed(mcSeed, SEARCH_TRIALS, ctx.totalYears);
-      const rateAt = (spend) => { let s = 0; for (const zs of paths) if (E.runTrial(ctx, zs, spend).survived) s++; return (s / SEARCH_TRIALS) * 100; };
-      let low = 0, result;
-      if (rateAt(0) < targetConfidence) {
-        result = { spend: 0, note: 'Even zero spending fails the target. Check the pre-SIPP access gap, one-off costs or the bequest floor.' };
-      } else {
-        let high = Math.max(20000, ctx.targetSpend * 2, 150000), guard = 0;
-        while (rateAt(high) >= targetConfidence && guard++ < 8) { low = high; high *= 2; }
-        for (let iter = 0; iter < 14; iter++) {
-          const mid = E.round250((low + high) / 2);
-          if (mid <= low || mid >= high) break;
-          if (rateAt(mid) >= targetConfidence) low = mid; else high = mid;
-          setSimProgress({ label: `Bisecting… £${low.toLocaleString()}–£${high.toLocaleString()}`, value: 0.1 + 0.5 * (iter + 1) / 14 });
-          await tick();
-        }
-        result = { spend: E.round250(low) };
+    const paths = E.pathsForSeed(mcSeed, SEARCH_TRIALS, ctx.totalYears);
+    const rateAt = (spend) => { let s = 0; for (const zs of paths) if (E.runTrial(ctx, zs, spend).survived) s++; return (s / SEARCH_TRIALS) * 100; };
+    let low = 0, result;
+    if (rateAt(0) < confidence) {
+      result = { spend: 0, note: 'Even zero spending fails the target. Check the pre-SIPP access gap, one-off costs or the bequest floor.' };
+    } else {
+      let high = Math.max(20000, ctx.targetSpend * 2, 150000), guard = 0;
+      while (rateAt(high) >= confidence && guard++ < 8) { low = high; high *= 2; }
+      for (let iter = 0; iter < 14; iter++) {
+        const mid = E.round250((low + high) / 2);
+        if (mid <= low || mid >= high) break;
+        if (rateAt(mid) >= confidence) low = mid; else high = mid;
+        setSimProgress({ label: `Narrowing… £${low.toLocaleString()}–£${high.toLocaleString()}`, value: scale.from + span * (0.1 + 0.5 * (iter + 1) / 14) });
+        await tick();
+        if (mcCancelRef.current) break;
       }
-      const stats = await runMonteCarloAsync(ctx, { trials: MC_TRIALS, seed: mcSeed + 1, spendOverride: result.spend, onProgress: (f) => setSimProgress({ label: `Confirming £${result.spend.toLocaleString()} over ${MC_TRIALS.toLocaleString()} paths…`, value: 0.6 + 0.4 * f }) });
-      setSimResult({ type: 'optimize', title: `Safe Max Annual Spend (${targetConfidence}% Target)`, ...stats, spend: result.spend, note: result.note });
-    } finally { setIsOptimizing(false); setSimProgress(null); }
+      result = { spend: E.round250(low) };
+    }
+    const stats = await runMonteCarloAsync(ctx, {
+      trials: MC_TRIALS, seed: mcSeed + 1, spendOverride: result.spend, shouldStop: () => mcCancelRef.current,
+      onProgress: (f) => setSimProgress({ label: `Confirming £${result.spend.toLocaleString()} over ${MC_TRIALS.toLocaleString()} paths…`, value: scale.from + span * (0.6 + 0.4 * f) })
+    });
+    if (mcCancelRef.current) return null;
+    const res = { spend: result.spend, note: result.note, confidence, stats };
+    setSafeMaxResult(res);
+    return res;
   };
+
+  /*
+   * The single action on the tab. Each stage renders as it lands rather than at the end, so the fast
+   * answer is on screen in about a second while the slower ones are still working. Stage 3 hands off to
+   * the tournament panel, which owns its own progress and results, by bumping the token it watches.
+   */
+  const handleRunAll = async () => {
+    if (isSimulating || isOptimizing) return;
+    mcCancelRef.current = false;
+    const wantSafeMax = mcStages.safeMax;
+    setIsSimulating(true);
+    // Every stage is cleared, including one that is about to be skipped: a verdict line left over from an
+    // earlier run would otherwise sit alongside fresh figures and read as part of the same measurement.
+    setSimResult(null); setSafeMaxResult(null);
+    setTournament(prev => (prev.results ? { ...prev, results: null } : prev));
+    try {
+      await runStageTest(wantSafeMax ? { from: 0, to: 0.35 } : { from: 0, to: 1 });
+      if (mcCancelRef.current) return;
+      if (wantSafeMax) {
+        setIsOptimizing(true);
+        await runStageSafeMax(targetConfidence, { from: 0.35, to: 1 });
+      }
+    } finally {
+      setIsSimulating(false); setIsOptimizing(false); setSimProgress(null);
+    }
+    if (mcCancelRef.current) return;
+    if (mcStages.tournament) setTournament(prev => ({ ...prev, autoRun: prev.autoRun + 1 }));
+  };
+
+  // Re-solve stage 2 alone, which is what a change of confidence needs: stage 1 does not depend on it.
+  const handleResolveSafeMax = async () => {
+    if (isSimulating || isOptimizing) return;
+    mcCancelRef.current = false;
+    setIsOptimizing(true);
+    try { await runStageSafeMax(targetConfidence); }
+    finally { setIsOptimizing(false); setSimProgress(null); }
+  };
+
+  const handleCancelMC = () => { mcCancelRef.current = true; tournamentCancelRef.current = true; };
+
+  // Derived once for the verdict strip, which reports whichever stages have landed so far.
+  const mcBusy = isSimulating || isOptimizing || tournament.isEvaluating;
+  const safeMaxStale = !!safeMaxResult && safeMaxResult.confidence !== targetConfidence;
+  const tournamentBest = tournament.results && tournament.results.bestId
+    ? tournament.results.players.find(p => p.id === tournament.results.bestId) : null;
+  const tournamentBaselinePlayer = tournament.results
+    ? tournament.results.players.find(p => p.id === 'baseline') : null;
 
   // ------------------------------------------------------------ decumulation policy auto-pick
   // Every policy combination is scored on the same seed (common random numbers), so the differences
@@ -4050,62 +4125,132 @@ export default function App() {
         {/* TAB 4: MONTE CARLO */}
         {activeTab === 'simulation' && (
           <div className="space-y-6">
-            <div className="p-4 bg-indigo-50/80 border border-indigo-200 rounded-2xl text-xs text-slate-700 space-y-1.5 shadow-2xs">
-              <div className="flex items-center gap-2 font-bold text-indigo-950 text-sm"><Dices className="w-4 h-4 text-indigo-600" /> Stochastic Monte Carlo Stress Testing ({MC_TRIALS.toLocaleString()} Randomised Paths)</div>
-              <p className="leading-relaxed"><strong>What it does:</strong> Stress-tests your target living expenditure against {MC_TRIALS.toLocaleString()} randomised market runs using each risk tier's annual volatility (σ). It reports the failure probability, when capital runs out, and solves for your sustainable maximum spending at a chosen confidence level.</p>
-              <p className="text-slate-500 text-[11px] leading-relaxed"><strong>How failure is defined:</strong> a year in which living costs or a one-off cost cannot be met from any accessible wrapper (a pre-SIPP access failure means pension money existed but was locked), or a terminal pot below the bequest floor. Paths are seeded, so re-running with the same seed reproduces the result exactly.</p>
-            </div>
-
-            <div className="bg-surface border border-slate-200/90 rounded-2xl p-5 shadow-xs flex flex-wrap items-center justify-between gap-3">
-              <div className="max-w-2xl">
-                <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Run Multi-Path Simulation</h3>
-                <ul className="text-[11px] text-slate-500 mt-1.5 space-y-1 leading-relaxed list-disc pl-4">
-                  <li><strong className="text-slate-700">Test Current Spend</strong>: runs your target spend from Plan Inputs through {MC_TRIALS.toLocaleString()} random market paths and reports the share that lasted to age {terminalAge}.</li>
-                  <li><strong className="text-slate-700">Safe Max Annual Spend</strong>: works backwards instead, solving for the largest spend that still survives at the confidence you pick. Slower, because it re-runs the whole simulation at each step.</li>
-                  <li><strong className="text-slate-700">Confidence</strong>: applies only to that second button. A lower setting returns a higher spend, in exchange for more risk.</li>
-                </ul>
-                <button type="button" onClick={() => goToDoc('doc-mc-buttons')} className="text-[11px] text-blue-600 hover:text-blue-800 hover:underline font-semibold flex items-center gap-1 cursor-pointer mt-1.5">
-                  <HelpCircle className="w-3.5 h-3.5" /> How the two buttons differ, and how to read the result &rarr;
+            <div className="p-4 bg-indigo-50/80 border border-indigo-200 rounded-2xl text-xs text-slate-700 space-y-2 shadow-2xs">
+              <div className="flex items-center gap-2 font-bold text-indigo-950 text-sm"><Dices className="w-4 h-4 text-indigo-600" /> Monte Carlo Simulation</div>
+              <p className="leading-relaxed">Runs your plan through {MC_TRIALS.toLocaleString()} randomised market paths and answers three questions in one go: how often your current spend holds, the most you could take instead, and whether a different split between wrappers would do better.</p>
+              <div className="flex flex-wrap gap-x-5 gap-y-1">
+                <button type="button" onClick={() => goToDoc('doc-mc-buttons')} className="text-[11px] text-blue-700 hover:text-blue-900 hover:underline font-semibold flex items-center gap-1 cursor-pointer">
+                  <HelpCircle className="w-3.5 h-3.5" /> What each stage does, and how to read it &rarr;
+                </button>
+                <button type="button" onClick={() => goToDoc('doc-tournament')} className="text-[11px] text-blue-700 hover:text-blue-900 hover:underline font-semibold flex items-center gap-1 cursor-pointer">
+                  <HelpCircle className="w-3.5 h-3.5" /> Tournament methodology and players &rarr;
                 </button>
               </div>
-              <div className="flex items-center gap-2 flex-wrap">
-                <div className="flex items-center bg-slate-100 border border-slate-200 rounded-xl p-1 text-xs">
-                  <span className="text-slate-500 px-2 font-medium">Confidence:</span>
-                  {[85, 90, 95].map(rate => <button key={rate} onClick={() => setTargetConfidence(rate)} className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${targetConfidence === rate ? 'bg-surface text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>{rate}%</button>)}
+            </div>
+
+            <div className="bg-surface border border-slate-200/90 rounded-2xl p-5 shadow-xs space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Run the numbers</h3>
+                  <span className="text-[11px] text-slate-500">Each stage appears as it finishes, so the first answer arrives while the rest is still working. Every figure is in today&rsquo;s money.</span>
                 </div>
-                <button onClick={handleRunMC} disabled={isSimulating || isOptimizing} className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-xs active:scale-95 disabled:opacity-60"><Dices className="w-3.5 h-3.5 text-blue-200" />{isSimulating ? 'Testing…' : 'Test Current Spend'}</button>
-                <button onClick={handleOptimize} disabled={isSimulating || isOptimizing} className="px-3.5 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 dark:from-[#2C5C8F] dark:to-[#A9781F] dark:hover:from-[#204568] text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95 disabled:opacity-60"><Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300 dark:fill-[#FCD34D] dark:text-[#FCD34D]" />{isOptimizing ? 'Solving…' : `⚡ Safe Max Annual Spend (${targetConfidence}%)`}</button>
+                <div className="flex items-center gap-2">
+                  {mcBusy && (
+                    <button type="button" onClick={handleCancelMC} className="px-3 py-1.5 rounded-xl text-xs font-bold border border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700 cursor-pointer">Stop</button>
+                  )}
+                  <button onClick={handleRunAll} disabled={mcBusy}
+                    className="px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 dark:from-[#2C5C8F] dark:to-[#A9781F] dark:hover:from-[#204568] text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95 disabled:opacity-60">
+                    <Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300 dark:fill-[#FCD34D] dark:text-[#FCD34D]" />
+                    {isSimulating && !isOptimizing ? 'Testing…' : isOptimizing ? 'Solving…' : tournament.isEvaluating ? 'Comparing…' : '⚡ Run the numbers'}
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-[11px] text-slate-600 pt-2.5 border-t border-slate-100">
+                <span className="text-slate-400">Always runs: how your current spend holds up.</span>
+                <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                  <input type="checkbox" checked={mcStages.safeMax} onChange={(e) => setMcStages(s => ({ ...s, safeMax: e.target.checked }))} className="accent-indigo-600 cursor-pointer" />
+                  <span className="font-semibold text-slate-700">Also solve for the most I could spend</span>
+                </label>
+                <div className={`flex items-center bg-slate-100 border border-slate-200 rounded-xl p-1 ${mcStages.safeMax || safeMaxResult ? '' : 'opacity-40'}`}>
+                  <span className="text-slate-500 px-2">Confidence:</span>
+                  {[85, 90, 95].map(rate => <button key={rate} type="button" onClick={() => setTargetConfidence(rate)} className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${targetConfidence === rate ? 'bg-surface text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>{rate}%</button>)}
+                </div>
+                <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                  <input type="checkbox" checked={mcStages.tournament} onChange={(e) => setMcStages(s => ({ ...s, tournament: e.target.checked }))} className="accent-indigo-600 cursor-pointer" />
+                  <span className="font-semibold text-slate-700">Also compare wrapper strategies</span>
+                </label>
               </div>
               {simProgress && <div className="w-full"><ProgressBar value={simProgress.value} label={simProgress.label} /></div>}
             </div>
 
-            {simResult && (
-              <div className={`p-5 rounded-2xl shadow-xs border transition-all ${simResult.successRate >= 90 ? 'bg-emerald-50/90 border-emerald-200' : simResult.successRate >= 75 ? 'bg-amber-50/90 border-amber-200' : 'bg-rose-50/90 border-rose-200'}`}>
-                <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
-                  <div className="flex items-center gap-3.5">
-                    <div className={`p-3 rounded-2xl border ${simResult.successRate >= 90 ? 'bg-emerald-100 border-emerald-300 text-emerald-700' : simResult.successRate >= 75 ? 'bg-amber-100 border-amber-300 text-amber-700' : 'bg-rose-100 border-rose-300 text-rose-700'}`}>{simResult.successRate >= 90 ? <CheckCircle2 className="w-6 h-6" /> : <AlertTriangle className="w-6 h-6" />}</div>
-                    <div>
-                      <div className="flex items-center gap-2"><span className={`text-[11px] font-bold tracking-wider uppercase px-2 py-0.5 rounded-md ${simResult.type === 'optimize' ? 'bg-indigo-100 text-indigo-800' : 'bg-blue-100 text-blue-800'}`}>{simResult.title}</span><span className="text-xs text-slate-500 font-medium">{simResult.trials.toLocaleString()} trials · seed {mcSeed} · ±{(1.96 * simResult.standardError).toFixed(1)} pts</span></div>
-                      <div className="text-2xl font-black font-mono text-slate-900 mt-1">{formatGBP(simResult.spend)} <span className="text-sm font-normal text-slate-600">/ year net spend</span></div>
-                      {simResult.note && <div className="text-[11px] text-rose-700 font-semibold mt-1">{simResult.note}</div>}
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 w-full lg:w-auto text-xs border-t lg:border-t-0 border-slate-200/80 pt-3 lg:pt-0">
-                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Survival Rate</span><span className={`text-base font-black font-mono ${simResult.successRate >= 90 ? 'text-emerald-700' : simResult.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}`}>{simResult.successRate.toFixed(1)}%</span></div>
-                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Age of Failure</span><span className={`text-base font-black font-mono ${!simResult.medianFailAge ? 'text-emerald-700' : simResult.medianFailAge < nmpa ? 'text-rose-700' : 'text-amber-700'}`}>{simResult.medianFailAge ? `Age ${simResult.medianFailAge}` : 'None'}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono truncate">{simResult.medianFailAge ? `Median age of failed scenarios (earliest ${simResult.earliestFailAge})` : '100% Solvency'}</span></div>
-                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Pre-SIPP access failures</span><span className={`text-base font-black font-mono ${simResult.preNmpaFailRate > 5 ? 'text-rose-700' : 'text-slate-700'}`}>{simResult.preNmpaFailRate.toFixed(1)}%</span></div>
-                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">10th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-rose-700">{formatGBP(simResult.p10Terminal)}</span></div>
-                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">Median Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-blue-700">{formatGBP(simResult.medianTerminal)}</span>{ctx.pensionDeathTaxRate > 0 && <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">net of pension death tax {formatGBP(simResult.medianTerminalNet)}</span>}</div>
-                    <div className="bg-surface/80 p-3 rounded-xl border border-slate-200/80 shadow-2xs"><span className="text-slate-500 block mb-0.5">90th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-emerald-700">{formatGBP(simResult.p90Terminal)}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">median lifetime tax {formatGBP(simResult.medianLifetimeTax)}</span></div>
+            {(simResult || safeMaxResult) && (
+              <div className={`p-5 rounded-2xl shadow-xs border transition-all ${!simResult ? 'bg-slate-50 border-slate-200' : simResult.successRate >= 90 ? 'bg-emerald-50/90 border-emerald-200' : simResult.successRate >= 75 ? 'bg-amber-50/90 border-amber-200' : 'bg-rose-50/90 border-rose-200'}`}>
+                <div className="flex items-start gap-3.5">
+                  {simResult && (
+                    <div className={`p-3 rounded-2xl border shrink-0 ${simResult.successRate >= 90 ? 'bg-emerald-100 border-emerald-300 text-emerald-700' : simResult.successRate >= 75 ? 'bg-amber-100 border-amber-300 text-amber-700' : 'bg-rose-100 border-rose-300 text-rose-700'}`}>{simResult.successRate >= 90 ? <CheckCircle2 className="w-6 h-6" /> : <AlertTriangle className="w-6 h-6" />}</div>
+                  )}
+                  <div className="min-w-0 space-y-1.5">
+                    {simResult && (
+                      <p className="text-sm text-slate-900 leading-snug">
+                        Your <strong className="font-mono font-bold">{formatGBP(simResult.spend)}</strong> a year held in <strong className={`font-mono font-bold ${simResult.successRate >= 90 ? 'text-emerald-700' : simResult.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}`}>{simResult.successRate.toFixed(1)}%</strong> of {simResult.trials.toLocaleString()} paths.
+                      </p>
+                    )}
+                    {safeMaxResult && (
+                      <p className="text-sm text-slate-900 leading-snug">
+                        You could take up to <strong className="font-mono font-bold text-indigo-700">{formatGBP(safeMaxResult.spend)}</strong> a year and still clear {safeMaxResult.confidence}%
+                        {simResult && Math.abs(safeMaxResult.spend - simResult.spend) >= 250 && (
+                          <span className="text-slate-600">, {formatGBP(Math.abs(safeMaxResult.spend - simResult.spend))} a year {safeMaxResult.spend > simResult.spend ? 'more' : 'less'} than you entered</span>
+                        )}.
+                        {safeMaxResult.note && <span className="block text-[11px] text-rose-700 font-semibold mt-0.5">{safeMaxResult.note}</span>}
+                      </p>
+                    )}
+                    {tournamentBest && (
+                      <p className="text-sm text-slate-900 leading-snug">
+                        Best wrapper strategy: <strong>{tournamentBest.name}</strong> at <strong className="font-mono font-bold">{tournamentBest.stats.successRate.toFixed(1)}%</strong>
+                        {tournamentBaselinePlayer && tournamentBest.id !== 'baseline' && (
+                          <span className="text-slate-600">, {(tournamentBest.stats.successRate - tournamentBaselinePlayer.stats.successRate).toFixed(1)} points {tournamentBest.stats.successRate >= tournamentBaselinePlayer.stats.successRate ? 'above' : 'below'} your current split</span>
+                        )}.
+                      </p>
+                    )}
+                    {safeMaxStale && !mcBusy && (
+                      <button type="button" onClick={handleResolveSafeMax} className="text-[11px] text-blue-700 hover:text-blue-900 hover:underline font-semibold cursor-pointer">
+                        Solve again at {targetConfidence}% &rarr;
+                      </button>
+                    )}
+                    <p className="text-[11px] text-slate-500 font-mono pt-0.5">
+                      {MC_TRIALS.toLocaleString()} paths · seed {mcSeed}{simResult ? ` · ±${(1.96 * simResult.standardError).toFixed(1)} pts` : ''} · today&rsquo;s money
+                    </p>
                   </div>
                 </div>
-                {simResult.preNmpaFailRate > 0 && (
+                {simResult && simResult.preNmpaFailRate > 0 && (
                   <div className="mt-3.5 p-3 bg-rose-100/90 border border-rose-300 rounded-xl text-xs text-rose-950 flex items-start gap-2.5 shadow-2xs">
                     <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-                    <div><strong className="font-bold">Pre-Pension Bridge Exhaustion in {simResult.preNmpaFailRate.toFixed(1)}% of paths:</strong> non-pension investments (S&amp;S ISAs, other investments and cash) ran out while pension money was still locked (access age {nmpa}). Consider shifting contributions to your S&amp;S ISA, a later retirement age, or run the tournament below.</div>
+                    <div><strong className="font-bold">Pre-Pension Bridge Exhaustion in {simResult.preNmpaFailRate.toFixed(1)}% of paths:</strong> non-pension investments (S&amp;S ISAs, other investments and cash) ran out while pension money was still locked (access age {nmpa}). Consider shifting contributions to your S&amp;S ISA, a later retirement age, or the strategy comparison below.</div>
                   </div>
                 )}
               </div>
+            )}
+
+            {simResult && (
+              <details open={mcDetailOpen} onToggle={(e) => setMcDetailOpen(e.currentTarget.open)} className="bg-surface border border-slate-200/90 rounded-2xl shadow-xs">
+                <summary className="p-4 cursor-pointer text-xs font-bold text-slate-900 uppercase tracking-wider select-none">
+                  The detail behind it{safeMaxResult ? <span className="ml-2 font-normal normal-case tracking-normal text-slate-400">both runs, side by side</span> : null}
+                </summary>
+                <div className="px-5 pb-5 space-y-4">
+                  {[
+                    { key: 'entered', label: 'Your plan as entered', spend: simResult.spend, st: simResult, accent: 'blue' },
+                    ...(safeMaxResult ? [{ key: 'solved', label: `At the ${safeMaxResult.confidence}% safe maximum`, spend: safeMaxResult.spend, st: safeMaxResult.stats, accent: 'indigo' }] : [])
+                  ].map(row => (
+                    <div key={row.key} className="space-y-2">
+                      <div className="flex items-baseline gap-2">
+                        <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${row.accent === 'indigo' ? 'bg-indigo-100 text-indigo-800' : 'bg-blue-100 text-blue-800'}`}>{row.label}</span>
+                        <span className="font-mono text-xs font-bold text-slate-800">{formatGBP(row.spend)}/yr</span>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
+                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Survival Rate</span><span className={`text-base font-black font-mono ${row.st.successRate >= 90 ? 'text-emerald-700' : row.st.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}`}>{row.st.successRate.toFixed(1)}%</span></div>
+                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Age of Failure</span><span className={`text-base font-black font-mono ${!row.st.medianFailAge ? 'text-emerald-700' : row.st.medianFailAge < nmpa ? 'text-rose-700' : 'text-amber-700'}`}>{row.st.medianFailAge ? `Age ${row.st.medianFailAge}` : 'None'}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono truncate">{row.st.medianFailAge ? `Median of failed paths (earliest ${row.st.earliestFailAge})` : '100% Solvency'}</span></div>
+                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Pre-SIPP access failures</span><span className={`text-base font-black font-mono ${row.st.preNmpaFailRate > 5 ? 'text-rose-700' : 'text-slate-700'}`}>{row.st.preNmpaFailRate.toFixed(1)}%</span></div>
+                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">10th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-rose-700">{formatGBP(row.st.p10Terminal)}</span></div>
+                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Median Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-blue-700">{formatGBP(row.st.medianTerminal)}</span>{ctx.pensionDeathTaxRate > 0 && <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">net of pension death tax {formatGBP(row.st.medianTerminalNet)}</span>}</div>
+                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">90th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-emerald-700">{formatGBP(row.st.p90Terminal)}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">median lifetime tax {formatGBP(row.st.medianLifetimeTax)}</span></div>
+                      </div>
+                    </div>
+                  ))}
+                  <p className="text-[11px] text-slate-500 leading-relaxed">
+                    A path fails in any year that living costs or a one-off cost cannot be met from an accessible wrapper, or if the terminal pot ends below your bequest floor. A pre-SIPP access failure means pension money existed but was still locked. Paths are seeded, so the same seed reproduces the result exactly.
+                  </p>
+                </div>
+              </details>
             )}
 
             <WrapperStrategyTournament plan={plan} ctx={ctx} seed={mcSeed} scenarios={scenarios} activeScenarioId={activeScenarioId} state={tournament} setState={setTournament} cancelRef={tournamentCancelRef} onApplyStrategyToSandbox={handleApplyStrategyToSandbox} onApplyStrategyToPlan={handleApplyStrategyToPlan} onNavigateDocs={() => goToDoc('doc-tournament')} />
@@ -4214,27 +4359,28 @@ export default function App() {
         {activeTab === 'docs' && (
           <div className="space-y-6">
             <div id="doc-mc-buttons" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
-              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Dices className="w-4 h-4 text-blue-600" /> The Two Monte Carlo Buttons</h2>
-              <p className="text-xs text-slate-600 leading-relaxed">Both run the same engine on the same {MC_TRIALS.toLocaleString()} randomised market paths. They differ in which side of the equation is held fixed: one fixes your spending and reports the risk, the other fixes the risk and reports the spending.</p>
+              <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Dices className="w-4 h-4 text-blue-600" /> The Three Stages of a Monte Carlo Run</h2>
+              <p className="text-xs text-slate-600 leading-relaxed">One button runs all three, and each result appears as its stage finishes. The first two use the same engine on the same {MC_TRIALS.toLocaleString()} randomised market paths and differ only in which side of the equation is held fixed: one fixes your spending and reports the risk, the other fixes the risk and reports the spending. The third leaves both alone and changes where the money sits instead. The last two can be switched off if you only want the fast answer.</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
-                  <strong className="text-slate-800 block">Test Current Spend: "will this plan hold?"</strong>
-                  <p className="text-slate-500">Takes the target living expenditure from Plan Inputs exactly as entered and runs it through {MC_TRIALS.toLocaleString()} paths. The answer is a <strong>survival rate</strong>: the share of paths that funded every year to age {terminalAge} without running dry and finished above your bequest floor. Use it once you know roughly what you want to spend. The confidence selector does nothing here. This button reports the probability rather than targeting one.</p>
+                  <strong className="text-slate-800 block">Stage 1, always runs: "will this plan hold?"</strong>
+                  <p className="text-slate-500">Takes the target living expenditure from Plan Inputs exactly as entered and runs it through {MC_TRIALS.toLocaleString()} paths. The answer is a <strong>survival rate</strong>: the share of paths that funded every year to age {terminalAge} without running dry and finished above your bequest floor. Use it once you know roughly what you want to spend. This stage reports a probability rather than targeting one, so the confidence setting does not affect it.</p>
                 </div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
-                  <strong className="text-slate-800 block">Safe Max Annual Spend: "how much can I spend?"</strong>
-                  <p className="text-slate-500">Ignores your target figure and solves for the <strong>largest annual spend</strong> that still survives at the confidence level you pick. It bisects on the spending amount, re-running the full simulation at each step, which is why it takes longer than the first button. At 95% it finds the spend that fails in no more than 1 path in 20.</p>
+                  <strong className="text-slate-800 block">Stage 2, optional: "how much could I spend?"</strong>
+                  <p className="text-slate-500">Ignores your target figure and solves for the <strong>largest annual spend</strong> that still survives at the confidence level you pick. It bisects on the spending amount, re-running the full simulation at each step, which is why it takes longer than the first stage. At 95% it finds the spend that fails in no more than 1 path in 20. Because it describes a different spend from the one you entered, it gets its own line in the verdict and its own row of figures, rather than overwriting stage 1.</p>
                 </div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
-                  <strong className="text-slate-800 block">The confidence selector (85 / 90 / 95%)</strong>
-                  <p className="text-slate-500">Only affects Safe Max Annual Spend. It is the survival rate you are willing to accept, so a <em>lower</em> confidence returns a <em>higher</em> spending figure: 85% buys you more income now in exchange for a 1-in-7 chance of running short. 95% is the conventional planning benchmark.</p>
+                  <strong className="text-slate-800 block">The confidence setting (85 / 90 / 95%)</strong>
+                  <p className="text-slate-500">Only affects stage 2. It is the survival rate you are willing to accept, so a <em>lower</em> confidence returns a <em>higher</em> spending figure: 85% buys you more income now in exchange for a 1-in-7 chance of running short. 95% is the conventional planning benchmark. Changing it after a run offers to solve stage 2 again on its own, since nothing else depends on it.</p>
                 </div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
-                  <strong className="text-slate-800 block">Reading either result honestly</strong>
-                  <p className="text-slate-500">Every figure is in today's money. The headline carries a ± sampling error: at {MC_TRIALS.toLocaleString()} trials a difference smaller than that is noise, so treat 94.2% and 95.1% as the same answer. Check the <strong>pre-SIPP access failure</strong> line separately: a plan can survive overall while still stranding you before age {nmpa}, which is a bridging problem, not a saving-enough problem. Paths are seeded, so the same seed reproduces the result exactly; change the seed in Config to test a different draw of markets.</p>
+                  <strong className="text-slate-800 block">Stage 3, optional: "would a different split do better?"</strong>
+                  <p className="text-slate-500">Holds your spending and your budget fixed and re-splits the budget between wrappers, scoring each strategy on identical market paths. It is the slowest stage because it runs several full simulations, and two of its players search a range of candidates first. The methodology and the players are documented below.</p>
                 </div>
               </div>
-              <p className="text-[11px] text-slate-500 leading-relaxed">Neither button changes your plan. To change <em>where</em> the money goes rather than how much you spend, use the strategy tournament below them.</p>
+              <p className="text-xs text-slate-600 leading-relaxed"><strong className="text-slate-800">Reading any of it honestly.</strong> Every figure is in today&rsquo;s money. The headline carries a &plusmn; sampling error: at {MC_TRIALS.toLocaleString()} trials a difference smaller than that is noise, so treat 94.2% and 95.1% as the same answer. Check the <strong>pre-SIPP access failure</strong> line separately: a plan can survive overall while still stranding you before age {nmpa}, which is a bridging problem, not a saving-enough problem. A path counts as failed in any year that living costs or a one-off cost cannot be met from an accessible wrapper, or if the terminal pot ends below your bequest floor. Paths are seeded, so the same seed reproduces the result exactly; change the seed in Config to test a different draw of markets.</p>
+              <p className="text-[11px] text-slate-500 leading-relaxed">No stage changes your plan on its own. Applying a strategy from stage 3 is a separate, deliberate click.</p>
             </div>
 
             <div id="doc-tournament" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
