@@ -2839,7 +2839,9 @@ export default function App() {
               </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              <div className="flex items-center gap-1 bg-slate-100 p-1.5 rounded-xl border border-slate-200/80 flex-wrap">
+              {/* data-tabbar keeps these clickable while the in-app editor is on, so you can still move
+                  between tabs while editing; Alt-click edits a tab's own label. */}
+              <div data-tabbar className="flex items-center gap-1 bg-slate-100 p-1.5 rounded-xl border border-slate-200/80 flex-wrap">
                 {tabBtn('home', Home, 'Start Here')}
                 {tabBtn('inputs', Sliders, 'Plan Inputs')}
                 {tabBtn('config', Settings, 'Config & Assumptions')}

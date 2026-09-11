@@ -2,81 +2,50 @@
 /*
  * Applies a patch exported by the in-app editor to the source files.
  *
- *   node scripts/apply-edits.mjs path/to/retirement-planner-edits.json
+ *   node scripts/apply-edits.mjs path/to/planner-edits.json
  *   node scripts/apply-edits.mjs patch.json --dry-run
  *
- * The governing rule is that this never guesses. A copy edit is written only when its original text
- * occurs exactly once in App.jsx; zero occurrences (the text was dynamic, or the source has moved on)
- * and two or more (ambiguous) are both reported and skipped, and nothing is written unless every edit
- * in the patch can be placed. A half-applied patch would be far worse than a rejected one.
+ * Editing a piece of wording changes it everywhere it is displayed, which is what the preview in the
+ * browser already showed you: a label written once in the source but rendered down eight table rows is
+ * one edit, and a label written twice changes in both places. What it never touches is the same text
+ * appearing as code — `owner: 'Myself'` is a data value, not the label "Myself" — which is why the
+ * positions come from the shared extractor rather than from a substring search.
+ *
+ * Nothing is written unless every edit in the patch can be placed. A half-applied patch would leave the
+ * source in a state nobody asked for.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { findProse, normalise, decodeEntities, escapeFor, skeleton, looksLikeCode } from './extract-copy.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = path.resolve(HERE, '..');
 
-// JSX text is HTML-ish: the source writes &amp; and &rarr; where the DOM hands back & and →.
-const ENTITIES = [
-  ['&amp;', '&'], ['&lt;', '<'], ['&gt;', '>'], ['&quot;', '"'], ['&nbsp;', ' '],
-  ['&rarr;', '→'], ['&larr;', '←'], ['&mdash;', '—'], ['&ndash;', '–'],
-  ['&rsquo;', '’'], ['&lsquo;', '‘'], ['&hellip;', '…'], ['&times;', '×'],
-  ['&pound;', '£'], ['&deg;', '°'], ['&uarr;', '↑'], ['&darr;', '↓']
-];
-export const decodeEntities = (s) => ENTITIES.reduce((acc, [ent, ch]) => acc.split(ent).join(ch), s);
-// Only the characters that would break JSX get re-encoded; the rest are fine as literal UTF-8.
-const encodeForJsx = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\{/g, '&#123;').replace(/\}/g, '&#125;');
-
-/*
- * Every way the source might have spelled this text. The DOM hands back decoded characters, but the
- * source could have written any of them as an entity — and a caption with both "&" and "→" in it needs
- * both encoded at once, so the fully-encoded form has to be a candidate in its own right.
- */
-export function sourceForms(text) {
-  const forms = new Set([text, encodeForJsx(text)]);
-  const applicable = ENTITIES.filter(([, ch]) => text.includes(ch));
-  if (applicable.length) forms.add(applicable.reduce((acc, [ent, ch]) => acc.split(ch).join(ent), text));
-  for (const [ent, ch] of applicable) forms.add(text.split(ch).join(ent));
-  return [...forms];
-}
-
-// Find the one place `text` appears as source, trying each spelling it might have been written in.
-function locate(source, text) {
-  let ambiguous = null;
-  for (const needle of sourceForms(text)) {
-    const n = source.split(needle).length - 1;
-    if (n === 1) return { needle, count: 1 };
-    if (n > 1 && !ambiguous) ambiguous = { needle, count: n };
-  }
-  return ambiguous || { needle: null, count: 0 };
-}
-
-// How many times this text occurs in the source, by the same measure `locate` uses. Exported so the
-// editor's "used in N places" warning predicts exactly what applying the patch will do.
+// How many places this text is displayed. Exported so the editor can say "changes N places" and be right.
 export function occurrences(source, text) {
-  return locate(source, decodeEntities(text)).count;
+  return findProse(source, text).length;
 }
 
 function applyCopy(source, edits, report) {
   let out = source;
   for (const edit of edits) {
-    const before = decodeEntities(String(edit.before ?? ''));
-    const after = String(edit.after ?? '');
+    const before = normalise(decodeEntities(String(edit.before ?? '')));
+    const after = normalise(String(edit.after ?? ''));
     if (!before || before === after) { report.skipped.push({ ...edit, reason: 'unchanged' }); continue; }
-    const { needle, count } = locate(out, before);
-    if (count === 0) {
-      report.failed.push({ before, after, reason: 'not found in source — the text was probably a calculated value, not fixed copy' });
+    const hits = findProse(out, before);
+    if (!hits.length) {
+      report.failed.push({ before, after, reason: 'not shown anywhere in the source — the text was probably a calculated value, not fixed copy' });
       continue;
     }
-    if (count > 1) {
-      report.failed.push({ before, after, reason: `appears ${count} times in source, so the right one cannot be identified` });
-      continue;
+    // back to front, so replacing one occurrence does not shift the offsets of the ones before it
+    for (const hit of [...hits].reverse()) {
+      // escaped for the exact context it lands in, so no typed character can escape its string or its
+      // JSX text run — which is what makes it impossible for an edit to break the file
+      const replacement = escapeFor(hit.kind, after);
+      out = out.slice(0, hit.index) + replacement + out.slice(hit.index + hit.length);
     }
-    // re-encode to match how the original was written, so an edit does not change the escaping style
-    const replacement = needle === before ? after : encodeForJsx(after);
-    out = out.replace(needle, replacement);
-    report.applied.push({ before, after });
+    report.applied.push({ before, after, places: hits.length });
   }
   return out;
 }
@@ -144,6 +113,22 @@ export function applyPatch(patch, { root = DEFAULT_ROOT, write = true } = {}) {
   const nextApp = applyCopy(originalApp, patch.copy || [], report);
   let nextHtml = applyTokens(originalHtml, patch.tokens, report);
   nextHtml = applyFonts(nextHtml, patch.fonts, report);
+
+  /*
+   * The decisive safety check. With every piece of copy cut out, the file must be byte-for-byte what it
+   * was: same code, same structure, same string boundaries. If it is not, the edit reached past the text
+   * it was supposed to change and nothing at all gets written.
+   */
+  if (nextApp !== originalApp && skeleton(nextApp) !== skeleton(originalApp)) {
+    // much the commonest cause is new wording that reads as code, which the extractor then stops
+    // recognising as text at all; say so rather than leaving the refusal looking arbitrary
+    const codey = (patch.copy || []).filter(e => looksLikeCode(e.after)).map(e => e.after);
+    report.failed.push({
+      reason: codey.length
+        ? `new wording that reads as code cannot be written into the source: ${codey.map(c => JSON.stringify(c.slice(0, 60))).join(', ')}`
+        : 'the edit would have changed the code around the text, not just the text — refusing to write'
+    });
+  }
 
   // all or nothing: a partly-applied patch leaves the source in a state nobody asked for
   if (report.failed.length) {

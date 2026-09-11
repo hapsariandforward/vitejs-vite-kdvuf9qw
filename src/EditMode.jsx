@@ -2,18 +2,20 @@
  * In-app editing. Kept entirely separate from the app it edits: nothing in App.jsx knows this exists
  * beyond rendering <EditMode /> once, and no component has to thread edited copy through its props.
  *
- * How text editing works. Every edit is stored as a {before, after} pair keyed on the original text,
- * never on a DOM path or a source line — paths and line numbers go stale the moment either side changes,
- * whereas the text itself is what we ultimately have to find in the source anyway. Overrides are then
- * re-applied to the DOM after each React render by a MutationObserver. That is unusual, but it is the
- * right shape here: the alternative is threading a lookup through several hundred literal strings.
+ * Editing is by text, not by location. Changing a piece of wording changes it everywhere that wording is
+ * displayed — a status label written once but rendered down eight table rows is a single edit, and the
+ * preview shows all eight change at once because that is exactly what saving will do. Keying on the text
+ * rather than a DOM path or source line is also what makes an edit survive a re-render and a reload.
  *
- * What is offered for editing is decided by the manifest the Vite plugin extracts from the source, so a
+ * Overrides are re-applied to the DOM after each React render by a MutationObserver. That is unusual, but
+ * it is the right shape here: the alternative is threading a lookup through several hundred literals.
+ *
+ * What is offered for editing comes from the manifest the Vite plugin extracts from the source, so a
  * calculated figure is never presented as editable text that could not be written back.
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { EDITABLE, CAN_SAVE_TO_SOURCE } from 'virtual:editable-copy';
-import { Pencil, X, Check, Download, Undo2, Type, Save, AlertTriangle, Copy } from 'lucide-react';
+import { Pencil, X, Check, Download, Undo2, Type, Save, Info, Copy } from 'lucide-react';
 
 const STORAGE_KEY = 'rp_inline_edits_v1';
 // Writing to source changes files the dev server is watching, so HMR reloads the page a moment later and
@@ -53,28 +55,43 @@ const hexToRgb = (hex) => {
   return `${(n >> 16) & 255} ${(n >> 8) & 255} ${n & 255}`;
 };
 
+// JSX collapses a newline-and-indent inside a text run to one space, which is how the manifest stores it.
+const norm = (t) => (t || '').replace(/\s+/g, ' ').trim();
 const isEditableText = (text) => {
-  const t = (text || '').trim();
+  const t = norm(text);
   return t.length >= 2 && Object.prototype.hasOwnProperty.call(EDITABLE, t);
 };
-// A string the source uses twice cannot be rewritten unambiguously, so it is shown but refused.
-const isAmbiguous = (text) => (EDITABLE[(text || '').trim()] || 0) > 1;
+// How many places in the source this wording is written. All of them change together.
+const placesFor = (text) => EDITABLE[norm(text)] || 0;
+
+/*
+ * The text node under the pointer, rather than the element. A paragraph like
+ * `<p><strong>What it does:</strong> Models compound wealth…</p>` is two separate runs in the source and
+ * two separate text nodes in the DOM, so targeting the element would offer neither — and a run sitting
+ * beside an interpolated figure is its own node for the same reason.
+ */
+function textNodeAt(x, y) {
+  let node = null;
+  if (document.caretPositionFromPoint) {
+    const pos = document.caretPositionFromPoint(x, y);
+    node = pos && pos.offsetNode;
+  } else if (document.caretRangeFromPoint) {
+    const range = document.caretRangeFromPoint(x, y);
+    node = range && range.startContainer;
+  }
+  return node && node.nodeType === Node.TEXT_NODE ? node : null;
+}
 
 export default function EditMode() {
-  const [on, setOn] = useState(() => { try { return !!sessionStorage.getItem(SAVE_NOTE_KEY); } catch { return false; } });
+  const [on, setOn] = useState(false);
   const [panel, setPanel] = useState('text');          // 'text' | 'style'
   const [edits, setEdits] = useState(load);            // { originalText: newText }
   const [tokens, setTokens] = useState({});            // { theme: { token: 'r g b' } }
   const [fonts, setFonts] = useState({});              // { role: 'Family Name' }
-  const [target, setTarget] = useState(null);          // { node, original, rect }
+  const [target, setTarget] = useState(null);          // { original, places, rect }
+  const [hover, setHover] = useState(null);            // { rects, ambiguous }
   const [draft, setDraft] = useState('');
-  const [status, setStatus] = useState(() => {
-    try {
-      const note = sessionStorage.getItem(SAVE_NOTE_KEY);
-      if (note) return { kind: 'ok', text: note };
-    } catch { /* private mode */ }
-    return null;
-  });
+  const [status, setStatus] = useState(null);
   const overlayRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -85,16 +102,31 @@ export default function EditMode() {
   useEffect(() => { save(edits); }, [edits]);
 
   /*
-   * Writing both App.jsx and index.html makes the dev server reload twice in quick succession, so the
-   * save note is held for a few seconds rather than cleared the moment it is read — otherwise the first
-   * reload consumes it and the second shows nothing.
+   * Picking up the confirmation after a save.
+   *
+   * Saving rewrites files the dev server is watching, so it reloads the page — and it does so in the same
+   * instant the note is written, sometimes a beat before. A reloaded page can therefore start up just
+   * ahead of its own confirmation, which is why this watches for the note for a few seconds rather than
+   * reading it once at mount. Writing both App.jsx and index.html also reloads twice, so the note is left
+   * in place for a while instead of being cleared the moment it is first read.
    */
   useEffect(() => {
-    let note = null;
-    try { note = sessionStorage.getItem(SAVE_NOTE_KEY); } catch { /* private mode */ }
-    if (!note) return undefined;
-    const t = setTimeout(() => { try { sessionStorage.removeItem(SAVE_NOTE_KEY); } catch { /* ignore */ } }, 4000);
-    return () => clearTimeout(t);
+    const read = () => { try { return sessionStorage.getItem(SAVE_NOTE_KEY); } catch { return null; } };
+    let clear = null;
+    const settle = (note) => {
+      setStatus({ kind: 'ok', text: note });
+      setOn(true);
+      clear = setTimeout(() => { try { sessionStorage.removeItem(SAVE_NOTE_KEY); } catch { /* ignore */ } }, 5000);
+    };
+    const first = read();
+    if (first) { settle(first); return () => clearTimeout(clear); }
+    let tries = 0;
+    const poll = setInterval(() => {
+      const note = read();
+      if (note) { clearInterval(poll); settle(note); }
+      else if (++tries > 12) clearInterval(poll);
+    }, 300);
+    return () => { clearInterval(poll); if (clear) clearTimeout(clear); };
   }, []);
 
   /* ---------------------------------------------------------------- applying overrides to the DOM
@@ -110,11 +142,14 @@ export default function EditMode() {
     while ((node = walker.nextNode())) {
       if (overlayRef.current && overlayRef.current.contains(node)) continue;
       const raw = node.nodeValue;
-      const key = (raw || '').trim();
+      const key = norm(raw);
       if (!key) continue;
       const replacement = edits[key];
       if (replacement !== undefined && key !== replacement) {
-        pending.push([node, raw.replace(key, replacement)]);
+        // a run beside an interpolation owns its spacing (" different"), so keep the node's own edges
+        const lead = (raw.match(/^\s*/) || [''])[0];
+        const trail = (raw.match(/\s*$/) || [''])[0];
+        pending.push([node, lead + replacement + trail]);
       }
     }
     pending.forEach(([n, v]) => { n.nodeValue = v; });
@@ -163,31 +198,50 @@ export default function EditMode() {
   useEffect(() => {
     if (!on || panel !== 'text') return undefined;
     document.body.classList.add('inline-edit-on');
-    const overFn = (e) => {
-      const el = e.target;
-      if (overlayRef.current && overlayRef.current.contains(el)) return;
-      const text = directText(el);
-      el.classList.toggle('inline-edit-hot', isEditableText(text));
+    // The highlight is drawn as boxes over the run's client rects rather than by adding a class to an
+    // element: the run is usually only part of its parent, and wrapping it would mean mutating a DOM
+    // that React owns.
+    const rectsFor = (node) => {
+      const r = document.createRange();
+      r.selectNodeContents(node);
+      return [...r.getClientRects()].map(b => ({ top: b.top, left: b.left, width: b.width, height: b.height }));
     };
-    const outFn = (e) => e.target.classList && e.target.classList.remove('inline-edit-hot');
+    const inOverlay = (n) => overlayRef.current && overlayRef.current.contains(n.nodeType === 1 ? n : n.parentElement);
+    /*
+     * Tab labels are copy too, so they are editable — but if a plain click edited them, edit mode would
+     * trap you on whichever page you happened to be on. The tab bar therefore keeps working as a tab bar
+     * and Alt-click edits it, while everywhere else a plain click edits, including the text inside cards
+     * and buttons. The cost is that other buttons do not act while editing, which is the right trade:
+     * edit mode is for editing, but it must not stop you reaching the page you want to edit.
+     */
+    const inControl = (node) => !!(node.parentElement && node.parentElement.closest('[data-tabbar]'));
+    const wantsEdit = (node, e) => inControl(node) ? (e.altKey || e.metaKey) : true;
+    const moveFn = (e) => {
+      const node = textNodeAt(e.clientX, e.clientY);
+      if (!node || inOverlay(node) || !isEditableText(node.nodeValue)) { setHover(null); return; }
+      setHover({ rects: rectsFor(node), needsAlt: inControl(node) && !(e.altKey || e.metaKey) });
+    };
+    const leaveFn = () => setHover(null);
     const clickFn = (e) => {
-      const el = e.target;
-      if (overlayRef.current && overlayRef.current.contains(el)) return;
-      const text = directText(el);
-      if (!isEditableText(text)) return;
+      const node = textNodeAt(e.clientX, e.clientY);
+      if (!node || inOverlay(node) || !isEditableText(node.nodeValue)) return;
+      if (!wantsEdit(node, e)) { setHover(null); return; }
       e.preventDefault(); e.stopPropagation();
-      const key = text.trim();
-      setTarget({ el, original: key, rect: el.getBoundingClientRect() });
-      setDraft(edits[key] !== undefined ? edits[key] : key);
+      const key = norm(node.nodeValue);
+      const rects = rectsFor(node);
+      const rect = rects[0] || node.parentElement.getBoundingClientRect();
+      setTarget({ original: key, places: placesFor(key), rect: { ...rect, bottom: rect.top + rect.height } });
+      setDraft(edits[key] === undefined ? key : edits[key]);
+      setHover(null);
     };
-    document.addEventListener('mouseover', overFn, true);
-    document.addEventListener('mouseout', outFn, true);
+    document.addEventListener('mousemove', moveFn, true);
+    document.addEventListener('mouseleave', leaveFn, true);
     document.addEventListener('click', clickFn, true);
     return () => {
       document.body.classList.remove('inline-edit-on');
-      document.querySelectorAll('.inline-edit-hot').forEach(n => n.classList.remove('inline-edit-hot'));
-      document.removeEventListener('mouseover', overFn, true);
-      document.removeEventListener('mouseout', outFn, true);
+      setHover(null);
+      document.removeEventListener('mousemove', moveFn, true);
+      document.removeEventListener('mouseleave', leaveFn, true);
       document.removeEventListener('click', clickFn, true);
     };
   }, [on, panel, edits]);
@@ -239,10 +293,14 @@ export default function EditMode() {
       const report = await res.json();
       if (report.ok) {
         const n = (report.applied || []).length;
-        const note = `Saved ${n} change${n === 1 ? '' : 's'} to ${(report.files || []).join(' and ') || 'source'}. Commit them when you are happy.`;
+        const places = (report.applied || []).reduce((t, a) => t + (a.places || 0), 0);
+        const note = `Saved ${n} change${n === 1 ? '' : 's'}${places > n ? ` across ${places} places` : ''} to `
+          + `${(report.files || []).join(' and ') || 'source'}. Commit them when you are happy.`;
         try { sessionStorage.setItem(SAVE_NOTE_KEY, note); } catch { /* private mode */ }
         setEdits({}); setTokens({}); setFonts({});
-        setStatus({ kind: 'ok', text: note });
+        // The dev server reloads the page once it sees the files change; the confirmation is read back
+        // out of sessionStorage on the other side of that reload.
+        setStatus({ kind: 'busy', text: 'Saved — reloading to pick up the change…' });
       } else {
         setStatus({ kind: 'warn', text: `Nothing written. ${(report.failed || []).map(f => f.reason).join('; ') || report.error}` });
       }
@@ -270,6 +328,12 @@ export default function EditMode() {
   return (
     <>
       <EditStyles />
+      {/* hover highlight: one box per client rect, so a run wrapping across lines is outlined properly */}
+      {hover && !target && hover.rects.map((r, i) => (
+        <div key={i} aria-hidden="true"
+          style={{ position: 'fixed', top: r.top - 2, left: r.left - 2, width: r.width + 4, height: r.height + 4 }}
+          className={`z-[68] pointer-events-none rounded-[3px] border-2 ${hover.needsAlt ? 'border-dotted border-slate-400/80' : 'border-dashed border-amber-500/90'}`} />
+      ))}
       {/* inline editor popover, anchored to whatever was clicked */}
       {target && (
         <div className="fixed inset-0 z-[70]" onMouseDown={() => setTarget(null)}>
@@ -284,10 +348,10 @@ export default function EditMode() {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) commit();
               }}
               className="w-full p-2 bg-surface border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500 resize-y" />
-            {isAmbiguous(target.original) && (
-              <div className="flex items-start gap-1.5 text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2">
-                <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
-                <span>This exact wording is used in {EDITABLE[target.original]} places in the code, so an edit cannot be pinned to just this one. It will be refused on save — tell Claude instead.</span>
+            {target.places > 1 && (
+              <div className="flex items-start gap-1.5 text-[10px] text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-2">
+                <Info className="w-3 h-3 mt-0.5 shrink-0 text-slate-400" />
+                <span>This wording is written in {target.places} places in the code, and all of them will change together.</span>
               </div>
             )}
             <div className="flex items-center justify-between gap-2">
@@ -321,7 +385,11 @@ export default function EditMode() {
           <div className="p-3 max-h-[38vh] overflow-y-auto">
             {panel === 'text' ? (
               <div className="space-y-2">
-                <p className="text-[11px] text-slate-500">Click any wording on the page to change it. Text that is calculated — every figure, date and percentage — is not clickable, because there would be nothing fixed to write back.</p>
+                <div className="text-[11px] text-slate-500 space-y-1">
+                  <p>Click any wording on the page to change it. A change applies everywhere that wording is shown, so a label repeated down a column changes in every row at once.</p>
+                  <p>The tabs at the top keep working while you edit, so you can go to the page you want — hold <kbd className="px-1 py-0.5 rounded border border-slate-300 bg-surface font-sans text-[10px]">Alt</kbd> and click to edit a tab's own name. Other buttons do not act while edit mode is on.</p>
+                  <p className="text-slate-400">Two kinds of text are deliberately not clickable: <strong className="font-semibold text-slate-500">calculated values</strong> — every figure, date and percentage — and <strong className="font-semibold text-slate-500">words the model also uses as data</strong>, like a wrapper or policy name, where renaming the label would stop your saved scenarios loading. Ask Claude for those and they can be changed properly.</p>
+                </div>
                 {editCount === 0 ? null : (
                   <ul className="space-y-1.5">
                     {Object.entries(edits).map(([before, after]) => (
@@ -330,7 +398,7 @@ export default function EditMode() {
                           <span className="block text-slate-400 line-through truncate">{before}</span>
                           <span className="block text-slate-900 font-semibold">{after}</span>
                         </span>
-                        {isAmbiguous(before) && <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" title="Used in more than one place — will be refused on save" />}
+                        {placesFor(before) > 1 && <span className="text-[10px] text-slate-400 shrink-0 mt-0.5 font-semibold" title={`Written in ${placesFor(before)} places in the code — all change together`}>&times;{placesFor(before)}</span>}
                         <button type="button" onClick={() => revertOne(before)} title="Undo this one"
                           className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 cursor-pointer shrink-0"><Undo2 className="w-3.5 h-3.5" /></button>
                       </li>
@@ -402,17 +470,9 @@ export default function EditMode() {
   );
 }
 
-// text belonging to this element rather than to a child, so clicking a paragraph does not match its container
-function directText(el) {
-  if (!el || !el.childNodes) return '';
-  const own = [...el.childNodes].filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.nodeValue).join('').trim();
-  return own;
-}
-
 function EditStyles() {
   return (
     <style>{`
-      body.inline-edit-on .inline-edit-hot { outline: 2px dashed rgb(217 119 6 / 0.9); outline-offset: 2px; cursor: text; border-radius: 3px; }
       body.inline-edit-on { cursor: default; }
     `}</style>
   );

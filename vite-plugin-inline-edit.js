@@ -1,11 +1,10 @@
 /*
  * In-app editing support, split into two independent halves.
  *
- * 1. A virtual module (`virtual:editable-copy`) listing every static prose string in the UI source,
- *    with how many times each occurs. The editor uses it to decide what is safe to offer for editing:
- *    a string that is not in the manifest is dynamic (a computed figure, a date) and editing it would
- *    have nothing to write back to; a string occurring more than once cannot be rewritten unambiguously.
- *    It is generated at dev-server start and at build time, so a deployed copy carries it too.
+ * 1. A virtual module (`virtual:editable-copy`) listing every piece of displayed copy in the UI source,
+ *    with how many places each is shown from. The editor uses it to decide what to offer for editing: a
+ *    string that is not in the manifest is dynamic (a computed figure, a date) and would have nothing to
+ *    write back to. It is generated at dev-server start and at build time, so a deployed copy carries it.
  *
  * 2. A dev-only endpoint that applies a patch straight to the source files. It exists only under
  *    `vite dev` — a built site has no server to write with, and the editor falls back to exporting the
@@ -13,73 +12,24 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { decodeEntities, occurrences } from './scripts/apply-edits.mjs';
+import { extractProse } from './scripts/extract-copy.mjs';
 
 const VIRTUAL_ID = 'virtual:editable-copy';
 const RESOLVED_ID = '\0' + VIRTUAL_ID;
 
 /*
- * Pull the prose out of the JSX. This is deliberately a scanner rather than a parser: it only needs to
- * recognise text sitting between two tags, and being conservative costs nothing — a string it misses is
- * simply not offered for editing, which is a far better failure than offering one it cannot write back.
- */
-// `a > b && c < d` in the engine looks exactly like JSX text to a naive scan, so the text must be
-// followed by a closing tag and must not read like an expression.
-const CODE_SMELL = /&&|\|\||=>|[=!<>]==?|\breturn\b|\bconst\b|\bfunction\b|\);|\.\w+\(|\$\{/;
-
-export function extractEditableStrings(source) {
-  const counts = new Map();
-  // text sitting immediately before a closing tag, with no braces (interpolation) and no nested markup
-  const re = />([^<>{}\n]+)<\//g;
-  let m;
-  while ((m = re.exec(source)) !== null) {
-    const text = m[1].trim();
-    if (text.length < 2) continue;
-    // needs to read as prose: at least two consecutive letters, and no expression syntax
-    if (!/[A-Za-z]{2}/.test(text)) continue;
-    if (CODE_SMELL.test(text)) continue;
-    counts.set(text, (counts.get(text) || 0) + 1);
-  }
-  return counts;
-}
-
-// String attributes worth editing (tooltips and placeholders are user-visible copy too).
-export function extractEditableAttributes(source) {
-  const counts = new Map();
-  const re = /\b(?:placeholder|title|aria-label)="([^"\n{}]+)"/g;
-  let m;
-  while ((m = re.exec(source)) !== null) {
-    const text = m[1].trim();
-    if (text.length < 2 || !/[A-Za-z]{2}/.test(text)) continue;
-    if (CODE_SMELL.test(text)) continue;
-    counts.set(text, (counts.get(text) || 0) + 1);
-  }
-  return counts;
-}
-
-/*
- * The manifest is keyed on what the browser will show, not on what the source says: JSX writes
- * `Bed &amp; SIPP` where the DOM hands back `Bed & SIPP`, and the editor matches against the DOM.
- * The entity handling and the occurrence count both come from the applier, so the editor's warning and
- * the applier's refusal can never disagree.
+ * The manifest is keyed on what the browser shows, and its count is how many places in the source that
+ * text is *displayed* — not how many times the characters appear. "Myself" is written seventeen times in
+ * the source but shown in four places, and only those four are an edit's business. The applier uses the
+ * same extractor, so the count the editor shows is exactly the number of places a save will change.
  */
 function buildManifest(root) {
   const file = path.join(root, 'src', 'App.jsx');
   let source = '';
   try { source = fs.readFileSync(file, 'utf8'); } catch { return { strings: {}, generatedAt: null }; }
-  const counts = extractEditableStrings(source);
-  for (const [k, v] of extractEditableAttributes(source)) counts.set(k, (counts.get(k) || 0) + v);
-  /*
-   * The count recorded is how many times the text occurs anywhere in the source, not how many times it
-   * occurs as JSX text — that is the measure the applier refuses on. "Myself" reads as a single label on
-   * screen but appears dozens of times across the file, and the warning has to say so.
-   */
-  const out = {};
-  for (const k of counts.keys()) {
-    const shown = decodeEntities(k);
-    out[shown] = occurrences(source, shown);
-  }
-  return { strings: out, generatedAt: new Date().toISOString() };
+  const strings = {};
+  for (const r of extractProse(source)) strings[r.shown] = (strings[r.shown] || 0) + 1;
+  return { strings, generatedAt: new Date().toISOString() };
 }
 
 export default function inlineEdit() {
@@ -98,7 +48,8 @@ export const GENERATED_AT = ${JSON.stringify(manifest.generatedAt)};
 export const CAN_SAVE_TO_SOURCE = ${JSON.stringify(isDev)};
 `;
     },
-    // rebuild the manifest when the source changes, so newly added copy becomes editable without a restart
+    // Rebuild the manifest when the source changes, so newly added copy becomes editable without a restart.
+    // Vite reloads the page itself afterwards, which is what picks the edit up.
     handleHotUpdate({ file, server }) {
       if (!file.endsWith(path.join('src', 'App.jsx'))) return;
       const mod = server.moduleGraph.getModuleById(RESOLVED_ID);
