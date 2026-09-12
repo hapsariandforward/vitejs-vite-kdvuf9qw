@@ -166,8 +166,8 @@ const Z90 = 1.2815515655446004;
 const Z75 = 0.6744897501960817;
 // the bands the UI will draw, each with the share of outcomes it claims to sit outside
 const BAND_QUANTILES = {
-  quartile: { z: Z75, label: '1 in 4', lowPct: '25th', highPct: '75th' },
-  decile: { z: Z90, label: '1 in 10', lowPct: '10th', highPct: '90th' }
+  quartile: { z: Z75, button: 'Show upper and lower quartiles', short: 'Quartiles', label: '1 in 4', lowPct: '25th', highPct: '75th' },
+  decile: { z: Z90, button: 'Show 10th and 90th percentiles', short: '10th / 90th', label: '1 in 10', lowPct: '10th', highPct: '90th' }
 };
 
 /*
@@ -202,12 +202,11 @@ function luckyBand(real, vol, years, sigmaParam = 0) {
  * The lucky / unlucky CURVE: the pot held at each age if returns arrived evenly at that age's own
  * quantile rate.
  *
- * The horizon is the whole difficulty, and getting it wrong is why this was removed from the app once
- * already. quantileRate's spread is √(sp² + σ²/T), which narrows as T grows, so no single rate can
- * describe the whole chart — compounding a 45-year rate across the first five years understates the early
- * spread by about a factor of three. Measured against the simulation, a fixed-rate band is 24–29% out at
- * age 50 in pure accumulation, where sequence risk cannot possibly be the cause. Re-deriving the rate at
- * every age brings that to 2–3% across accumulation and most of drawdown.
+ * The horizon is the whole difficulty. quantileRate's spread is √(sp² + σ²/T), which narrows as T grows,
+ * so no single rate can describe the whole chart — compounding a 45-year rate across the first five years
+ * understates the early spread by about a factor of three. Measured against the simulation, a fixed-rate
+ * band is 24–29% out at age 50 in pure accumulation, where sequence risk cannot possibly be the cause.
+ * Re-deriving the rate at every age brings that to 2–3% across accumulation and most of drawdown.
  *
  * Cost is O(T²) step-years: one deterministic run per horizon, keeping only that horizon's own row. About
  * 19ms for both edges of a 45-year plan, which is inside a frame and cheap enough to recompute as the
@@ -1617,26 +1616,65 @@ function monteCarlo(planOrCtx, { trials = 5000, seed = 12345, spendOverride = nu
 
 /*
  * Safe maximum spend: largest spend (rounded to £250) whose success rate meets targetRate.
- * Uses common random numbers across candidates so the success curve is monotone and the
- * bisection is sound; the upper bound grows adaptively instead of being capped at £150k.
+ *
+ * Two stages, and the second one is not optional. A cheap bisection on a few hundred paths finds the
+ * neighbourhood; a verification pass on the full sample then walks the answer down until the rate we are
+ * going to PRINT actually clears the target.
+ *
+ * The second stage exists because searching and reporting on different samples is how a solver quietly
+ * lies. Bisecting on a small sample selects, among the spends near the boundary, whichever one that
+ * sample happened to flatter - the winner's curse - so re-measuring on a fresh sample regresses, and
+ * always downward, because the selection was upward. Measured on the earlier version, which searched on
+ * 400 paths with `seed` and reported on 5,000 with `seed + 1`: all twelve of twelve test fixtures came
+ * back 0.5 to 2.4 points BELOW the target the user had asked for. A "95% safe spend" surviving 92.6% of
+ * paths is not a rounding error, it is the wrong answer to the question.
+ *
+ * So: one seed throughout (pathsForSeed builds path i from seed + i·7919, so the search set is a genuine
+ * prefix of the final set, not a different draw), and the returned stats are the ones that were checked.
+ * The contract is that successRate >= targetRate, or spend is 0 and `note` says why.
  */
-function optimizeSpend(planOrCtx, { targetRate = 90, seed = 12345, searchTrials = 400, finalTrials = 5000, onProgress = null } = {}) {
+function optimizeSpend(planOrCtx, { targetRate = 90, seed = 12345, searchTrials = 400, finalTrials = 5000, verifySteps = 6, onProgress = null } = {}) {
   const ctx = planOrCtx && planOrCtx.P ? planOrCtx : buildContext(planOrCtx);
   const paths = pathsForSeed(seed, searchTrials, ctx.totalYears);
   const rateAt = (spend) => { let s = 0; for (const zs of paths) if (runTrial(ctx, zs, spend).survived) s++; return (s / searchTrials) * 100; };
-  let low = 0;
-  if (rateAt(0) < targetRate) return { spend: 0, ...monteCarlo(ctx, { trials: finalTrials, seed: seed + 1, spendOverride: 0 }), note: 'Even zero spending fails the target (pre-SIPP access gap or one-off costs).' };
-  let high = Math.max(20000, ctx.targetSpend * 2, 150000);
-  let guard = 0;
+  const full = (spend) => monteCarlo(ctx, { trials: finalTrials, seed, spendOverride: spend });
+
+  if (rateAt(0) < targetRate) return { spend: 0, ...full(0), targetRate, note: 'Even zero spending fails the target (pre-SIPP access gap or one-off costs).' };
+
+  // stage 1: cheap bracket
+  let low = 0, high = Math.max(20000, ctx.targetSpend * 2, 150000), guard = 0;
   while (rateAt(high) >= targetRate && guard++ < 8) { low = high; high *= 2; }
   for (let iter = 0; iter < 14; iter++) {
     const mid = round250((low + high) / 2);
     if (mid <= low || mid >= high) break;
     if (rateAt(mid) >= targetRate) low = mid; else high = mid;
-    if (onProgress) onProgress((iter + 1) / 14);
+    if (onProgress) onProgress(0.6 * ((iter + 1) / 14));
   }
-  const optimalSpend = round250(low);
-  return { spend: optimalSpend, ...monteCarlo(ctx, { trials: finalTrials, seed: seed + 1, spendOverride: optimalSpend }) };
+
+  // stage 2: bisect down on the full sample until the printed rate clears the target
+  let hi = round250(low);                       // believed to pass, unverified
+  let stats = full(hi);
+  if (stats.successRate >= targetRate) {
+    if (onProgress) onProgress(1);
+    // Zero can legitimately BE the answer: spending nothing clears the target but nothing above it does.
+    // That is a different statement from "not even zero works", and saying £0 without which one it is
+    // leaves the tab showing a bare zero with no reason attached.
+    return hi > 0
+      ? { spend: hi, ...stats, targetRate }
+      : { spend: 0, ...stats, targetRate, note: `No spending above zero clears ${targetRate}%. The plan holds only while nothing is drawn from it.` };
+  }
+  let lo = 0, best = { spend: 0, stats: full(0) };
+  for (let i = 0; i < verifySteps; i++) {
+    const mid = round250((lo + hi) / 2);
+    if (mid <= lo || mid >= hi) break;
+    const s = full(mid);
+    if (s.successRate >= targetRate) { lo = mid; best = { spend: mid, stats: s }; } else hi = mid;
+    if (onProgress) onProgress(0.6 + 0.4 * ((i + 1) / verifySteps));
+  }
+  if (onProgress) onProgress(1);
+  return best.stats.successRate >= targetRate
+    ? { spend: best.spend, ...best.stats, targetRate }
+    : { spend: 0, ...best.stats, targetRate, note: 'Even zero spending fails the target (pre-SIPP access gap or one-off costs).' };
 }
 
 // ---------------------------------------------------------------- financial helpers used by the tournament
@@ -3048,8 +3086,7 @@ export default function App() {
   // so a selection survives a trip to another tab.
   const [compareIds, setCompareIds] = useState([]);
   const [compareSort, setCompareSort] = useState({ key: null, dir: 'desc' });
-  // One sandbox, on the Projection tab. It used to be rendered on two tabs with separate open/closed
-  // state; there is only one chart to test against now, so there is only one panel and one flag.
+  // One sandbox, on the Projection tab, beneath the chart it edits.
   const [sandboxOpen, setSandboxOpen] = useState(true);
 
   useEffect(() => { safeStorageSet(STORAGE_KEY, JSON.stringify(plan)); }, [plan]);
@@ -3290,11 +3327,9 @@ export default function App() {
    * The Monte Carlo fan: the 10th to 90th percentile of simulated wealth at every year, not a line any
    * one path follows. `bands` only exists when a run asked runTrial to keep its paths, which is stage 1.
    *
-   * It shares the trajectory chart's axes rather than owning its own. That used to be impossible - the
-   * spread of 5,000 outcomes reaches far above a single expected curve, so one axis flattened the other -
-   * and it is worth being clear that nothing about that changed. The fan still sets the ceiling and the
-   * expected line still sits low against it. That is the correct picture: an expected path is not the
-   * middle of the distribution, and putting them on one axis is what makes it visible.
+   * It shares the chart's axes rather than owning its own, so the two ranges can be read against each
+   * other. The fan sets the ceiling and the expected line sits low against it, which is the correct
+   * picture rather than a scaling fault: one smooth curve accounts for very little of the distribution.
    */
   const fanBands = simResult?.bands || null;
   const fanData = useMemo(
@@ -3319,8 +3354,7 @@ export default function App() {
     // and so must the lucky edge, which by construction sits above everything else on the chart
     if (bandData) bandData.forEach(d => { if (d.hi > max) max = d.hi; });
     // The simulated fan reaches highest of all - its 90th percentile is a genuine tail, not a smooth
-    // curve - which is why these two charts used to need separate y-axes. On one axis it simply sets the
-    // ceiling, and the expected line reading low against it is the honest picture rather than a defect.
+    // curve - so it sets the ceiling for everything else on the chart.
     if (fanVisible) fanVisible.forEach(d => { if (d.p90 > max) max = d.p90; });
     return Math.max(max * 1.08, 100000);
   }, [visibleData, activeSeries, isSandboxModified, sandboxTimeline, compareRuns, effectiveMaxVisibleAge, bandData, fanVisible]);
@@ -4736,8 +4770,8 @@ export default function App() {
 
             <div className="p-4 bg-blue-50/80 border border-blue-200 rounded-2xl text-xs text-slate-700 space-y-1.5 shadow-2xs">
               <div className="flex items-center gap-2 font-bold text-blue-950 text-sm"><Layers className="w-4 h-4 text-blue-600" /> Projection &amp; Sandbox</div>
-              <p className="leading-relaxed"><strong>One chart, three readings of the same plan.</strong> The <strong>expected</strong> path compounds one steady real rate per wrapper and redraws as you type. The <strong>modelled</strong> band puts a range either side of it, also live. The <strong>simulated</strong> fan is the range read off {MC_TRIALS.toLocaleString()} randomised paths, and costs a run. They share an axis on purpose: an expected path is not the middle of a distribution, and the gap between the modelled band and the simulated fan is sequence risk.</p>
-              <p className="text-slate-500 text-[11px] leading-relaxed"><strong>About the modelled band.</strong> These curves were once removed for being inaccurate, and the reason turned out to be how they were drawn rather than what they were: a single rate held across the whole chart. The quantile rate depends on the horizon &mdash; the spread is &radic;(sp&sup2; + &sigma;&sup2;/T), which narrows as T grows &mdash; so a 45-year rate compounded across the first five years understates the early spread threefold, and a fixed-rate band measured 24&ndash;29% away from the simulation at age 50, in pure accumulation, where sequence risk cannot be the cause. Re-deriving the rate at every age brings that to 2&ndash;3%, which is what is drawn here.</p>
+              <p className="leading-relaxed"><strong>One chart, three readings of the same plan.</strong> The <strong>expected</strong> path compounds one steady real rate per wrapper and redraws as you type. The <strong>rate-based</strong> band puts a range either side of it, also live. The <strong>Monte Carlo</strong> range is read off {MC_TRIALS.toLocaleString()} randomised paths and costs a run. They share an axis on purpose, and the gap between them is sequence risk.</p>
+              <p className="text-slate-500 text-[11px] leading-relaxed"><strong>About the rate-based band.</strong> Each edge re-derives its rate at every age, because the spread of an annualised return is &radic;(sp&sup2; + &sigma;&sup2;/T) and narrows as the horizon lengthens. A single rate held across the whole chart would be right only at its own horizon &mdash; out by 24&ndash;29% at age 50 on a 45-year plan. Re-derived per age, the band lands within 2&ndash;3% of the Monte Carlo.</p>
               <p className={`text-[11px] font-semibold ${deterministicVerdict.survived ? 'text-emerald-700' : 'text-rose-700'}`}>
                 {deterministicVerdict.survived ? `Expected path survives to ${terminalAge}` : `Expected path fails at age ${deterministicVerdict.failAge} (${deterministicVerdict.failReason === 'pre-access' ? 'pre-SIPP access bridge exhausted' : deterministicVerdict.failReason === 'floor' ? 'below the bequest floor' : 'spending shortfall'})`}; lifetime tax {formatGBP(deterministicVerdict.lifetimeTax)}{P.cgtEnabled ? ' (income tax + CGT)' : ''}.
               </p>
@@ -4748,14 +4782,18 @@ export default function App() {
               </div>
             </div>
 
-            <div className="bg-surface border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-slate-500 font-semibold">Active View:</span>
-                {(isCouple ? ['Combined', 'Myself', 'Partner'] : ['Combined']).map(p => (
-                  <button key={p} onClick={() => setPlan(prev => ({ ...prev, activeProfileView: p }))} className={`px-3 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ${plan?.activeProfileView === p ? 'bg-blue-600 text-white shadow-xs' : 'bg-slate-100 text-slate-600 hover:text-slate-900'}`}>{p}</button>
-                ))}
+            {/* Only a couple has anything to switch between; on a single plan the one option is the only
+                option, so the control is noise. */}
+            {isCouple && (
+              <div className="bg-surface border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-500 font-semibold">Whose money:</span>
+                  {['Combined', 'Myself', 'Partner'].map(p => (
+                    <button key={p} onClick={() => setPlan(prev => ({ ...prev, activeProfileView: p }))} className={`px-3 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ${plan?.activeProfileView === p ? 'bg-blue-600 text-white shadow-xs' : 'bg-slate-100 text-slate-600 hover:text-slate-900'}`}>{p}</button>
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Expected Terminal Pot</div><div className="text-2xl font-black font-mono text-blue-600 mt-2">{formatGBP(chartDisplayData[chartDisplayData.length - 1]?.expected)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Target className="w-3.5 h-3.5 text-blue-600" /> Constant expected real growth to age {terminalAge}</div></div>
@@ -4779,14 +4817,14 @@ export default function App() {
                 </div>
                 <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
                   <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 px-1 py-1 rounded-xl text-xs">
-                    <span className="text-slate-500 px-1.5 whitespace-nowrap" title="Modelled from the return matrix. Live, no run needed.">Modelled:</span>
-                    {[['quartile', '1 in 4'], ['decile', '1 in 10'], ['off', 'Off']].map(([k, label]) => (
-                      <button key={k} type="button" onClick={() => setBandMode(k)} title={k === 'quartile' ? 'The 25th and 75th percentile: what BlackRock publish' : k === 'decile' ? 'The 10th and 90th percentile: matches the simulated fan' : 'Expected line only'}
+                    <span className="text-slate-500 px-1.5 whitespace-nowrap" title="Compounded from the return matrix. Live, no run needed.">Rate based:</span>
+                    {[['quartile', BAND_QUANTILES.quartile.short, BAND_QUANTILES.quartile.button], ['decile', BAND_QUANTILES.decile.short, BAND_QUANTILES.decile.button], ['off', 'Off', 'Expected line only']].map(([k, label, title]) => (
+                      <button key={k} type="button" onClick={() => setBandMode(k)} title={title}
                         className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${bandMode === k ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}>{label}</button>
                     ))}
                   </div>
                   <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 px-1 py-1 rounded-xl text-xs">
-                    <span className="text-slate-500 px-1.5 whitespace-nowrap">Simulated:</span>
+                    <span className="text-slate-500 px-1.5 whitespace-nowrap">Monte Carlo:</span>
                     <button type="button" onClick={() => fanData.length ? setShowFan(!showFan) : handleRunAll()} disabled={mcBusy}
                       title={fanData.length ? 'The 10th to 90th percentile read off the simulated paths themselves' : 'Run the simulation to draw this'}
                       className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${showFan && fanData.length ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}>
@@ -4855,17 +4893,17 @@ export default function App() {
               {fanPaths && (
                 <p className="text-[11px] text-slate-500 leading-relaxed pt-1">
                   <span className="inline-flex items-center gap-1.5 mr-1.5 align-middle"><span className="w-4 h-2.5 rounded-sm inline-block" style={{ background: cp.fanBand, border: `1px solid ${cp.fanEdge}` }} /></span>
-                  <strong className="text-slate-700">Simulated, 10th to 90th percentile:</strong> where {simResult.trials.toLocaleString()} randomised paths actually put the pot at each age, spending {formatGBP(simResult.spend)} a year, with the median through the middle. No single path follows any of those lines and none is a forecast &mdash; each is a percentile of where the paths had landed by that age, so the right-hand edge is the same 10th, 50th and 90th percentile pot reported below.{' '}
+                  <strong className="text-slate-700">Monte Carlo, 10th to 90th percentile:</strong> where {simResult.trials.toLocaleString()} randomised paths actually put the pot at each age, spending {formatGBP(simResult.spend)} a year, with the median through the middle. No single path follows any of those lines and none is a forecast &mdash; each is a percentile of where the paths had landed by that age, so the right-hand edge is the same 10th, 50th and 90th percentile pot reported below.{' '}
                   {fanRuinAge !== null
                     ? <><strong className="text-rose-700">Its lower edge reaches zero at age {fanRuinAge}:</strong> one plan in ten has run dry by then, which is the statement no smooth curve can make.</>
                     : <><strong className="text-emerald-700">Its lower edge never reaches zero:</strong> more than nine plans in ten still hold something at age {terminalAge}.</>}
-                  {bandPaths ? <> The dashed edges are the modelled band described below; the gap between the two is sequence risk.</> : null}
+                  {bandPaths ? <> The dashed edges are the rate-based band described below; the gap between the two is sequence risk.</> : null}
                 </p>
               )}
               {bandCurves && bandSpec && (
                 <p className="text-[11px] text-slate-500 leading-relaxed pt-1">
                   <span className="inline-flex items-center gap-1.5 mr-1.5 align-middle"><span className="w-4 h-2.5 rounded-sm inline-block" style={{ background: cp.fanBand, border: `1px solid ${cp.fanEdge}` }} /></span>
-                  <strong className="text-slate-700">{bandSpec.lowPct} to {bandSpec.highPct} percentile:</strong> {bandMode === 'quartile' ? <>outcomes better and worse than this happen about {bandSpec.label} either way. {plan?.riskSource === 'blackrock2026' ? <>These are the quartiles BlackRock publish, not an extrapolation.</> : <>Quartiles, from the return matrix in Config.</>}</> : <>{bandSpec.label} either way, the same percentiles the Monte Carlo fan is drawn at, so the two can be compared directly.</>} Each edge re-derives its rate at every age, because the spread of an annualised return narrows the longer you hold.{' '}
+                  <strong className="text-slate-700">{bandSpec.lowPct} to {bandSpec.highPct} percentile:</strong> {bandMode === 'quartile' ? <>outcomes better and worse than this happen about {bandSpec.label} either way. {plan?.riskSource === 'blackrock2026' ? <>These are the quartiles BlackRock publish, not an extrapolation.</> : <>Quartiles, from the return matrix in Config.</>}</> : <>{bandSpec.label} either way, the same percentiles the Monte Carlo is drawn at, so the two can be compared directly.</>} Each edge re-derives its rate at every age, because the spread of an annualised return narrows the longer you hold.{' '}
                   {bandCurves.lo.failAge !== null
                     ? <><strong className="text-rose-700">The lower edge runs dry at age {bandCurves.lo.failAge}.</strong> Past that point treat it as broken rather than as a floor: a smooth line cannot go below zero and the real 1-in-{bandMode === 'quartile' ? '4' : '10'} outcome can stay there. </>
                     : <>The lower edge is the one to distrust first: it cannot run dry, so on a plan under strain it sits above the truth. Measured at the final age, it is 5.5% optimistic on a plan surviving 99.5% of the time, 16.2% at 97.3%, and 98% at 91.3% &mdash; the weaker the plan, the more flattering this line. </>}
@@ -5236,10 +5274,10 @@ export default function App() {
                 </div>
               </div>
               <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1 text-xs">
-                <strong className="text-slate-800 block">The chart: one expected path, two ranges</strong>
+                <strong className="text-slate-800 block">One expected path, two ranges</strong>
                 <p className="text-slate-500">Stage 1 keeps every simulated path, not just its ending, so the chart can show where all {MC_TRIALS.toLocaleString()} of them stood at each age: the shaded band is the 10th to 90th percentile, the solid line the median. Read the right-hand edge and you get the same three pot figures reported underneath it, because both use the same quantile. No path follows any of the three lines, and the band widens with age because nothing cancels out the early years.</p>
-                <p className="text-slate-500">It shares an axis with the expected path and the modelled band, which is deliberate and used to be impossible: a fan of {MC_TRIALS.toLocaleString()} outcomes reaches far above a single smooth curve, so on separate charts each one flattened the other. What that shared axis shows is how little of the distribution the expected line accounts for. The line itself is well placed &mdash; it tracks the simulated median to within a few percent (measured &minus;3.5%, &minus;1.5% and +0.4% across three households), because the engine compounds the same rate it draws around as the median of each year&rsquo;s return. The point is the distance above and below it. Read on its own, a single curve looks like an answer; against the fan it is visibly one thread of a very wide cloth.</p>
-                <p className="text-slate-500">The modelled band answers the same question more cheaply, as a shaded band either side of the expected line, and it is worth knowing exactly how the two differ. That band once drew both edges at a single steady rate, and was removed for being badly wrong: its lower edge finished a mean 23% above the simulated 10th-percentile pot, and 70% above it at worst. The diagnosis at the time blamed sequence-of-returns risk, and that was only half right. A fixed-rate band is also 24&ndash;29% out at age 50 in pure accumulation, years before any withdrawal &mdash; so something else was wrong, and it was the construction: the spread of an annualised return is &radic;(sp&sup2; + &sigma;&sup2;/T), which narrows with the horizon, so one rate cannot describe every age on a chart. Re-deriving it at each age brings the band to within 2&ndash;3% of the simulation, and that is what it now draws.</p>
+                <p className="text-slate-500">The rate-based and Monte Carlo charts share a y-scale so they can be read against each other directly. What that shows is how little of the distribution a single line accounts for. The line itself is well placed &mdash; it tracks the simulated median to within a few percent (measured &minus;3.5%, &minus;1.5% and +0.4% across three households), because the engine compounds the same rate it draws around as the median of each year&rsquo;s return. The point is the distance above and below it. Read on its own, a single curve looks like an answer; against the spread of {MC_TRIALS.toLocaleString()} paths it is visibly one thread of a very wide cloth.</p>
+                <p className="text-slate-500">The rate-based band answers the same question far more cheaply, as a shaded band either side of the expected line that redraws as you type. Each edge takes that age&rsquo;s own quantile rate: the spread of an annualised return is &radic;(sp&sup2; + &sigma;&sup2;/T) and narrows with the horizon, so one rate cannot describe every age on a chart &mdash; held fixed it is out by 24&ndash;29% at age 50 on a 45-year plan. Re-derived per age it lands within 2&ndash;3% of the Monte Carlo.</p>
                 <p className="text-slate-500">What survives is the real difference between the two. The band cannot run dry, because a smooth line has no bad decade in it; the fan can, because it is made of paths that did. So the band&rsquo;s lower edge stays optimistic, and increasingly so as a plan weakens &mdash; 5.5% out at 99.5% survival, 16.2% at 97.3%, 98% at 91.3%. Use the band to see the shape of the range as you type, and the fan when the downside is the decision.</p>
                 <p className="text-slate-500">Where the lower edge touches zero, a tenth of the paths have run dry by that age. That is a statement no smooth line could have made.</p>
                 <p className="text-slate-500"><strong className="text-slate-800">Sequence risk, priced.</strong> The card under the chart puts a number on the same effect rather than describing it. It takes each tier&rsquo;s 10th-percentile annualised return &mdash; the unlucky column of the Config risk matrix, over your own horizon &mdash; compounds it evenly to age {terminalAge}, and sets that against the 10th-percentile pot the simulation actually produced. The two runs share an expected return, a plan and a horizon; all that separates them is the order the returns arrive in, so the difference is sequence risk in pounds. It is one-sided by nature: the same comparison at the 90th percentile comes out far smaller, and sometimes favourable, because selling units cheaply to live on is irreversible in a way that buying them cheaply is not. While you are still contributing it disappears, and can turn mildly favourable &mdash; a bumpy path buys more units when prices are low. This is also the one thing a published return forecast cannot supply, however detailed: withdrawal order is not a property of a return distribution.</p>
@@ -5322,7 +5360,7 @@ export default function App() {
               <p className="text-xs text-slate-600 leading-relaxed">Each wrapper is assigned a risk tier carrying an expected real return (treated as the median annual rate), a volatility, and a forecast uncertainty. The first two describe the <em>path</em>; the third describes how sure we are of the average that path is scattered around, and the distinction matters more the longer you plan for. Volatility averages out as σ/√T. Being wrong about the long-run average does not average out at all, so it is drawn once per simulated path and then lived with, giving an annualised spread of √(u² + σ²/T). The built-in tiers set that uncertainty to zero, which is itself a claim — that we know the long-run average and are only unsure of the route — and a published set of capital market assumptions will generally say otherwise.</p>
               <p className="text-xs text-slate-600 leading-relaxed"><strong className="text-slate-800">&ldquo;Expected&rdquo; here means the middle, not the average.</strong> The figure in the first column is the <em>median</em> rate: half the simulated years land above it and half below. Compound the middle rate and you get the middle outcome, which is why the Expected line on the Projection chart sits almost exactly on the simulation&rsquo;s median &mdash; within half a percent on a plain lump sum, and within about 3&frac12;% on a real plan, where contributions and tax blur it slightly.</p>
               <p className="text-xs text-slate-600 leading-relaxed">The <em>average</em> would be a much bigger number and a far less useful one. Picture a casino floor: nobody is made to stop while they are winning, but everybody stops at zero. Money behaves the same way. A pot that compounds well keeps compounding with nothing above it, while a pot that runs dry is finished and stays finished &mdash; so a handful of runaway futures drag the average up and away from anything the rest experience. On one ordinary plan modelled here the middle outcome is {formatGBP(7193811)} while the average is {formatGBP(22457043)}: more than three times higher, and a figure almost nobody in the simulation actually ends up with. You plan around the outcome in the middle, so the middle rate is what this model compounds. It is the standard convention too &mdash; published capital market assumptions quote annualised returns, not arithmetic ones.</p>
-              <p className="text-xs text-slate-600 leading-relaxed">The 10th and 90th percentile columns beside them are that spread at the two tails: over your horizon the annualised return lands between them eight times in ten. They also draw the modelled band on the Projection chart, re-derived at every age rather than held at one rate, because that spread narrows as the horizon lengthens and a single rate is wrong everywhere except the horizon it came from. What they cannot do is stand in for the simulation: a smooth curve contains no bad decade and cannot run dry, so its lower edge stays optimistic on a plan under strain. All wrappers move together (one market factor scaled by each tier's σ), so the correlations a published set also carries cannot be used without a second factor; the historical backtest blends real US equity and bond returns by the tier's equity weight ({Object.entries(E.RISK_EQUITY_WEIGHTS).map(([k, v]) => `${k.replace(' Risk', '')} ${Math.round(v * 100)}%`).join(', ')}).</p>
+              <p className="text-xs text-slate-600 leading-relaxed">The 10th and 90th percentile columns beside them are that spread at the two tails: over your horizon the annualised return lands between them eight times in ten. They also draw the rate-based band on the Projection chart, re-derived at every age rather than held at one rate, because that spread narrows as the horizon lengthens and a single rate is wrong everywhere except the horizon it came from. What they cannot do is stand in for the simulation: a smooth curve contains no bad decade and cannot run dry, so its lower edge stays optimistic on a plan under strain. All wrappers move together (one market factor scaled by each tier's σ), so the correlations a published set also carries cannot be used without a second factor; the historical backtest blends real US equity and bond returns by the tier's equity weight ({Object.entries(E.RISK_EQUITY_WEIGHTS).map(([k, v]) => `${k.replace(' Risk', '')} ${Math.round(v * 100)}%`).join(', ')}).</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                 {Object.entries(activeRiskMatrix).map(([k, v]) => (
                   <div key={k} className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><span className="font-bold text-slate-800">{k} ({v.label})</span><p className="text-slate-500">Expected real {E.num(v.real, 0).toFixed(2)}% pa, σ = {E.num(v.volatility, 0).toFixed(1)}%.</p></div>
