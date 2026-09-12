@@ -1,7 +1,7 @@
-import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import * as d3 from 'd3';
 import {
-  TrendingUp, Layers, Check, RotateCcw, Dices, Zap, ShieldCheck, Target, Sliders, Download, Upload, Users, Wallet, Coins,
+  TrendingUp, Layers, Check, RotateCcw, Dices, Zap, ShieldCheck, Sliders, Download, Upload, Users, Wallet, Coins,
   Settings, Plus, Trash2, Table, FileSpreadsheet, CheckCircle2, AlertTriangle, Pencil, HelpCircle, BookOpen, History, Bookmark,
   Save, Sparkles, ArrowUpRight, ArrowDownRight, Trophy, Info, Sun, Moon, Monitor, ChevronUp, ChevronDown, Home
 } from 'lucide-react';
@@ -229,10 +229,11 @@ function quantileCurve(plan, z) {
   const pot = Array.from({ length: n + 1 });
   for (let t = 0; t <= n; t++) {
     const flat = {};
-    // Math.max(1, t): at t = 0 no time has elapsed, so there is no spread to speak of and the one-year
-    // rate is the sensible floor rather than a divide by zero.
+    // t + 1, not t: stepYear applies a year's growth AT row t, so by the time row t is read the plan has
+    // compounded t + 1 times. Row 0 is already one year old. Using t understates the horizon by a year
+    // everywhere, which widens the band - most visibly at the start, where one year in three is a third.
     Object.entries(profiles).forEach(([k, v]) => {
-      flat[k] = { ...v, real: quantileRate(num(v.real, 0) / 100, num(v.volatility, 12) / 100, Math.max(1, t), num(v.sigmaParam, 0) / 100, z) * 100, volatility: 0, sigmaParam: 0 };
+      flat[k] = { ...v, real: quantileRate(num(v.real, 0) / 100, num(v.volatility, 12) / 100, t + 1, num(v.sigmaParam, 0) / 100, z) * 100, volatility: 0, sigmaParam: 0 };
     });
     const c = buildContext({ ...base, riskProfiles: flat });
     const row = simulateDeterministic(c, 'expected')[t];
@@ -242,7 +243,7 @@ function quantileCurve(plan, z) {
   // make - and the point past which it is certainly optimistic, since it cannot go below zero and the
   // simulation's lower quantile can stay there.
   const zeroAt = pot.findIndex(v => v.totalCombined <= 0);
-  // the rate worth quoting is the one over the whole plan: the last horizon computed
+  // the rate worth quoting is the one over the whole plan, which is the horizon the last row used
   const rate = {};
   Object.entries(profiles).forEach(([k, v]) => {
     rate[k] = quantileRate(num(v.real, 0) / 100, num(v.volatility, 12) / 100, n + 1, num(v.sigmaParam, 0) / 100, z) * 100;
@@ -1589,7 +1590,10 @@ function summarizeTrials(results) {
     for (let t = 0; t < years; t++) {
       for (let i = 0; i < n; i++) col[i] = results[i].path[t];
       col.sort();                       // typed-array sort is numeric, and in place costs nothing
-      bands.push({ t, p10: q(col, 0.10), p50: q(col, 0.50), p90: q(col, 0.90) });
+      // quartiles as well as deciles: the chart draws the quartile band by default so it can be read
+      // like for like against the rate-based one, which is quoted at quartiles because that is what the
+      // published assumptions give
+      bands.push({ t, p10: q(col, 0.10), p25: q(col, 0.25), p50: q(col, 0.50), p75: q(col, 0.75), p90: q(col, 0.90) });
     }
   }
   return {
@@ -1597,7 +1601,8 @@ function summarizeTrials(results) {
     successRate,
     bands,
     standardError: Math.sqrt(Math.max(0, successRate * (100 - successRate) / n)),
-    p10Terminal: q(pots, 0.10), medianTerminal: q(pots, 0.50), p90Terminal: q(pots, 0.90),
+    p10Terminal: q(pots, 0.10), p25Terminal: q(pots, 0.25), medianTerminal: q(pots, 0.50),
+    p75Terminal: q(pots, 0.75), p90Terminal: q(pots, 0.90),
     p10TerminalNet: q(potsNet, 0.10), medianTerminalNet: q(potsNet, 0.50), p90TerminalNet: q(potsNet, 0.90),
     medianFailAge: fails.length ? q(fails, 0.5) : null,
     earliestFailAge: fails.length ? fails[0] : null,
@@ -2405,10 +2410,21 @@ const SERIES_CONFIG = [
   { id: 'cash', label: 'Combined Cash', colors: { classic: '#475569', light: '#5C6B72', dark: '#8A939B' }, strokeWidth: 1.5, dash: '3,3', defaultActive: false }
 ];
 
+/*
+ * The two range charts are deliberately different colours. They answer the same question by different
+ * means and a reader flicking between them needs to see at a glance which one they are looking at, so
+ * the rate-based chart is a cool blue and the Monte Carlo a warmer violet in every theme.
+ */
 const CHART_PALETTE = {
-  classic: { gridMajor: '#f1f5f9', gridMinor: '#f8fafc', axisText: '#64748b', hoverCrosshair: '#94a3b8', sandboxDash: '#f59e0b', historicalLine: '#6366f1', trajectoryHoverFill: '#2563eb', historicalHoverFill: '#6366f1', hoverDotStroke: '#ffffff', fanBand: 'rgba(37, 99, 235, 0.16)', fanEdge: 'rgba(37, 99, 235, 0.45)', fanMedian: '#1d4ed8' },
-  light:   { gridMajor: '#DCDFD2', gridMinor: '#E6E8DE', axisText: '#5C6B72', hoverCrosshair: '#8A9098', sandboxDash: '#B0631E', historicalLine: '#A9781F', trajectoryHoverFill: '#2C5C8F', historicalHoverFill: '#A9781F', hoverDotStroke: '#FBFAF4', fanBand: 'rgba(44, 92, 143, 0.18)', fanEdge: 'rgba(44, 92, 143, 0.5)', fanMedian: '#2C5C8F' },
-  dark:    { gridMajor: '#1e232b', gridMinor: '#171b21', axisText: '#8a939b', hoverCrosshair: '#5b636c', sandboxDash: '#e89a4a', historicalLine: '#8b7cf6', trajectoryHoverFill: '#3D74E8', historicalHoverFill: '#8b7cf6', hoverDotStroke: '#14171B', fanBand: 'rgba(61, 116, 232, 0.22)', fanEdge: 'rgba(61, 116, 232, 0.55)', fanMedian: '#6F9BFF' },
+  classic: { gridMajor: '#f1f5f9', gridMinor: '#f8fafc', axisText: '#64748b', hoverCrosshair: '#94a3b8', sandboxDash: '#f59e0b', historicalLine: '#6366f1', trajectoryHoverFill: '#2563eb', historicalHoverFill: '#6366f1', hoverDotStroke: '#ffffff',
+             fanBand: 'rgba(124, 58, 237, 0.16)', fanEdge: 'rgba(124, 58, 237, 0.5)', fanMedian: '#6d28d9', fanOuter: 'rgba(124, 58, 237, 0.75)',
+             rateBand: 'rgba(13, 148, 136, 0.16)', rateEdge: 'rgba(13, 148, 136, 0.55)', rateOuter: 'rgba(13, 148, 136, 0.8)' },
+  light:   { gridMajor: '#DCDFD2', gridMinor: '#E6E8DE', axisText: '#5C6B72', hoverCrosshair: '#8A9098', sandboxDash: '#B0631E', historicalLine: '#A9781F', trajectoryHoverFill: '#2C5C8F', historicalHoverFill: '#A9781F', hoverDotStroke: '#FBFAF4',
+             fanBand: 'rgba(107, 74, 138, 0.18)', fanEdge: 'rgba(107, 74, 138, 0.55)', fanMedian: '#6B4A8A', fanOuter: 'rgba(107, 74, 138, 0.8)',
+             rateBand: 'rgba(13, 116, 110, 0.16)', rateEdge: 'rgba(13, 116, 110, 0.6)', rateOuter: 'rgba(13, 116, 110, 0.85)' },
+  dark:    { gridMajor: '#1e232b', gridMinor: '#171b21', axisText: '#8a939b', hoverCrosshair: '#5b636c', sandboxDash: '#e89a4a', historicalLine: '#8b7cf6', trajectoryHoverFill: '#3D74E8', historicalHoverFill: '#8b7cf6', hoverDotStroke: '#14171B',
+             fanBand: 'rgba(192, 132, 252, 0.22)', fanEdge: 'rgba(192, 132, 252, 0.55)', fanMedian: '#C084FC', fanOuter: 'rgba(192, 132, 252, 0.8)',
+             rateBand: 'rgba(63, 219, 199, 0.18)', rateEdge: 'rgba(63, 219, 199, 0.5)', rateOuter: 'rgba(63, 219, 199, 0.78)' },
 };
 
 /*
@@ -3120,10 +3136,27 @@ export default function App() {
   // what stops the metric tiles quietly changing meaning depending on which button was pressed last.
   const [simResult, setSimResult] = useState(null);
   const [safeMaxResult, setSafeMaxResult] = useState(null);
-  // Only the safe-max solve is optional here now; the tournament moved to its own tab, where it has its
-  // own button, rather than being armed from a checkbox on a tab that cannot show it running.
-  const [mcStages, setMcStages] = useState({ safeMax: true });
-  const [mcDetailOpen, setMcDetailOpen] = useState(true);
+
+  /*
+   * The results are a five-step walk rather than one long page: topline, safe spend, the rate-based
+   * chart, the Monte Carlo, then the two side by side. Five screens of one idea each beats one screen of
+   * five, and the two charts in particular only mean anything read against each other, which is far
+   * easier when they occupy the same space one after the other than when they are stacked a scroll apart.
+   *
+   * `seeAll` cascades the lot for anyone who would rather scroll, and is what a re-run lands on: having
+   * already walked it once, the second pass is a comparison, not a tour.
+   */
+  const PROJECTION_SLIDES = [
+    { n: 1, key: 'topline', name: 'Topline' },
+    { n: 2, key: 'safespend', name: 'Safe spend' },
+    { n: 3, key: 'ratechart', name: 'Rate based' },
+    { n: 4, key: 'mcchart', name: 'Monte Carlo' },
+    { n: 5, key: 'compare', name: 'Side by side' }
+  ];
+  const [slide, setSlide] = useState(1);
+  const [seeAll, setSeeAll] = useState(false);
+  const [sandboxRevealed, setSandboxRevealed] = useState(false);
+  const showSlide = (n) => seeAll || slide === n;
   const [simProgress, setSimProgress] = useState(null);
   const [isSimulating, setIsSimulating] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
@@ -3301,18 +3334,31 @@ export default function App() {
    * deciles exists so the band can be compared like for like against the Monte Carlo fan, which is drawn
    * at the 10th and 90th.
    */
+  /*
+   * Both charts draw the QUARTILE band by default and carry the 10th/90th as an optional outer pair,
+   * toggled from each chart's own legend. Same shape on both sides is the whole point: a reader comparing
+   * them should be comparing method, not percentile.
+   */
   const [bandMode, setBandMode] = useState('quartile');   // 'quartile' | 'decile' | 'off'
-  // The simulated fan, overlaid on the same axes. Two controls rather than one because they are genuinely
-  // independent: the band is live and free, the fan costs a run, and having both on at once is the most
-  // useful view on the chart - the gap between them is sequence risk, drawn.
+  const [showRateOuter, setShowRateOuter] = useState(false);
+  const [showMcOuter, setShowMcOuter] = useState(false);
   const [showFan, setShowFan] = useState(true);
   const bandSpec = BAND_QUANTILES[bandMode] || null;
-  const bandCurves = useMemo(() => {
-    if (!bandSpec) return null;
+  // Both quantile pairs, so the outer toggle costs nothing at the moment it is pressed. Four
+  // deterministic sweeps, about 38ms on a 45-year plan, recomputed only when the plan itself changes.
+  const rateCurves = useMemo(() => {
     try {
-      return { lo: E.quantileCurve(resolvedPlan, -bandSpec.z), hi: E.quantileCurve(resolvedPlan, bandSpec.z) };
+      return {
+        q: { lo: E.quantileCurve(resolvedPlan, -BAND_QUANTILES.quartile.z), hi: E.quantileCurve(resolvedPlan, BAND_QUANTILES.quartile.z) },
+        d: { lo: E.quantileCurve(resolvedPlan, -BAND_QUANTILES.decile.z), hi: E.quantileCurve(resolvedPlan, BAND_QUANTILES.decile.z) },
+        mid: E.simulateDeterministic(ctx, 'expected')
+      };
     } catch { return null; }
-  }, [resolvedPlan, bandSpec]);
+  }, [resolvedPlan, ctx]);
+  const bandCurves = useMemo(() => {
+    if (!bandSpec || !rateCurves) return null;
+    return bandMode === 'decile' ? rateCurves.d : rateCurves.q;
+  }, [bandSpec, bandMode, rateCurves]);
   // pick the same total the expected line is showing, so the band cannot describe a different household
   const bandKey = (!isCouple || plan?.activeProfileView === 'Myself') ? 'totalSelf'
     : (isCouple && plan?.activeProfileView === 'Partner') ? 'totalPart' : 'totalCombined';
@@ -3338,6 +3384,33 @@ export default function App() {
   const fanVisible = useMemo(
     () => (showFan && fanData.length ? fanData.filter(d => d.ageSelf <= effectiveMaxVisibleAge) : null),
     [showFan, fanData, effectiveMaxVisibleAge]);
+
+  /*
+   * The Monte Carlo chart plays itself in, spreading from the left edge as the horizon fills. It is not
+   * decoration: the shape of the thing - a point at the start widening into a cloud - is the fact the
+   * chart exists to convey, and watching it happen lands that better than arriving at the finished
+   * picture. It runs ONCE per set of results. Coming back to the slide shows the completed chart, because
+   * a replay on every visit would be an animation you have to sit through rather than one you watched.
+   */
+  const [mcReveal, setMcReveal] = useState(0);
+  const mcPlayedFor = useRef(null);
+  useEffect(() => {
+    if (!fanData.length) { mcPlayedFor.current = null; setMcReveal(0); return; }
+    const token = `${simResult?.trials}|${simResult?.spend}|${fanData.length}`;
+    if (mcPlayedFor.current === token) { setMcReveal(1); return; }   // already watched: show it finished
+    if (slide !== 4 && !seeAll) return;                              // only play once it is on screen
+    mcPlayedFor.current = token;
+    setMcReveal(0);
+    const start = performance.now(), ms = 1400;
+    let raf = 0;
+    const step = () => {
+      const t = Math.min(1, (performance.now() - start) / ms);
+      setMcReveal(t < 1 ? 1 - Math.pow(1 - t, 3) : 1);               // ease out, so the tail settles
+      if (t < 1) raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [fanData, simResult, slide, seeAll]);
 
   // ------------------------------------------------------------ chart scales
   const chartWidth = 960, chartHeight = 420;
@@ -3373,6 +3446,28 @@ export default function App() {
       hi: d3.line().x(x).y(d => yScale(d.hi)).curve(d3.curveMonotoneX)(bandData)
     };
   }, [bandData, xScale, yScale]);
+  const mcOuterPaths = useMemo(() => {
+    if (!showMcOuter || !fanVisible || fanVisible.length < 2) return null;
+    const rows = fanVisible.slice(0, Math.max(2, Math.ceil(fanVisible.length * mcReveal)));
+    const x = (d) => xScale(d.ageSelf);
+    return {
+      lo: d3.line().x(x).y(d => yScale(Math.max(0, d.p10))).curve(d3.curveMonotoneX)(rows),
+      hi: d3.line().x(x).y(d => yScale(d.p90)).curve(d3.curveMonotoneX)(rows)
+    };
+  }, [showMcOuter, fanVisible, mcReveal, xScale, yScale]);
+  // the 10th/90th pair the rate chart's legend can add outside its quartile band
+  const rateOuterPaths = useMemo(() => {
+    if (!showRateOuter || !rateCurves) return null;
+    const rows = rateCurves.d.lo.pot
+      .map((d, i) => ({ ageSelf: d.ageSelf, lo: d[bandKey], hi: rateCurves.d.hi.pot[i][bandKey] }))
+      .filter(d => d.ageSelf <= effectiveMaxVisibleAge);
+    if (rows.length < 2) return null;
+    const x = (d) => xScale(d.ageSelf);
+    return {
+      lo: d3.line().x(x).y(d => yScale(Math.max(0, d.lo))).curve(d3.curveMonotoneX)(rows),
+      hi: d3.line().x(x).y(d => yScale(d.hi)).curve(d3.curveMonotoneX)(rows)
+    };
+  }, [showRateOuter, rateCurves, bandKey, effectiveMaxVisibleAge, xScale, yScale]);
   const sandboxLinePath = useMemo(() => {
     if (!isSandboxModified || !sandboxTimeline.length) return null;
     return d3.line().x(d => xScale(d.ageSelf)).y(d => yScale(d.totalCombined)).curve(d3.curveMonotoneX)(sandboxTimeline.filter(d => d.ageSelf <= effectiveMaxVisibleAge));
@@ -3384,16 +3479,22 @@ export default function App() {
     d: d3.line().x(d => xScale(d.ageSelf)).y(d => yScale(d.totalCombined)).curve(d3.curveMonotoneX)(r.rows.filter(d => d.ageSelf <= effectiveMaxVisibleAge))
   })), [compareRuns, effectiveMaxVisibleAge, xScale, yScale]);
   const histXScale = useMemo(() => d3.scaleLinear().domain([currentAge, Math.max(currentAge + 1, terminalAge)]).range([0, innerWidth]), [currentAge, terminalAge, innerWidth]);
+  /*
+   * Monte Carlo paths, drawn to match the rate-based chart: quartile band plus a median, with the
+   * 10th/90th available as an outer pair from the legend. `reveal` is the animation clock - the fraction
+   * of the horizon drawn so far - so the chart can play itself in once and then stay put.
+   */
   const fanPaths = useMemo(() => {
     if (!fanVisible || fanVisible.length < 2) return null;
+    const cut = Math.max(2, Math.ceil(fanVisible.length * mcReveal));
+    const rows = fanVisible.slice(0, cut);
     const x = (d) => xScale(d.ageSelf);
+    const line = (key) => d3.line().x(x).y(d => yScale(Math.max(0, d[key]))).curve(d3.curveMonotoneX)(rows);
     return {
-      band: d3.area().x(x).y0(d => yScale(Math.max(0, d.p10))).y1(d => yScale(d.p90)).curve(d3.curveMonotoneX)(fanVisible),
-      median: d3.line().x(x).y(d => yScale(d.p50)).curve(d3.curveMonotoneX)(fanVisible),
-      lower: d3.line().x(x).y(d => yScale(Math.max(0, d.p10))).curve(d3.curveMonotoneX)(fanVisible),
-      upper: d3.line().x(x).y(d => yScale(d.p90)).curve(d3.curveMonotoneX)(fanVisible)
+      band: d3.area().x(x).y0(d => yScale(Math.max(0, d.p25))).y1(d => yScale(d.p75)).curve(d3.curveMonotoneX)(rows),
+      median: line('p50'), q25: line('p25'), q75: line('p75'), lower: line('p10'), upper: line('p90')
     };
-  }, [fanVisible, xScale, yScale]);
+  }, [fanVisible, xScale, yScale, mcReveal]);
   // The first age at which a tenth of the paths are broke. Worth naming: it is the most actionable thing
   // on the chart, and a smooth deterministic line could never have produced it. Read off the whole fan,
   // not the visible slice, so dragging the horizon slider cannot change the answer.
@@ -3423,6 +3524,44 @@ export default function App() {
    *  - resolvedPlan, not plan, so the smooth run carries the same resolved MPAA state the simulation
    *    had. riskProfiles is a top-level key that resolveMpaa never touches.
    */
+
+  /*
+   * The side-by-side table. The two columns answer the same five questions by different means, so the
+   * only honest way to show them is at identical quantiles with the gap spelled out.
+   *
+   * The rate-based column reads its figures off the quantile curves already drawn on slide 3; the Monte
+   * Carlo column off the same summary the tiles use. The median row is the pair worth noticing: they
+   * agree there and part company at the edges, which is the whole argument for having both.
+   */
+  const compareRows2 = useMemo(() => {
+    if (!simResult || !rateCurves) return null;
+    const last = (c) => c.pot[c.pot.length - 1]?.totalCombined ?? 0;
+    const atRetire = (rows) => rows.find(d => d.ageSelf === ctx.owners[0].retireAge);
+    const rate = {
+      p10: last(rateCurves.d.lo), p25: last(rateCurves.q.lo),
+      p50: rateCurves.mid[rateCurves.mid.length - 1]?.totalCombined ?? 0,
+      p75: last(rateCurves.q.hi), p90: last(rateCurves.d.hi)
+    };
+    const mc = {
+      p10: simResult.p10Terminal, p25: simResult.p25Terminal, p50: simResult.medianTerminal,
+      p75: simResult.p75Terminal, p90: simResult.p90Terminal
+    };
+    const row = (label, key) => ({ label, rate: rate[key], mc: mc[key], pct: mc[key] > 0 ? (rate[key] - mc[key]) / mc[key] * 100 : 0 });
+    // how many of the five rate-based curves are still solvent at the end: the closest thing a set of
+    // smooth lines has to a survival rate, and directly comparable to the Monte Carlo's
+    const solvent = [rateCurves.d.lo, rateCurves.q.lo, rateCurves.q.hi, rateCurves.d.hi].filter(c => c.failAge === null).length
+      + (deterministicVerdict.survived ? 1 : 0);
+    const mcRetire = fanData.find(d => d.ageSelf === ctx.owners[0].retireAge);
+    return {
+      quantiles: [row('10th percentile', 'p10'), row('25th percentile', 'p25'), row('Median', 'p50'), row('75th percentile', 'p75'), row('90th percentile', 'p90')],
+      extras: [
+        { label: `Median pot at retirement (${ctx.owners[0].retireAge})`, rate: formatGBP(atRetire(rateCurves.mid)?.totalCombined ?? 0), mc: mcRetire ? formatGBP(mcRetire.p50) : '—', note: 'expected path vs simulated median' },
+        { label: 'Survives to the end', rate: `${solvent} of 5 lines`, mc: `${simResult.successRate.toFixed(1)}% of paths`, note: 'a smooth line cannot run dry' },
+        { label: `Stranded before ${nmpa}`, rate: deterministicVerdict.failReason === 'pre-access' ? 'yes' : 'no', mc: `${simResult.preNmpaFailRate.toFixed(1)}% of paths`, note: 'pension locked, bridge spent' }
+      ]
+    };
+  }, [simResult, rateCurves, ctx, deterministicVerdict, fanData, nmpa]);
+
   const sequenceLoss = useMemo(() => {
     if (!simResult || !Number.isFinite(simResult.p10Terminal)) return null;
     const T = ctx.totalYears + 1;
@@ -3709,12 +3848,44 @@ export default function App() {
       }
       result = { spend: E.round250(low) };
     }
-    const stats = await runMonteCarloAsync(ctx, {
-      trials: MC_TRIALS, seed: mcSeed + 1, spendOverride: result.spend, shouldStop: () => mcCancelRef.current,
-      onProgress: (f) => setSimProgress({ label: `Confirming £${result.spend.toLocaleString()} over ${MC_TRIALS.toLocaleString()} paths…`, value: scale.from + span * (0.6 + 0.4 * f) })
+
+    /*
+     * Verification, on the full sample, and it is not a formality.
+     *
+     * The bisection above runs on SEARCH_TRIALS paths and picks, from the spends near the boundary,
+     * whichever one that small sample happened to flatter - so re-measuring regresses, and always
+     * downward, because the selection was upward. Reporting the search's answer against a fresh 5,000
+     * paths produced a "90% safe spend" that survived 88.4%. Every fixture tested came back short.
+     *
+     * So the same seed throughout (SEARCH_TRIALS paths are then a prefix of MC_TRIALS, not a different
+     * draw), and then walk the answer down on the full sample until the number about to be shown clears
+     * the target. What is displayed is what was measured.
+     */
+    const confirm = async (spend, label) => runMonteCarloAsync(ctx, {
+      trials: MC_TRIALS, seed: mcSeed, spendOverride: spend, shouldStop: () => mcCancelRef.current,
+      onProgress: (f) => setSimProgress({ label, value: scale.from + span * (0.6 + 0.4 * f) })
     });
-    if (mcCancelRef.current) return null;
-    const res = { spend: result.spend, note: result.note, targetRate, stats };
+    let spend = result.spend;
+    let stats = await confirm(spend, `Confirming £${spend.toLocaleString()} over ${MC_TRIALS.toLocaleString()} paths…`);
+    if (mcCancelRef.current || !stats) return null;
+    if (!result.note && stats.successRate < targetRate) {
+      let lo = 0, hi = spend, bestSpend = 0, bestStats = stats;
+      for (let i = 0; i < 5; i++) {
+        const mid = E.round250((lo + hi) / 2);
+        if (mid <= lo || mid >= hi) break;
+        const s = await confirm(mid, `Checking £${mid.toLocaleString()} against ${targetRate}%…`);
+        if (mcCancelRef.current || !s) return null;
+        if (s.successRate >= targetRate) { lo = mid; bestSpend = mid; bestStats = s; } else hi = mid;
+      }
+      if (bestSpend > 0) { spend = bestSpend; stats = bestStats; }
+      else {
+        spend = 0;
+        stats = await confirm(0, 'Checking zero spending…');
+        if (mcCancelRef.current || !stats) return null;
+        result.note = `No spending above zero clears ${targetRate}%. The plan holds only while nothing is drawn from it.`;
+      }
+    }
+    const res = { spend, note: result.note, targetRate, stats };
     setSafeMaxResult(res);
     return res;
   };
@@ -3726,10 +3897,11 @@ export default function App() {
    * It clears any tournament results as it goes. Those live on another tab and were scored against the
    * plan as it was, so leaving them up after a fresh run would present stale figures as current ones.
    */
-  const handleRunAll = async () => {
+  const handleRunAll = async ({ cascade = false } = {}) => {
     if (isSimulating || isOptimizing) return;
     mcCancelRef.current = false;
-    const wantSafeMax = mcStages.safeMax;
+    const wantSafeMax = true;          // both stages always run; there is nothing useful to switch off
+    setSlide(1); setSeeAll(cascade); setSandboxRevealed(cascade);
     setIsSimulating(true);
     // Every stage is cleared, including one that is about to be skipped: a verdict line left over from an
     // earlier run would otherwise sit alongside fresh figures and read as part of the same measurement.
@@ -3748,23 +3920,19 @@ export default function App() {
   };
 
   // Re-solve stage 2 alone, which is what a change of target survival rate needs: stage 1 does not depend on it.
-  const handleResolveSafeMax = async () => {
+  // Takes the rate explicitly: it is called straight from the survival-rate buttons, and reading it back
+  // out of state there would use the value from before the click rather than the one just chosen.
+  const handleResolveSafeMax = async (rate = targetSurvivalRate) => {
     if (isSimulating || isOptimizing) return;
     mcCancelRef.current = false;
     setIsOptimizing(true);
-    try { await runStageSafeMax(targetSurvivalRate); }
+    try { await runStageSafeMax(rate); }
     finally { setIsOptimizing(false); setSimProgress(null); }
   };
 
   const handleCancelMC = () => { mcCancelRef.current = true; tournamentCancelRef.current = true; };
 
-  // Derived once for the verdict strip, which reports whichever stages have landed so far.
   const mcBusy = isSimulating || isOptimizing || tournament.isEvaluating;
-  const safeMaxStale = !!safeMaxResult && safeMaxResult.targetRate !== targetSurvivalRate;
-  const tournamentBest = tournament.results && tournament.results.bestId
-    ? tournament.results.players.find(p => p.id === tournament.results.bestId) : null;
-  const tournamentBaselinePlayer = tournament.results
-    ? tournament.results.players.find(p => p.id === 'baseline') : null;
 
   // ------------------------------------------------------------ decumulation policy auto-pick
   // Every policy combination is scored on the same seed (common random numbers), so the differences
@@ -3849,6 +4017,129 @@ export default function App() {
   ];
 
   // The sandbox, rendered once at the foot of the Projection tab, directly under the chart it edits.
+  /*
+   * One chart body, drawn twice: once with the rate-based band and once with the Monte Carlo range.
+   *
+   * They share the scales deliberately - same x, same y - so flicking between the two slides compares
+   * method rather than axis. Both carry the same wrapper lines underneath, because those come from the
+   * deterministic run either way; what differs is the range drawn around them, and the colour it is drawn
+   * in. Each keeps its own outer 10th/90th toggle, since that is a property of the range, not the plan.
+   */
+  /*
+   * Slide chrome. The numbered row is the map - five steps, where you are, and one click to any of them -
+   * and "See all" is the escape hatch for anyone who would rather scroll than walk.
+   */
+  const slideHead = (n, title, sub) => (
+    <div className="flex items-start justify-between gap-3">
+      <div>
+        <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+          <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-600 text-white text-[10px] font-black shrink-0">{n}</span>
+          {title}
+        </h2>
+        <span className="text-xs text-slate-500">{sub}</span>
+      </div>
+    </div>
+  );
+
+  const slideNav = (n) => (
+    <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-100">
+      <div className="flex items-center gap-1.5">
+        {PROJECTION_SLIDES.map(s => (
+          <button key={s.n} type="button" onClick={() => { setSeeAll(false); setSlide(s.n); }} title={s.name}
+            className={`w-7 h-7 rounded-lg text-[11px] font-bold transition-all cursor-pointer border ${!seeAll && slide === s.n ? 'bg-blue-600 text-white border-blue-600 shadow-xs' : 'bg-surface border-slate-200 text-slate-500 hover:text-slate-900 hover:border-slate-300'}`}>{s.n}</button>
+        ))}
+        <button type="button" onClick={() => setSeeAll(!seeAll)}
+          className={`ml-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer border ${seeAll ? 'bg-slate-800 text-white border-slate-800' : 'bg-surface border-slate-200 text-slate-500 hover:text-slate-900'}`}>
+          {seeAll ? 'One at a time' : 'See all'}
+        </button>
+      </div>
+      {!seeAll && (
+        <div className="flex items-center gap-2">
+          <button type="button" disabled={n === 1} onClick={() => setSlide(n - 1)}
+            className="px-3 py-1.5 rounded-xl text-xs font-semibold border border-slate-200 bg-surface text-slate-600 hover:text-slate-900 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">&larr; Back</button>
+          <button type="button" onClick={() => { if (n < 5) setSlide(n + 1); else setSandboxRevealed(true); }}
+            className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-slate-800 text-white hover:bg-slate-900 cursor-pointer">
+            {n < 5 ? <>Next: {PROJECTION_SLIDES[n].name} &rarr;</> : <>Change something &rarr;</>}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
+  const renderProjectionChart = (kind) => {
+    const isRate = kind === 'rate';
+    const band = isRate ? cp.rateBand : cp.fanBand;
+    const edge = isRate ? cp.rateEdge : cp.fanEdge;
+    const outer = isRate ? cp.rateOuter : cp.fanOuter;
+    const outerOn = isRate ? showRateOuter : showMcOuter;
+    const setOuter = isRate ? setShowRateOuter : setShowMcOuter;
+    const outerPaths = isRate ? rateOuterPaths : mcOuterPaths;
+    const ready = isRate ? !!bandPaths : !!fanPaths;
+    return (
+      <>
+        <div className="relative overflow-x-auto">
+          <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="w-full h-auto select-none" onMouseLeave={() => setHoveredPoint(null)}>
+            <g transform={`translate(${margin.left}, ${margin.top})`}>
+              {yScale.ticks(6).map((t, i) => <g key={i} transform={`translate(0, ${yScale(t)})`}><line x2={innerWidth} stroke={cp.gridMajor} strokeDasharray="3,3" /><text x={-10} dy="0.32em" fill={cp.axisText} fontSize="10" textAnchor="end" fontFamily="monospace">£{(t / 1000).toFixed(0)}k</text></g>)}
+              {xScale.ticks(10).map((t, i) => <g key={i} transform={`translate(${xScale(t)}, 0)`}><line y2={innerHeight} stroke={cp.gridMinor} /><text y={innerHeight + 20} fill={cp.axisText} fontSize="11" textAnchor="middle" fontFamily="monospace">{t}</text></g>)}
+              {markers(xScale)}
+              {isRate && bandPaths && <>
+                <path d={bandPaths.area} fill={band} stroke="none" />
+                <path d={bandPaths.lo} fill="none" stroke={edge} strokeWidth="1.5" strokeDasharray="5,4" />
+                <path d={bandPaths.hi} fill="none" stroke={edge} strokeWidth="1.5" strokeDasharray="5,4" />
+              </>}
+              {!isRate && fanPaths && <>
+                <path d={fanPaths.band} fill={band} stroke="none" />
+                <path d={fanPaths.q25} fill="none" stroke={edge} strokeWidth="1.5" />
+                <path d={fanPaths.q75} fill="none" stroke={edge} strokeWidth="1.5" />
+                <path d={fanPaths.median} fill="none" stroke={cp.fanMedian} strokeWidth="2.5" strokeLinecap="round" />
+              </>}
+              {outerPaths && <>
+                <path d={outerPaths.lo} fill="none" stroke={outer} strokeWidth="1.25" strokeDasharray="2,3" />
+                <path d={outerPaths.hi} fill="none" stroke={outer} strokeWidth="1.25" strokeDasharray="2,3" />
+              </>}
+              {themedSeries.map(s => (activeSeries[s.id] && pathGenerators[s.id]) ? <path key={s.id} d={pathGenerators[s.id]} fill="none" stroke={s.color} strokeWidth={s.strokeWidth} strokeDasharray={s.dash} strokeLinecap="round" /> : null)}
+              {sandboxLinePath && <path d={sandboxLinePath} fill="none" stroke={cp.sandboxDash} strokeWidth="3.5" strokeDasharray="6,4" strokeLinecap="round" />}
+              {comparePaths.map(c => <path key={c.id} d={c.d} fill="none" stroke={c.tone} strokeWidth="2.5" strokeDasharray="5,3" strokeLinecap="round" />)}
+              <rect width={innerWidth} height={innerHeight} fill="transparent" onMouseMove={(e) => { const rect = e.currentTarget.getBoundingClientRect(); const age = Math.round(xScale.invert((e.clientX - rect.left) * (innerWidth / Math.max(1, rect.width)))); setHoveredPoint(visibleData.find(d => d.ageSelf === age) || null); }} />
+              {hoveredPoint && <g transform={`translate(${xScale(hoveredPoint.ageSelf)}, 0)`}><line y2={innerHeight} stroke={cp.hoverCrosshair} strokeWidth="1" strokeDasharray="2,2" /><circle cy={yScale(hoveredPoint.expected || 0)} r="4" fill={cp.trajectoryHoverFill} stroke={cp.hoverDotStroke} strokeWidth="2" /></g>}
+            </g>
+          </svg>
+          {hoveredPoint && (
+            <div className="absolute top-4 left-24 bg-surface/95 border border-slate-200 p-3 rounded-xl shadow-lg text-xs space-y-1 backdrop-blur-md pointer-events-none">
+              <div className="font-bold text-slate-800 border-b border-slate-100 pb-1 flex justify-between gap-4"><span>Age {hoveredPoint.ageSelf} ({hoveredPoint.year})</span><span className="text-slate-500">Spend: {formatGBP(hoveredPoint.targetSpend)}/yr</span></div>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-1 font-mono">
+                {activeSeries.expected && <div className="text-blue-600 font-bold">Expected: {formatGBP(hoveredPoint.expected)}</div>}
+                {isSandboxModified && <div className="text-amber-600 font-bold">Sandbox: {formatGBP(sandboxTimeline.find(d => d.ageSelf === hoveredPoint.ageSelf)?.totalCombined)}</div>}
+                {activeSeries.pensions && <div className="text-sky-600">Pensions: {formatGBP(hoveredPoint.pensions)}</div>}
+                {activeSeries.isas && <div className="text-teal-600">ISAs: {formatGBP(hoveredPoint.isas)}</div>}
+                <div className="text-slate-600">Tax this year: {formatGBP(hoveredPoint.taxPaid)}</div>
+                {isRate && bandData && (() => { const b = bandData.find(d => d.ageSelf === hoveredPoint.ageSelf); return b ? <div className="col-span-2 border-t border-slate-100 pt-1 mt-0.5" style={{ color: cp.rateMedianText || undefined }}>{bandSpec.highPct} {formatGBP(b.hi)} · {bandSpec.lowPct} {formatGBP(Math.max(0, b.lo))}</div> : null; })()}
+                {!isRate && fanVisible && (() => { const b = fanVisible.find(d => d.ageSelf === hoveredPoint.ageSelf); return b ? <div className="col-span-2 border-t border-slate-100 pt-1 mt-0.5">75th {formatGBP(b.p75)} · median {formatGBP(b.p50)} · 25th {formatGBP(Math.max(0, b.p25))}</div> : null; })()}
+                {compareRuns.filter(r => r.rows).map(r => (
+                  <div key={r.id} className="font-bold truncate" style={{ color: r.tone }}>{r.name}: {formatGBP(r.rows.find(d => d.ageSelf === hoveredPoint.ageSelf)?.totalCombined)}</div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100">
+          {themedSeries.map(s => (
+            <button key={s.id} onClick={() => setActiveSeries(prev => ({ ...prev, [s.id]: !prev[s.id] }))} className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center gap-2 transition-all cursor-pointer border ${activeSeries[s.id] ? 'bg-slate-100 border-slate-300 text-slate-900 font-semibold' : 'bg-surface border-slate-200 text-slate-400 opacity-60'}`}>
+              <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: s.color }} />{s.label}{activeSeries[s.id] && <Check className="w-3 h-3 text-slate-600" />}
+            </button>
+          ))}
+          <span className="w-px h-5 bg-slate-200 mx-1" />
+          <button type="button" disabled={!ready} onClick={() => setOuter(!outerOn)}
+            className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center gap-2 transition-all cursor-pointer border disabled:opacity-40 disabled:cursor-not-allowed ${outerOn ? 'bg-slate-100 border-slate-300 text-slate-900 font-semibold' : 'bg-surface border-slate-200 text-slate-400 opacity-70'}`}>
+            <span className="w-3.5 h-0 border-t-2 border-dotted" style={{ borderColor: outer }} />10th &amp; 90th{outerOn && <Check className="w-3 h-3 text-slate-600" />}
+          </button>
+          {isSandboxModified && <span className="flex items-center gap-2 text-xs font-mono font-bold text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1 rounded-xl"><span className="w-2.5 h-2.5 rounded-full bg-amber-500 border border-amber-600" /> Sandbox (dashed)</span>}
+        </div>
+      </>
+    );
+  };
+
   const renderSandboxPanel = () => {
     const open = sandboxOpen;
     return (
@@ -4736,11 +5027,12 @@ export default function App() {
         {/* TAB 4: PROJECTION - the deterministic path, the modelled band and the simulated fan on one chart */}
         {activeTab === 'projection' && (
           <div className="space-y-6">
+
             <div className="bg-surface border border-slate-200/90 rounded-2xl p-5 shadow-xs space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Run the numbers</h3>
-                  <span className="text-[11px] text-slate-500">Each stage appears as it finishes, so the first answer arrives while the rest is still working. Every figure is in today&rsquo;s money.</span>
+                  <span className="text-[11px] text-slate-500">{simResult ? 'Five steps: what your plan does, the most you could spend, the two ways of drawing the range, then both side by side.' : 'Answers arrive as they land, so the first is on screen while the rest is still working. Every figure is in today\u2019s money.'}</span>
                 </div>
                 <div className="flex items-center gap-2">
                   {mcBusy && (
@@ -4754,324 +5046,210 @@ export default function App() {
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-[11px] text-slate-600 pt-2.5 border-t border-slate-100">
-                <span className="text-slate-400">Always runs: how your current spend holds up.</span>
-                <label className="flex items-center gap-1.5 cursor-pointer select-none">
-                  <input type="checkbox" checked={mcStages.safeMax} onChange={(e) => setMcStages(s => ({ ...s, safeMax: e.target.checked }))} className="accent-indigo-600 cursor-pointer" />
-                  <span className="font-semibold text-slate-700">Also solve for the most I could spend</span>
-                </label>
-                <div className={`flex items-center bg-slate-100 border border-slate-200 rounded-xl p-1 ${mcStages.safeMax || safeMaxResult ? '' : 'opacity-40'}`}>
-                  <span className="text-slate-500 px-2">Target survival rate:</span>
-                  {[85, 90, 95].map(rate => <button key={rate} type="button" onClick={() => setTargetSurvivalRate(rate)} className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${targetSurvivalRate === rate ? 'bg-surface text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>{rate}%</button>)}
-                </div>
+                <span className="text-slate-400">Tests how your current spend holds up, then solves for the most you could take instead.</span>
                 <button type="button" onClick={() => setActiveTab('strategy')} className="text-slate-500 hover:text-slate-800 hover:underline font-semibold cursor-pointer">Comparing wrapper strategies lives on the Strategy tab &rarr;</button>
               </div>
               {simProgress && <div className="w-full"><ProgressBar value={simProgress.value} label={simProgress.label} /></div>}
             </div>
 
-            <div className="p-4 bg-blue-50/80 border border-blue-200 rounded-2xl text-xs text-slate-700 space-y-1.5 shadow-2xs">
-              <div className="flex items-center gap-2 font-bold text-blue-950 text-sm"><Layers className="w-4 h-4 text-blue-600" /> Projection &amp; Sandbox</div>
-              <p className="leading-relaxed"><strong>One chart, three readings of the same plan.</strong> The <strong>expected</strong> path compounds one steady real rate per wrapper and redraws as you type. The <strong>rate-based</strong> band puts a range either side of it, also live. The <strong>Monte Carlo</strong> range is read off {MC_TRIALS.toLocaleString()} randomised paths and costs a run. They share an axis on purpose, and the gap between them is sequence risk.</p>
-              <p className="text-slate-500 text-[11px] leading-relaxed"><strong>About the rate-based band.</strong> Each edge re-derives its rate at every age, because the spread of an annualised return is &radic;(sp&sup2; + &sigma;&sup2;/T) and narrows as the horizon lengthens. A single rate held across the whole chart would be right only at its own horizon &mdash; out by 24&ndash;29% at age 50 on a 45-year plan. Re-derived per age, the band lands within 2&ndash;3% of the Monte Carlo.</p>
-              <p className={`text-[11px] font-semibold ${deterministicVerdict.survived ? 'text-emerald-700' : 'text-rose-700'}`}>
-                {deterministicVerdict.survived ? `Expected path survives to ${terminalAge}` : `Expected path fails at age ${deterministicVerdict.failAge} (${deterministicVerdict.failReason === 'pre-access' ? 'pre-SIPP access bridge exhausted' : deterministicVerdict.failReason === 'floor' ? 'below the bequest floor' : 'spending shortfall'})`}; lifetime tax {formatGBP(deterministicVerdict.lifetimeTax)}{P.cgtEnabled ? ' (income tax + CGT)' : ''}.
-              </p>
-              <div className="flex flex-wrap gap-x-5 gap-y-1 pt-0.5">
-                <button type="button" onClick={() => goToDoc('doc-mc-buttons')} className="text-[11px] text-blue-700 hover:text-blue-900 hover:underline font-semibold flex items-center gap-1 cursor-pointer">
-                  <HelpCircle className="w-3.5 h-3.5" /> What each stage does, and how to read it &rarr;
-                </button>
+            {/* Nothing but the button until there is something to show. */}
+            {!simResult ? (
+              <div className="p-4 bg-blue-50/80 border border-blue-200 rounded-2xl text-xs text-slate-700 space-y-1.5 shadow-2xs">
+                <div className="flex items-center gap-2 font-bold text-blue-950 text-sm"><Layers className="w-4 h-4 text-blue-600" /> What you will get</div>
+                <p className="leading-relaxed">Five steps. What your plan does as entered, the most you could safely spend instead, then the same range drawn two ways &mdash; compounded from the return assumptions, and read off {MC_TRIALS.toLocaleString()} randomised paths &mdash; and finally the two side by side. Every figure is in today&rsquo;s money.</p>
               </div>
-            </div>
-
-            {/* Only a couple has anything to switch between; on a single plan the one option is the only
-                option, so the control is noise. */}
-            {isCouple && (
-              <div className="bg-surface border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
+            ) : (
+            <>
+              {isCouple && (
+                <div className="bg-surface border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center gap-2">
                   <span className="text-xs text-slate-500 font-semibold">Whose money:</span>
-                  {['Combined', 'Myself', 'Partner'].map(p => (
-                    <button key={p} onClick={() => setPlan(prev => ({ ...prev, activeProfileView: p }))} className={`px-3 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ${plan?.activeProfileView === p ? 'bg-blue-600 text-white shadow-xs' : 'bg-slate-100 text-slate-600 hover:text-slate-900'}`}>{p}</button>
+                  {['Combined', 'Myself', 'Partner'].map(pv => (
+                    <button key={pv} onClick={() => setPlan(prev => ({ ...prev, activeProfileView: pv }))} className={`px-3 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ${plan?.activeProfileView === pv ? 'bg-blue-600 text-white shadow-xs' : 'bg-slate-100 text-slate-600 hover:text-slate-900'}`}>{pv}</button>
                   ))}
                 </div>
-              </div>
-            )}
+              )}
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Expected Terminal Pot</div><div className="text-2xl font-black font-mono text-blue-600 mt-2">{formatGBP(chartDisplayData[chartDisplayData.length - 1]?.expected)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Target className="w-3.5 h-3.5 text-blue-600" /> Constant expected real growth to age {terminalAge}</div></div>
-              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Expected Pot at Retirement</div><div className="text-2xl font-black font-mono text-indigo-600 mt-2">{formatGBP(timelineData.find(r => r.ageSelf === ctx.owners[0].retireAge)?.totalCombined)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><TrendingUp className="w-3.5 h-3.5 text-indigo-600" /> The year contributions stop, at age {ctx.owners[0].retireAge}</div></div>
-              {/*
-                * The third card used to be a link to the Monte Carlo tab. There is no other tab now, so it
-                * reports the simulated downside instead - and once a run exists, the expected pot beside it
-                * is worth reading against the median rather than on its own, which is the comparison the
-                * two charts being separate used to hide.
-                */}
-              {simResult
-                ? <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Simulated survival</div><div className={`text-2xl font-black font-mono mt-2 ${simResult.successRate >= 90 ? 'text-emerald-600' : simResult.successRate >= 75 ? 'text-amber-600' : 'text-rose-600'}`}>{simResult.successRate.toFixed(1)}%</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Dices className="w-3.5 h-3.5 text-indigo-600" /> Median pot {formatGBP(simResult.medianTerminal)}, a tenth end below {formatGBP(simResult.p10Terminal)}</div></div>
-                : <button type="button" onClick={handleRunAll} disabled={mcBusy} className="text-left bg-slate-50 border border-slate-200 p-5 rounded-2xl shadow-xs hover:border-indigo-200 hover:bg-surface transition-colors cursor-pointer group disabled:opacity-60 disabled:cursor-not-allowed"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">How often does this hold?</div><div className="text-base font-bold text-slate-800 mt-2 group-hover:text-indigo-700">{mcBusy ? 'Running…' : <>Run the simulation &rarr;</>}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Dices className="w-3.5 h-3.5 text-indigo-600" /> The modelled band cannot run dry. {MC_TRIALS.toLocaleString()} real paths can.</div></button>}
-            </div>
+              {/* ---------------- 1. TOPLINE ---------------- */}
+              {showSlide(1) && (
+                <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+                  {slideHead(1, 'Your plan as entered', `Spending ${formatGBP(simResult.spend)} a year to age ${terminalAge}.`)}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 text-xs">
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Survival rate</span><span className={`text-xl font-black font-mono ${simResult.successRate >= 90 ? 'text-emerald-700' : simResult.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}`}>{simResult.successRate.toFixed(1)}%</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">&plusmn;{(1.96 * simResult.standardError).toFixed(1)} pts</span></div>
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Pot at retirement</span><span className="text-xl font-black font-mono text-indigo-700">{formatGBP(timelineData.find(r => r.ageSelf === ctx.owners[0].retireAge)?.totalCombined)}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">age {ctx.owners[0].retireAge}, expected path</span></div>
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Median pot @ {terminalAge}</span><span className="text-xl font-black font-mono text-blue-700">{formatGBP(simResult.medianTerminal)}</span>{ctx.pensionDeathTaxRate > 0 && <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">net of death tax {formatGBP(simResult.medianTerminalNet)}</span>}</div>
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Unlucky pot @ {terminalAge}</span><span className="text-xl font-black font-mono text-rose-700">{formatGBP(simResult.p10Terminal)}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">one plan in ten ends below</span></div>
+                    <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Pre-access failures</span><span className={`text-xl font-black font-mono ${simResult.preNmpaFailRate > 5 ? 'text-rose-700' : 'text-slate-700'}`}>{simResult.preNmpaFailRate.toFixed(1)}%</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">stranded before {nmpa}</span></div>
+                  </div>
+                  <p className="text-[11px] text-slate-500 leading-relaxed">
+                    <strong className={simResult.successRate >= 90 ? 'text-emerald-700' : simResult.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}>{formatGBP(simResult.spend)} a year held in {simResult.successRate.toFixed(1)}% of {simResult.trials.toLocaleString()} futures.</strong>{' '}
+                    A path counts as failed in any year that living costs cannot be met from a wrapper you can actually reach, or if the pot ends below your bequest floor. The &plusmn; is sampling error: at this many trials, a difference smaller than that is noise.
+                    {simResult.preNmpaFailRate > 5 && <> <strong className="text-rose-700">Check the pre-access figure separately</strong> &mdash; {simResult.preNmpaFailRate.toFixed(1)}% of paths had pension money that was still locked, which is a bridging problem rather than a saving-enough one.</>}
+                    {simResult.medianFailAge && <> Of the paths that did fail, the median ran dry at {simResult.medianFailAge}; the earliest at {simResult.earliestFailAge}.</>}
+                  </p>
+                  {slideNav(1)}
+                </div>
+              )}
 
-            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
-              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-                <div>
-                  <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Layers className="w-4 h-4 text-blue-600" /> Projected Portfolio Trajectory</h2>
-                  <span className="text-xs text-slate-500">Real purchasing power by account wrapper{isSandboxModified && <span className="ml-2 font-bold text-amber-600">• Showing Sandbox Impact (dashed)</span>}</span>
-                </div>
-                <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
-                  <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 px-1 py-1 rounded-xl text-xs">
-                    <span className="text-slate-500 px-1.5 whitespace-nowrap" title="Compounded from the return matrix. Live, no run needed.">Rate based:</span>
-                    {[['quartile', BAND_QUANTILES.quartile.short, BAND_QUANTILES.quartile.button], ['decile', BAND_QUANTILES.decile.short, BAND_QUANTILES.decile.button], ['off', 'Off', 'Expected line only']].map(([k, label, title]) => (
-                      <button key={k} type="button" onClick={() => setBandMode(k)} title={title}
-                        className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${bandMode === k ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}>{label}</button>
-                    ))}
-                  </div>
-                  <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 px-1 py-1 rounded-xl text-xs">
-                    <span className="text-slate-500 px-1.5 whitespace-nowrap">Monte Carlo:</span>
-                    <button type="button" onClick={() => fanData.length ? setShowFan(!showFan) : handleRunAll()} disabled={mcBusy}
-                      title={fanData.length ? 'The 10th to 90th percentile read off the simulated paths themselves' : 'Run the simulation to draw this'}
-                      className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${showFan && fanData.length ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}>
-                      {fanData.length ? (showFan ? 'On' : 'Off') : mcBusy ? 'Running…' : 'Run →'}
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-3 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl text-xs">
-                    <span className="text-slate-600 whitespace-nowrap">Horizon: <strong>Age {effectiveMaxVisibleAge}</strong></span>
-                    <input type="range" min={currentAge + 1} max={terminalAge} value={effectiveMaxVisibleAge} onChange={(e) => setMaxVisibleAge(Number(e.target.value))} className="w-32 sm:w-40 accent-blue-600 cursor-pointer" />
-                  </div>
-                </div>
-              </div>
-              <div className="relative overflow-x-auto">
-                <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="w-full h-auto select-none" onMouseLeave={() => setHoveredPoint(null)}>
-                  <g transform={`translate(${margin.left}, ${margin.top})`}>
-                    {yScale.ticks(6).map((t, i) => <g key={i} transform={`translate(0, ${yScale(t)})`}><line x2={innerWidth} stroke={cp.gridMajor} strokeDasharray="3,3" /><text x={-10} dy="0.32em" fill={cp.axisText} fontSize="10" textAnchor="end" fontFamily="monospace">£{(t / 1000).toFixed(0)}k</text></g>)}
-                    {xScale.ticks(10).map((t, i) => <g key={i} transform={`translate(${xScale(t)}, 0)`}><line y2={innerHeight} stroke={cp.gridMinor} /><text y={innerHeight + 20} fill={cp.axisText} fontSize="11" textAnchor="middle" fontFamily="monospace">{t}</text></g>)}
-                    {markers(xScale)}
-                    {/* simulated fan underneath the modelled band: it is the wider of the two, and drawing
-                        it first means the band reads as sitting inside it, which is the point being made */}
-                    {fanPaths && <>
-                      <path d={fanPaths.band} fill={cp.fanBand} stroke="none" />
-                      <path d={fanPaths.lower} fill="none" stroke={cp.fanEdge} strokeWidth="1.5" />
-                      <path d={fanPaths.upper} fill="none" stroke={cp.fanEdge} strokeWidth="1.5" />
-                      <path d={fanPaths.median} fill="none" stroke={cp.fanMedian} strokeWidth="2" strokeLinecap="round" opacity="0.85" />
-                    </>}
-                    {bandPaths && <>
-                      {!fanPaths && <path d={bandPaths.area} fill={cp.fanBand} stroke="none" />}
-                      <path d={bandPaths.lo} fill="none" stroke={cp.fanEdge} strokeWidth="1.5" strokeDasharray="5,4" />
-                      <path d={bandPaths.hi} fill="none" stroke={cp.fanEdge} strokeWidth="1.5" strokeDasharray="5,4" />
-                    </>}
-                    {themedSeries.map(s => (activeSeries[s.id] && pathGenerators[s.id]) ? <path key={s.id} d={pathGenerators[s.id]} fill="none" stroke={s.color} strokeWidth={s.strokeWidth} strokeDasharray={s.dash} strokeLinecap="round" /> : null)}
-                    {sandboxLinePath && <path d={sandboxLinePath} fill="none" stroke={cp.sandboxDash} strokeWidth="3.5" strokeDasharray="6,4" strokeLinecap="round" />}
-                    {comparePaths.map(c => <path key={c.id} d={c.d} fill="none" stroke={c.tone} strokeWidth="2.5" strokeDasharray="5,3" strokeLinecap="round" />)}
-                    <rect width={innerWidth} height={innerHeight} fill="transparent" onMouseMove={(e) => { const rect = e.currentTarget.getBoundingClientRect(); const age = Math.round(xScale.invert((e.clientX - rect.left) * (innerWidth / Math.max(1, rect.width)))); setHoveredPoint(visibleData.find(d => d.ageSelf === age) || null); }} />
-                    {hoveredPoint && <g transform={`translate(${xScale(hoveredPoint.ageSelf)}, 0)`}><line y2={innerHeight} stroke={cp.hoverCrosshair} strokeWidth="1" strokeDasharray="2,2" /><circle cy={yScale(hoveredPoint.expected || 0)} r="4" fill={cp.trajectoryHoverFill} stroke={cp.hoverDotStroke} strokeWidth="2" /></g>}
-                  </g>
-                </svg>
-                {hoveredPoint && (
-                  <div className="absolute top-4 left-24 bg-surface/95 border border-slate-200 p-3 rounded-xl shadow-lg text-xs space-y-1 backdrop-blur-md pointer-events-none">
-                    <div className="font-bold text-slate-800 border-b border-slate-100 pb-1 flex justify-between gap-4"><span>Age {hoveredPoint.ageSelf} ({hoveredPoint.year})</span><span className="text-slate-500">Spend Demand: {formatGBP(hoveredPoint.targetSpend)}/yr</span></div>
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-1 font-mono">
-                      {activeSeries.expected && <div className="text-blue-600 font-bold">Projected Pot: {formatGBP(hoveredPoint.expected)}</div>}
-                      {bandData && (() => { const b = bandData.find(d => d.ageSelf === hoveredPoint.ageSelf); return b ? <div className="text-slate-600 col-span-2 border-t border-slate-100 pt-1 mt-0.5">{bandSpec.highPct} {formatGBP(b.hi)} &nbsp;&middot;&nbsp; {bandSpec.lowPct} {formatGBP(Math.max(0, b.lo))}</div> : null; })()}
-                      {isSandboxModified && <div className="text-amber-600 font-bold">Sandbox Pot: {formatGBP(sandboxTimeline.find(d => d.ageSelf === hoveredPoint.ageSelf)?.totalCombined)}</div>}
-                      {activeSeries.pensions && <div className="text-sky-600">Pensions: {formatGBP(hoveredPoint.pensions)}</div>}
-                      {activeSeries.isas && <div className="text-teal-600">ISAs: {formatGBP(hoveredPoint.isas)}</div>}
-                      <div className="text-slate-600">Tax this year: {formatGBP(hoveredPoint.taxPaid)}</div>
-                      {compareRuns.filter(r => r.rows).map(r => (
-                        <div key={r.id} className="font-bold truncate" style={{ color: r.tone }}>{r.name}: {formatGBP(r.rows.find(d => d.ageSelf === hoveredPoint.ageSelf)?.totalCombined)}</div>
+              {/* ---------------- 2. SAFE SPEND ---------------- */}
+              {showSlide(2) && (
+                <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+                  {slideHead(2, 'The most you could spend', 'Holds the risk fixed and solves for the income instead.')}
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className="text-slate-500 font-semibold">Survive at least:</span>
+                    <div className="flex items-center bg-slate-100 border border-slate-200 rounded-xl p-1">
+                      {[85, 90, 95, 99].map(rate => (
+                        <button key={rate} type="button" disabled={mcBusy} onClick={() => { setTargetSurvivalRate(rate); handleResolveSafeMax(rate); }}
+                          className={`px-2.5 py-0.5 rounded-lg font-semibold transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${targetSurvivalRate === rate ? 'bg-surface text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>{rate}%</button>
                       ))}
                     </div>
+                    {isOptimizing && <span className="text-slate-400">solving&hellip;</span>}
                   </div>
-                )}
-              </div>
-              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
-                <div className="flex flex-wrap items-center gap-2">
-                  {themedSeries.map(s => (
-                    <button key={s.id} onClick={() => setActiveSeries(prev => ({ ...prev, [s.id]: !prev[s.id] }))} className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center gap-2 transition-all cursor-pointer border ${activeSeries[s.id] ? 'bg-slate-100 border-slate-300 text-slate-900 font-semibold' : 'bg-surface border-slate-200 text-slate-400 opacity-60'}`}>
-                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: s.color }} />{s.label}{activeSeries[s.id] && <Check className="w-3 h-3 text-slate-600" />}
-                    </button>
-                  ))}
-                </div>
-                {isSandboxModified && <div className="flex items-center gap-2 text-xs font-mono font-bold text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1 rounded-xl"><span className="w-2.5 h-2.5 rounded-full bg-amber-500 border border-amber-600" /> Sandbox Active (Dashed Line)</div>}
-              </div>
-              {fanPaths && (
-                <p className="text-[11px] text-slate-500 leading-relaxed pt-1">
-                  <span className="inline-flex items-center gap-1.5 mr-1.5 align-middle"><span className="w-4 h-2.5 rounded-sm inline-block" style={{ background: cp.fanBand, border: `1px solid ${cp.fanEdge}` }} /></span>
-                  <strong className="text-slate-700">Monte Carlo, 10th to 90th percentile:</strong> where {simResult.trials.toLocaleString()} randomised paths actually put the pot at each age, spending {formatGBP(simResult.spend)} a year, with the median through the middle. No single path follows any of those lines and none is a forecast &mdash; each is a percentile of where the paths had landed by that age, so the right-hand edge is the same 10th, 50th and 90th percentile pot reported below.{' '}
-                  {fanRuinAge !== null
-                    ? <><strong className="text-rose-700">Its lower edge reaches zero at age {fanRuinAge}:</strong> one plan in ten has run dry by then, which is the statement no smooth curve can make.</>
-                    : <><strong className="text-emerald-700">Its lower edge never reaches zero:</strong> more than nine plans in ten still hold something at age {terminalAge}.</>}
-                  {bandPaths ? <> The dashed edges are the rate-based band described below; the gap between the two is sequence risk.</> : null}
-                </p>
-              )}
-              {bandCurves && bandSpec && (
-                <p className="text-[11px] text-slate-500 leading-relaxed pt-1">
-                  <span className="inline-flex items-center gap-1.5 mr-1.5 align-middle"><span className="w-4 h-2.5 rounded-sm inline-block" style={{ background: cp.fanBand, border: `1px solid ${cp.fanEdge}` }} /></span>
-                  <strong className="text-slate-700">{bandSpec.lowPct} to {bandSpec.highPct} percentile:</strong> {bandMode === 'quartile' ? <>outcomes better and worse than this happen about {bandSpec.label} either way. {plan?.riskSource === 'blackrock2026' ? <>These are the quartiles BlackRock publish, not an extrapolation.</> : <>Quartiles, from the return matrix in Config.</>}</> : <>{bandSpec.label} either way, the same percentiles the Monte Carlo is drawn at, so the two can be compared directly.</>} Each edge re-derives its rate at every age, because the spread of an annualised return narrows the longer you hold.{' '}
-                  {bandCurves.lo.failAge !== null
-                    ? <><strong className="text-rose-700">The lower edge runs dry at age {bandCurves.lo.failAge}.</strong> Past that point treat it as broken rather than as a floor: a smooth line cannot go below zero and the real 1-in-{bandMode === 'quartile' ? '4' : '10'} outcome can stay there. </>
-                    : <>The lower edge is the one to distrust first: it cannot run dry, so on a plan under strain it sits above the truth. Measured at the final age, it is 5.5% optimistic on a plan surviving 99.5% of the time, 16.2% at 97.3%, and 98% at 91.3% &mdash; the weaker the plan, the more flattering this line. </>}
-                  For a downside that can fail, run the Monte Carlo.
-                </p>
-              )}
-              {scenarios.filter(s => s.id !== activeScenarioId).length > 0 && (
-                <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100">
-                  <span className="text-xs text-slate-500 font-semibold whitespace-nowrap">Compare saved scenarios:</span>
-                  {scenarios.filter(s => s.id !== activeScenarioId).map(s => {
-                    const run = compareRuns.find(r => r.id === s.id);
-                    const atCap = !run && selectedCompare.length >= MAX_COMPARE;
-                    return (
-                      <button key={s.id} type="button" disabled={atCap} onClick={() => toggleCompare(s.id)} title={atCap ? `Up to ${MAX_COMPARE} at once` : s.name}
-                        className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center gap-2 transition-all border max-w-[16rem] ${run ? 'bg-slate-100 border-slate-300 text-slate-900 font-semibold cursor-pointer' : atCap ? 'bg-surface border-slate-200 text-slate-300 cursor-not-allowed' : 'bg-surface border-slate-200 text-slate-500 opacity-70 cursor-pointer hover:opacity-100'}`}>
-                        <span className="w-2.5 h-2.5 rounded-full shrink-0 border" style={{ backgroundColor: run ? run.tone : 'transparent', borderColor: run ? run.tone : 'currentColor' }} />
-                        <span className="truncate">{s.name}</span>{run && <Check className="w-3 h-3 text-slate-600 shrink-0" />}
-                      </button>
-                    );
-                  })}
-                  {selectedCompare.length > 0 && <button type="button" onClick={() => setCompareIds([])} className="text-xs text-slate-500 hover:text-slate-800 hover:underline font-semibold cursor-pointer">Clear</button>}
-                </div>
-              )}
-            </div>
-
-
-            {(simResult || safeMaxResult) && (
-              <div className={`p-5 rounded-2xl shadow-xs border transition-all ${!simResult ? 'bg-slate-50 border-slate-200' : simResult.successRate >= 90 ? 'bg-emerald-50/90 border-emerald-200' : simResult.successRate >= 75 ? 'bg-amber-50/90 border-amber-200' : 'bg-rose-50/90 border-rose-200'}`}>
-                <div className="flex items-start gap-3.5">
-                  {simResult && (
-                    <div className={`p-3 rounded-2xl border shrink-0 ${simResult.successRate >= 90 ? 'bg-emerald-100 border-emerald-300 text-emerald-700' : simResult.successRate >= 75 ? 'bg-amber-100 border-amber-300 text-amber-700' : 'bg-rose-100 border-rose-300 text-rose-700'}`}>{simResult.successRate >= 90 ? <CheckCircle2 className="w-6 h-6" /> : <AlertTriangle className="w-6 h-6" />}</div>
-                  )}
-                  <div className="min-w-0 space-y-1.5">
-                    {simResult && (simResult.spend > 0 ? (
-                      <p className="text-sm text-slate-900 leading-snug">
-                        Your <strong className="font-mono font-bold">{formatGBP(simResult.spend)}</strong> a year held in <strong className={`font-mono font-bold ${simResult.successRate >= 90 ? 'text-emerald-700' : simResult.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}`}>{simResult.successRate.toFixed(1)}%</strong> of {simResult.trials.toLocaleString()} paths.
-                      </p>
-                    ) : (
-                      // Spending nothing survives everything, so quoting 100% here would read as reassurance
-                      // about a plan that has not been entered yet.
-                      <p className="text-sm text-slate-900 leading-snug">
-                        Your net living spend is blank, so there is nothing to test. Enter it in Plan Inputs and run this again.
-                      </p>
-                    ))}
-                    {safeMaxResult && (
-                      <p className="text-sm text-slate-900 leading-snug">
-                        {safeMaxResult.spend > 0 ? (
-                          <>
-                            You could take up to <strong className="font-mono font-bold text-indigo-700">{formatGBP(safeMaxResult.spend)}</strong> a year and still clear {safeMaxResult.targetRate}%
-                            {simResult && simResult.spend > 0 && Math.abs(safeMaxResult.spend - simResult.spend) >= 250 && (
-                              <span className="text-slate-600">, {formatGBP(Math.abs(safeMaxResult.spend - simResult.spend))} a year {safeMaxResult.spend > simResult.spend ? 'more' : 'less'} than you entered</span>
-                            )}.
-                          </>
-                        ) : (
-                          <>No level of spending at all clears {safeMaxResult.targetRate}%, so the solver returned nothing.</>
-                        )}
-                        {safeMaxResult.note && <span className="block text-[11px] text-rose-700 font-semibold mt-0.5">{safeMaxResult.note}</span>}
-                      </p>
-                    )}
-                    {tournamentBest && (
-                      <p className="text-sm text-slate-900 leading-snug">
-                        Best wrapper strategy: <strong>{tournamentBest.name}</strong> at <strong className="font-mono font-bold">{tournamentBest.stats.successRate.toFixed(1)}%</strong>
-                        {tournamentBaselinePlayer && tournamentBest.id !== 'baseline' && (
-                          <span className="text-slate-600">, {(tournamentBest.stats.successRate - tournamentBaselinePlayer.stats.successRate).toFixed(1)} points {tournamentBest.stats.successRate >= tournamentBaselinePlayer.stats.successRate ? 'above' : 'below'} your current split</span>
-                        )}.
-                      </p>
-                    )}
-                    {safeMaxStale && !mcBusy && (
-                      <button type="button" onClick={handleResolveSafeMax} className="text-[11px] text-blue-700 hover:text-blue-900 hover:underline font-semibold cursor-pointer">
-                        Solve again at {targetSurvivalRate}% &rarr;
-                      </button>
-                    )}
-                    <p className="text-[11px] text-slate-500 font-mono pt-0.5">
-                      {MC_TRIALS.toLocaleString()} paths · seed {mcSeed}{simResult ? ` · ±${(1.96 * simResult.standardError).toFixed(1)} pts` : ''} · today&rsquo;s money
-                    </p>
-                  </div>
-                </div>
-                {simResult && simResult.preNmpaFailRate > 0 && (
-                  <div className="mt-3.5 p-3 bg-rose-100/90 border border-rose-300 rounded-xl text-xs text-rose-950 flex items-start gap-2.5 shadow-2xs">
-                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-                    <div><strong className="font-bold">Pre-Pension Bridge Exhaustion in {simResult.preNmpaFailRate.toFixed(1)}% of paths:</strong> non-pension investments (S&amp;S ISAs, other investments and cash) ran out while pension money was still locked (access age {nmpa}). Consider shifting contributions to your S&amp;S ISA, a later retirement age, or the strategy comparison below.</div>
-                  </div>
-                )}
-              </div>
-            )}
-
-
-            {sequenceLoss && (
-              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
-                <div>
-                  <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><ArrowDownRight className="w-4 h-4 text-rose-600" /> What the order of returns costs you</h3>
-                  <span className="text-xs text-slate-500">A return forecast tells you what a holding left alone should earn. It cannot tell you this, because the answer is not in the returns &mdash; it is in the order they arrive.</span>
-                </div>
-
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
-                  <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80">
-                    <span className="text-slate-500 block mb-0.5">Unlucky return, arriving smoothly</span>
-                    <span className="text-base font-bold font-mono text-slate-700">{formatGBP(sequenceLoss.smoothLow)}</span>
-                    <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">the 10th %ile rate, compounded to {terminalAge}</span>
-                  </div>
-                  <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80">
-                    <span className="text-slate-500 block mb-0.5">Unlucky return, arriving in any order</span>
-                    <span className="text-base font-bold font-mono text-rose-700">{formatGBP(sequenceLoss.actualLow)}</span>
-                    <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">the simulation&rsquo;s 10th %ile pot</span>
-                  </div>
-                  <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80">
-                    <span className="text-slate-500 block mb-0.5">Sequence risk</span>
-                    {sequenceLoss.state === 'ruin'
-                      ? <span className="text-base font-black font-mono text-rose-700">{fanRuinAge !== null ? `Broke by ${fanRuinAge}` : 'Runs dry'}</span>
-                      : <span className={`text-base font-black font-mono ${sequenceLoss.state === 'loss' ? 'text-rose-700' : 'text-slate-700'}`}>{sequenceLoss.gapLow > 0 ? '−' : '+'}{formatGBP(Math.abs(sequenceLoss.gapLow))}</span>}
-                    <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">{sequenceLoss.state === 'ruin' ? 'no 10th %ile pot to compare' : `${Math.abs(sequenceLoss.pctLow).toFixed(1)}% of the smooth figure`}</span>
-                  </div>
-                </div>
-
-                <p className="text-[11px] text-slate-500 leading-relaxed">
-                  {sequenceLoss.state === 'loss' && <>
-                    <strong className="text-rose-700">Losing {formatGBP(sequenceLoss.gapLow)} to bad timing alone:</strong> an unlucky <em>rate</em>, arriving evenly, leaves {formatGBP(sequenceLoss.smoothLow)} at {terminalAge}. One plan in ten ends below {formatGBP(sequenceLoss.actualLow)}. Nothing separates those two figures but the order the same returns came in. It is one-sided: run the same comparison at the 90th percentile and {sequenceLoss.pctHigh < 0
-                      ? <>the simulation comes out <em>ahead</em> of the smooth figure, {formatGBP(sequenceLoss.actualHigh)} against {formatGBP(sequenceLoss.smoothHigh)}</>
-                      : <>it costs just {sequenceLoss.pctHigh.toFixed(1)}%, {formatGBP(sequenceLoss.smoothHigh)} smooth against {formatGBP(sequenceLoss.actualHigh)} actual, next to {sequenceLoss.pctLow.toFixed(1)}% at the bottom</>}. Selling units cheaply to live on is irreversible in a way that buying them cheaply is not.{' '}
-                  </>}
-                  {sequenceLoss.state === 'buying' && <>
-                    <strong className="text-emerald-700">Nothing here to lose to sequence risk.</strong> This plan never draws the pot down, so no run of bad years can force a sale. The small difference shown is contribution timing rather than order of returns &mdash; money paid in later is exposed to fewer years of compounding than a steady rate assumes &mdash; and it falls either way. {sequenceLoss.gapHigh < 0 ? <>The upside makes the point: {formatGBP(sequenceLoss.actualHigh)} actual against {formatGBP(sequenceLoss.smoothHigh)} smooth, <em>ahead</em> of the even path, because a bumpy one buys more units when prices are low. </> : null}While you are buying, volatility is mildly on your side. Expect that to reverse sharply once the plan is living off the pot.{' '}
-                  </>}
-                  {sequenceLoss.state === 'small' && <>
-                    <strong className="text-emerald-700">The order of returns costs you very little here.</strong> An unlucky rate arriving evenly leaves {formatGBP(sequenceLoss.smoothLow)} at {terminalAge}; one plan in ten ends below {formatGBP(sequenceLoss.actualLow)}, {sequenceLoss.gapLow >= 0 ? <>a difference of {sequenceLoss.pctLow.toFixed(1)}%</> : <>which is actually {Math.abs(sequenceLoss.pctLow).toFixed(1)}% <em>ahead</em> of the even path</>}. You are drawing down, but not hard enough relative to the pot for a bad early run to force selling at the bottom &mdash; the withdrawals are being met without liquidating into a fall. That is the position sequence risk is least able to hurt. It is also sensitive to spending: raising the annual draw is what turns this figure from a rounding error into a real number.{' '}
-                  </>}
-                  {sequenceLoss.state === 'ruin' && <>
-                    <strong className="text-rose-700">Sequence risk here is a date, not an amount.</strong> More than one plan in ten runs dry{fanRuinAge !== null ? <> &mdash; the lower edge hits zero at age {fanRuinAge}</> : null}, so there is no 10th percentile pot left to compare against. {sequenceLoss.smoothSurvives ? <>The same unlucky <em>rate</em> arriving evenly would have left {formatGBP(sequenceLoss.smoothLow)} at {terminalAge}: the shortfall is caused by <em>when</em> the bad years land, not by the average return being too low.</> : <>The unlucky rate does not survive the plan even arriving evenly, so the returns themselves are short before order is considered.</>}{' '}
-                  </>}
-                  Both figures come from the same forecast band shown in the Config risk matrix, over this plan&rsquo;s own horizon. The only difference is that one arrives evenly and the other does not.
-                </p>
-              </div>
-            )}
-
-
-            {simResult && (
-              <details open={mcDetailOpen} onToggle={(e) => setMcDetailOpen(e.currentTarget.open)} className="bg-surface border border-slate-200/90 rounded-2xl shadow-xs">
-                <summary className="p-4 cursor-pointer text-xs font-bold text-slate-900 uppercase tracking-wider select-none">
-                  The detail behind it{safeMaxResult ? <span className="ml-2 font-normal normal-case tracking-normal text-slate-400">both runs, side by side</span> : null}
-                </summary>
-                <div className="px-5 pb-5 space-y-4">
-                  {[
-                    { key: 'entered', label: 'Your plan as entered', spend: simResult.spend, st: simResult, accent: 'blue' },
-                    ...(safeMaxResult ? [{ key: 'solved', label: `At the ${safeMaxResult.targetRate}% safe maximum`, spend: safeMaxResult.spend, st: safeMaxResult.stats, accent: 'indigo' }] : [])
-                  ].map(row => (
-                    <div key={row.key} className="space-y-2">
-                      <div className="flex items-baseline gap-2">
-                        <span className={`text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded ${row.accent === 'indigo' ? 'bg-indigo-100 text-indigo-800' : 'bg-blue-100 text-blue-800'}`}>{row.label}</span>
-                        <span className="font-mono text-xs font-bold text-slate-800">{formatGBP(row.spend)}/yr</span>
+                  {safeMaxResult ? (
+                    <>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Safe maximum</span><span className="text-xl font-black font-mono text-emerald-700">{formatGBP(safeMaxResult.spend)}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">a year, today&rsquo;s money</span></div>
+                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Against your {formatGBP(simResult.spend)}</span><span className={`text-xl font-black font-mono ${safeMaxResult.spend >= simResult.spend ? 'text-emerald-700' : 'text-rose-700'}`}>{safeMaxResult.spend >= simResult.spend ? '+' : '−'}{formatGBP(Math.abs(safeMaxResult.spend - simResult.spend))}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">a year {safeMaxResult.spend >= simResult.spend ? 'more' : 'less'}</span></div>
+                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">It actually survives</span><span className="text-xl font-black font-mono text-emerald-700">{safeMaxResult.stats.successRate.toFixed(1)}%</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">at or above the {targetSurvivalRate}% asked for</span></div>
+                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Median pot @ {terminalAge}</span><span className="text-xl font-black font-mono text-blue-700">{formatGBP(safeMaxResult.stats.medianTerminal)}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">spending the maximum</span></div>
                       </div>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
-                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Survival Rate</span><span className={`text-base font-black font-mono ${row.st.successRate >= 90 ? 'text-emerald-700' : row.st.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}`}>{row.st.successRate.toFixed(1)}%</span></div>
-                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Age of Failure</span><span className={`text-base font-black font-mono ${!row.st.medianFailAge ? 'text-emerald-700' : row.st.medianFailAge < nmpa ? 'text-rose-700' : 'text-amber-700'}`}>{row.st.medianFailAge ? `Age ${row.st.medianFailAge}` : 'None'}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono truncate">{row.st.medianFailAge ? `Median of failed paths (earliest ${row.st.earliestFailAge})` : '100% Solvency'}</span></div>
-                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Pre-SIPP access failures</span><span className={`text-base font-black font-mono ${row.st.preNmpaFailRate > 5 ? 'text-rose-700' : 'text-slate-700'}`}>{row.st.preNmpaFailRate.toFixed(1)}%</span></div>
-                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">10th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-rose-700">{formatGBP(row.st.p10Terminal)}</span></div>
-                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Median Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-blue-700">{formatGBP(row.st.medianTerminal)}</span>{ctx.pensionDeathTaxRate > 0 && <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">net of pension death tax {formatGBP(row.st.medianTerminalNet)}</span>}</div>
-                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">90th %ile Pot @ {terminalAge}</span><span className="text-base font-bold font-mono text-emerald-700">{formatGBP(row.st.p90Terminal)}</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">median lifetime tax {formatGBP(row.st.medianLifetimeTax)}</span></div>
-                      </div>
+                      <p className="text-[11px] text-slate-500 leading-relaxed">
+                        {safeMaxResult.stats.note
+                          ? <><strong className="text-rose-700">{safeMaxResult.stats.note}</strong>{' '}</>
+                          : <><strong className="text-slate-700">{formatGBP(safeMaxResult.spend)} a year clears {targetSurvivalRate}%</strong>, and the {safeMaxResult.stats.successRate.toFixed(1)}% beside it is measured on the same {safeMaxResult.stats.trials.toLocaleString()} paths that figure is quoted from &mdash; not a separate sample, so the number is the one you are actually buying.{' '}</>}
+                        A lower target returns a higher figure: you are choosing how much risk of running short to accept in exchange for income now. 95% is the conventional planning benchmark; 99% is close to belt-and-braces and costs a lot of income to reach.
+                        {safeMaxResult.spend < simResult.spend && <> <strong className="text-rose-700">Your entered spend is above this.</strong> That is not a prohibition &mdash; it is the size of the bet you are making.</>}
+                      </p>
+                    </>
+                  ) : <p className="text-xs text-slate-500">Solving&hellip;</p>}
+                  {slideNav(2)}
+                </div>
+              )}
+
+              {/* ---------------- 3. RATE-BASED CHART ---------------- */}
+              {showSlide(3) && (
+                <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+                  {slideHead(3, 'Rate based', 'One steady rate per wrapper, compounded. Redraws as you type.')}
+                  <div className="flex flex-wrap items-center gap-3">
+                    <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 px-1 py-1 rounded-xl text-xs">
+                      {[['quartile', BAND_QUANTILES.quartile.short, BAND_QUANTILES.quartile.button], ['decile', BAND_QUANTILES.decile.short, BAND_QUANTILES.decile.button], ['off', 'No band', 'Expected line only']].map(([k, label, title]) => (
+                        <button key={k} type="button" onClick={() => setBandMode(k)} title={title}
+                          className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${bandMode === k ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}>{label}</button>
+                      ))}
                     </div>
-                  ))}
+                    <div className="flex items-center gap-3 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl text-xs">
+                      <span className="text-slate-600 whitespace-nowrap">Horizon: <strong>Age {effectiveMaxVisibleAge}</strong></span>
+                      <input type="range" min={currentAge + 1} max={terminalAge} value={effectiveMaxVisibleAge} onChange={(e) => setMaxVisibleAge(Number(e.target.value))} className="w-32 sm:w-40 accent-blue-600 cursor-pointer" />
+                    </div>
+                  </div>
+                  {renderProjectionChart('rate')}
                   <p className="text-[11px] text-slate-500 leading-relaxed">
-                    A path fails in any year that living costs or a one-off cost cannot be met from an accessible wrapper, or if the terminal pot ends below your bequest floor. A pre-SIPP access failure means pension money existed but was still locked. Paths are seeded, so the same seed reproduces the result exactly.
+                    <strong className="text-slate-700">Its weakness: this line cannot go bust.</strong> A casino lets a winner keep playing but stops a loser at zero, and a smooth curve only ever models the first half of that. It has no bad decade in it, so it never has to sell units cheaply to pay the bills, and its lower edge quietly keeps compounding through years a real plan would not have survived.
+                    {bandCurves && bandCurves.lo.failAge !== null
+                      ? <> Here that shows: <strong className="text-rose-700">the lower edge runs dry at {bandCurves.lo.failAge}</strong>, and past that point it is not a floor, it is broken.</>
+                      : <> Measured at the final age, the lower edge is 5.5% optimistic on a plan surviving 99.5% of the time and 98% optimistic on one surviving 91.3% &mdash; the weaker the plan, the more flattering this chart.</>}
+                    {' '}Use it to see the shape of the range as you type. Use the next screen when the downside is the decision.
                   </p>
+                  {slideNav(3)}
                 </div>
-              </details>
+              )}
+
+              {/* ---------------- 4. MONTE CARLO CHART ---------------- */}
+              {showSlide(4) && (
+                <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+                  {slideHead(4, 'Monte Carlo', `${simResult.trials.toLocaleString()} randomised futures, same axes as the last screen.`)}
+                  <div className="flex flex-wrap items-center gap-3">
+                    <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 px-1 py-1 rounded-xl text-xs">
+                      <span className="text-slate-500 px-1.5">Range:</span>
+                      <button type="button" onClick={() => setShowFan(!showFan)} className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${showFan ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}>{showFan ? 'On' : 'Off'}</button>
+                    </div>
+                    <div className="flex items-center gap-3 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl text-xs">
+                      <span className="text-slate-600 whitespace-nowrap">Horizon: <strong>Age {effectiveMaxVisibleAge}</strong></span>
+                      <input type="range" min={currentAge + 1} max={terminalAge} value={effectiveMaxVisibleAge} onChange={(e) => setMaxVisibleAge(Number(e.target.value))} className="w-32 sm:w-40 accent-blue-600 cursor-pointer" />
+                    </div>
+                  </div>
+                  {renderProjectionChart('mc')}
+                  <p className="text-[11px] text-slate-500 leading-relaxed">
+                    <strong className="text-slate-700">Its strength: these futures can go bust, and some of them do.</strong> Every line is a plan that lived through its own run of good and bad years in a particular order, sold units at whatever price those years offered, and stopped dead if it reached zero. That is the half a smooth curve leaves out, and it is drawn at the same quartiles as the previous screen so the two can be read against each other directly.
+                    {fanRuinAge !== null
+                      ? <> <strong className="text-rose-700">A tenth of these futures are broke by {fanRuinAge}.</strong> No smooth line could have told you that.</>
+                      : <> Fewer than one in ten are broke by {terminalAge}.</>}
+                  </p>
+                  {slideNav(4)}
+                </div>
+              )}
+
+              {/* ---------------- 5. SIDE BY SIDE ---------------- */}
+              {showSlide(5) && (
+                <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+                  {slideHead(5, 'Side by side', 'The same plan, both ways, at the same five points.')}
+                  {compareRows2 && (
+                    <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans">
+                          <tr>
+                            <th className="p-2.5">Pot at age {terminalAge}</th>
+                            <th className="p-2.5" style={{ color: cp.rateEdge }}>Rate based</th>
+                            <th className="p-2.5" style={{ color: cp.fanMedian }}>Monte Carlo</th>
+                            <th className="p-2.5">Difference</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
+                          {compareRows2.quantiles.map(r => (
+                            <tr key={r.label} className={r.label === 'Median' ? 'bg-slate-50/80' : ''}>
+                              <td className="p-2 font-sans font-semibold text-slate-700">{r.label}</td>
+                              <td className="p-2 text-slate-800">{formatGBP(r.rate)}</td>
+                              <td className="p-2 text-slate-800">{formatGBP(r.mc)}</td>
+                              <td className={`p-2 font-semibold ${Math.abs(r.pct) < 2 ? 'text-slate-400' : r.pct > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>{r.mc > 0 ? `${r.pct > 0 ? '+' : ''}${r.pct.toFixed(0)}%` : '—'}</td>
+                            </tr>
+                          ))}
+                          {compareRows2.extras.map(r => (
+                            <tr key={r.label} className="border-t-2 border-slate-200">
+                              <td className="p-2 font-sans font-semibold text-slate-700">{r.label}</td>
+                              <td className="p-2 text-slate-800">{r.rate}</td>
+                              <td className="p-2 text-slate-800">{r.mc}</td>
+                              <td className="p-2 text-slate-400 font-sans">{r.note || ''}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  <p className="text-[11px] text-slate-500 leading-relaxed">
+                    Read the <strong>Difference</strong> column downward. The two methods agree near the middle and part company at the bottom: the rate-based figures sit above the Monte Carlo ones precisely where the plan is under most strain, because that is where being unable to go bust flatters you most. Everything here is in today&rsquo;s money.
+                  </p>
+                  {sequenceLoss && sequenceLoss.state === 'loss' && (
+                    <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-3 text-[11px] text-slate-600 leading-relaxed">
+                      <strong className="text-rose-700">{formatGBP(sequenceLoss.gapLow)} of that gap is order alone.</strong> An unlucky <em>rate</em> arriving evenly leaves {formatGBP(sequenceLoss.smoothLow)}; one plan in ten actually ends below {formatGBP(sequenceLoss.actualLow)}. Same average return, different order of arrival.
+                    </div>
+                  )}
+                  {slideNav(5)}
+                </div>
+              )}
+            </>
             )}
 
 
+            {/* Saved scenarios overlay on whichever chart is showing, and the table ranks them against each
+                other. Kept outside the five steps: it compares PLANS, where the steps compare methods. */}
+            <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+            {scenarios.filter(s => s.id !== activeScenarioId).length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100">
+                <span className="text-xs text-slate-500 font-semibold whitespace-nowrap">Compare saved scenarios:</span>
+                {scenarios.filter(s => s.id !== activeScenarioId).map(s => {
+                  const run = compareRuns.find(r => r.id === s.id);
+                  const atCap = !run && selectedCompare.length >= MAX_COMPARE;
+                  return (
+                    <button key={s.id} type="button" disabled={atCap} onClick={() => toggleCompare(s.id)} title={atCap ? `Up to ${MAX_COMPARE} at once` : s.name}
+                      className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center gap-2 transition-all border max-w-[16rem] ${run ? 'bg-slate-100 border-slate-300 text-slate-900 font-semibold cursor-pointer' : atCap ? 'bg-surface border-slate-200 text-slate-300 cursor-not-allowed' : 'bg-surface border-slate-200 text-slate-500 opacity-70 cursor-pointer hover:opacity-100'}`}>
+                      <span className="w-2.5 h-2.5 rounded-full shrink-0 border" style={{ backgroundColor: run ? run.tone : 'transparent', borderColor: run ? run.tone : 'currentColor' }} />
+                      <span className="truncate">{s.name}</span>{run && <Check className="w-3 h-3 text-slate-600 shrink-0" />}
+                    </button>
+                  );
+                })}
+                {selectedCompare.length > 0 && <button type="button" onClick={() => setCompareIds([])} className="text-xs text-slate-500 hover:text-slate-800 hover:underline font-semibold cursor-pointer">Clear</button>}
+              </div>
+            )}
+            </div>
             {selectedCompare.length > 0 && (
               <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
                 <div>
@@ -5128,8 +5306,22 @@ export default function App() {
                 <p className="text-[11px] text-slate-500 leading-relaxed">One steady real rate per wrapper, so this ranks the plans against each other rather than against a market. It carries no sequence-of-returns risk: for the chance each scenario survives, enter them in the tournament on the Strategy tab, which runs every scenario on the same market paths.</p>
               </div>
             )}
-
-            {renderSandboxPanel()}
+            {/* The sandbox is the end of the walk, not a permanent fixture: it appears once the five steps
+                have been seen (or straight away on a re-run, when they have been seen already). */}
+            {simResult && (sandboxRevealed || seeAll) && (
+              <>
+                {renderSandboxPanel()}
+                {simResult && (
+                  <div className="bg-surface border border-slate-200/90 p-4 rounded-2xl shadow-xs flex flex-wrap items-center justify-between gap-3">
+                    <span className="text-[11px] text-slate-500">Changed something? Run it again and the five steps come back with every figure refreshed.</span>
+                    <button type="button" onClick={() => handleRunAll({ cascade: true })} disabled={mcBusy}
+                      className="px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 dark:from-[#2C5C8F] dark:to-[#A9781F] text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95 disabled:opacity-60">
+                      <RotateCcw className="w-3.5 h-3.5" /> {mcBusy ? 'Running…' : 'Rerun projections'}
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
 
