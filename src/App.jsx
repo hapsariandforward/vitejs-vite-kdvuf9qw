@@ -103,6 +103,20 @@ const DEFAULT_RISK_PROFILES = {
  * from the source workbook. Each set carries the date it was published and the date it expires, because
  * a stale assumption that looks current is worse than an obviously old one.
  */
+/*
+ * The matrix a brand-new plan starts on.
+ *
+ * It is a published set rather than the built-in figures, because a sourced assumption a user can check
+ * beats a house number they cannot, and because the band drawn on the trajectory is measurably more
+ * accurate on it (mean error against the simulation 1.6% versus 2.8%): the fitted sigmaParam carries
+ * forecast uncertainty that does not diversify away with time, which is the term a volatility-only band
+ * is missing. The cost is that it carries an expiry - see the notice the Config tab shows once it passes.
+ *
+ * Only NEW plans get it. normalizePlan leaves a saved plan's own riskProfiles alone, so nobody's stored
+ * assumptions change underneath them on upgrade; the Config picker is how an existing plan moves over.
+ */
+const DEFAULT_RISK_SOURCE = 'blackrock2026';
+
 const CMA_PRESETS = {
   blackrock2026: {
     name: 'BlackRock CMA',
@@ -146,6 +160,15 @@ function applyCmaPreset(presetKey, inflationPct) {
 
 // 90th percentile of the standard normal. The 10th is its negative.
 const Z90 = 1.2815515655446004;
+// 75th percentile. The quartiles matter because they are what BlackRock actually publish: the decile band
+// is our extrapolation out from their interquartile range, so anything claiming to be "as published" has
+// to be drawn here rather than at Z90.
+const Z75 = 0.6744897501960817;
+// the bands the UI will draw, each with the share of outcomes it claims to sit outside
+const BAND_QUANTILES = {
+  quartile: { z: Z75, label: '1 in 4', lowPct: '25th', highPct: '75th' },
+  decile: { z: Z90, label: '1 in 10', lowPct: '10th', highPct: '90th' }
+};
 
 /*
  * The constant annual real rate whose compounded result over `years` lands on the 90th (lucky) and 10th
@@ -162,12 +185,70 @@ const Z90 = 1.2815515655446004;
  * No single simulated path follows one of these lines. Each is a percentile of the outcome at the end,
  * which is a different claim from "the 90th percentile happened every year" — that would be 0.1^T.
  */
-function luckyBand(real, vol, years, sigmaParam = 0) {
+function quantileRate(real, vol, years, sigmaParam, z) {
   const T = Math.max(1, num(years, 1));
   const m = Math.log(1 + clamp(real, -0.99, 50));
   const sp = Math.max(0, num(sigmaParam, 0));
-  const spread = Z90 * Math.sqrt(sp * sp + (vol * vol) / T);
-  return { lucky: Math.exp(m + spread) - 1, unlucky: Math.exp(m - spread) - 1 };
+  return Math.exp(m + z * Math.sqrt(sp * sp + (vol * vol) / T)) - 1;
+}
+function luckyBand(real, vol, years, sigmaParam = 0) {
+  return {
+    lucky: quantileRate(real, vol, years, sigmaParam, Z90),
+    unlucky: quantileRate(real, vol, years, sigmaParam, -Z90)
+  };
+}
+
+/*
+ * The lucky / unlucky CURVE: the pot held at each age if returns arrived evenly at that age's own
+ * quantile rate.
+ *
+ * The horizon is the whole difficulty, and getting it wrong is why this was removed from the app once
+ * already. quantileRate's spread is √(sp² + σ²/T), which narrows as T grows, so no single rate can
+ * describe the whole chart — compounding a 45-year rate across the first five years understates the early
+ * spread by about a factor of three. Measured against the simulation, a fixed-rate band is 24–29% out at
+ * age 50 in pure accumulation, where sequence risk cannot possibly be the cause. Re-deriving the rate at
+ * every age brings that to 2–3% across accumulation and most of drawdown.
+ *
+ * Cost is O(T²) step-years: one deterministic run per horizon, keeping only that horizon's own row. About
+ * 19ms for both edges of a 45-year plan, which is inside a frame and cheap enough to recompute as the
+ * user types.
+ *
+ * The known bias, and the reason this never replaces the simulation: a smooth path cannot run dry. Once a
+ * real share of simulated paths fail, the true lower quantile is dragged toward zero by ruin and this
+ * curve sits above it. The error tracks how stressed the plan is rather than which phase it is in —
+ * measured at the terminal age, +5.5% at 99.5% survival, +16.2% at 97.3%, +98.0% at 91.3%. `failAge`
+ * reports where the unlucky path itself runs dry, which is the cue the UI uses to say the line has
+ * stopped being trustworthy. bandcurve.test.mjs pins all of this.
+ */
+function quantileCurve(plan, z) {
+  const base = resolveMpaa(plan);
+  const profiles = isPlainObject(base.riskProfiles) ? base.riskProfiles : DEFAULT_RISK_PROFILES;
+  const probe = buildContext(base);
+  const n = probe.totalYears;
+  // all three totals, so the drawn band can follow the Combined / Myself / Partner view the way the
+  // expected line does rather than silently showing a household figure next to one person's
+  const pot = Array.from({ length: n + 1 });
+  for (let t = 0; t <= n; t++) {
+    const flat = {};
+    // Math.max(1, t): at t = 0 no time has elapsed, so there is no spread to speak of and the one-year
+    // rate is the sensible floor rather than a divide by zero.
+    Object.entries(profiles).forEach(([k, v]) => {
+      flat[k] = { ...v, real: quantileRate(num(v.real, 0) / 100, num(v.volatility, 12) / 100, Math.max(1, t), num(v.sigmaParam, 0) / 100, z) * 100, volatility: 0, sigmaParam: 0 };
+    });
+    const c = buildContext({ ...base, riskProfiles: flat });
+    const row = simulateDeterministic(c, 'expected')[t];
+    pot[t] = { ageSelf: row.ageSelf, totalCombined: row.totalCombined, totalSelf: row.totalSelf, totalPart: row.totalPart };
+  }
+  // Where the drawn line itself reaches zero, which is the only failure claim this curve can honestly
+  // make - and the point past which it is certainly optimistic, since it cannot go below zero and the
+  // simulation's lower quantile can stay there.
+  const zeroAt = pot.findIndex(v => v.totalCombined <= 0);
+  // the rate worth quoting is the one over the whole plan: the last horizon computed
+  const rate = {};
+  Object.entries(profiles).forEach(([k, v]) => {
+    rate[k] = quantileRate(num(v.real, 0) / 100, num(v.volatility, 12) / 100, n + 1, num(v.sigmaParam, 0) / 100, z) * 100;
+  });
+  return { pot, rate, failAge: zeroAt < 0 ? null : probe.ageSelf0 + zeroAt, years: n };
 }
 
 // ---------------------------------------------------------------- plan shape & defaults
@@ -305,8 +386,8 @@ const BLANK_PLAN = Object.freeze({
     decumulationPolicy: 'Bracket Fill Basic'
   },
   accounts: defaultAccounts(),
-  riskProfiles: DEFAULT_RISK_PROFILES,
-  riskSource: '',
+  riskProfiles: applyCmaPreset(DEFAULT_RISK_SOURCE, DEFAULT_CONFIG.inflation) || DEFAULT_RISK_PROFILES,
+  riskSource: DEFAULT_RISK_SOURCE,
   otherIncomes: [],
   oneOffContributions: [],
   oneOffCosts: [],
@@ -396,8 +477,16 @@ function normalizePlan(raw) {
     spending: { ...BLANK_PLAN.spending, ...s, spendBands: normaliseSpendBands(s, d) },
     accounts: [],
     riskProfiles: {},
-    // which published set the matrix came from, '' once any field has been edited by hand
-    riskSource: CMA_PRESETS[src.riskSource] ? src.riskSource : '',
+    /*
+     * Which published set the matrix came from, '' once any field has been edited by hand.
+     *
+     * A plan that names a preset keeps it. A plan that carries its own saved matrix but no preset name is
+     * an existing user, and keeps their figures untouched - changing someone's return assumptions on
+     * upgrade would silently rewrite every number in their plan. Only a plan with neither, i.e. a genuinely
+     * new one, starts on the published default.
+     */
+    riskSource: CMA_PRESETS[src.riskSource] ? src.riskSource
+      : (src.riskSource === undefined && !isPlainObject(src.riskProfiles)) ? DEFAULT_RISK_SOURCE : '',
     // legacy plans carried taxTreatment: 'Taxable' | 'Tax-free'; 'Taxable' migrates to otherTaxable so an
     // upgrade can never silently raise someone's pension headroom.
     otherIncomes: Array.isArray(src.otherIncomes) ? src.otherIncomes.filter(isPlainObject).map(i => ({ id: String(i.id || 'inc_' + Math.random().toString(36).slice(2)), name: i.name ?? '', owner: i.owner === 'Partner' ? 'Partner' : 'Myself', startAge: i.startAge ?? '', endAge: i.endAge ?? '', amount: i.amount ?? '', incomeType: INCOME_TYPES[i.incomeType] ? i.incomeType : (i.taxTreatment === 'Tax-free' ? 'taxFree' : 'otherTaxable'), notes: i.notes ?? '' })) : [],
@@ -447,8 +536,10 @@ function normalizePlan(raw) {
     else delete merged.contribByYear;
     return merged;
   });
-  // risk profiles: keep the six canonical tiers (custom values preserved), ignore unknown keys
-  const rp = isPlainObject(src.riskProfiles) ? src.riskProfiles : {};
+  // risk profiles: keep the six canonical tiers (custom values preserved), ignore unknown keys. A new plan
+  // has no saved matrix, so it takes the published default deflated at its own inflation setting.
+  const rp = isPlainObject(src.riskProfiles) ? src.riskProfiles
+    : (plan.riskSource ? applyCmaPreset(plan.riskSource, plan.config.inflation) || {} : {});
   Object.keys(DEFAULT_RISK_PROFILES).forEach(k => {
     plan.riskProfiles[k] = { ...DEFAULT_RISK_PROFILES[k], ...(isPlainObject(rp[k]) ? rp[k] : {}) };
   });
@@ -2253,8 +2344,8 @@ function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
 }
 
 // Namespace used by the UI (mirrors the modular engine.js exports)
-const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, CMA_PRESETS, applyCmaPreset, realFromNominal, luckyBand, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, marginalRateAt, taxBreakpoints, TAX_REGION_LABELS, calculateUKNetIncome, nicFor, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, salaryAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSearchPlayer, bridgeIsaAnnual, liquidRealRate, buildTournament, buildPolicyCandidates, pickBest };
-export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, CMA_PRESETS, applyCmaPreset, realFromNominal, luckyBand, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans, buildPolicyCandidates, pickBest, accumulationOutlay, solveEscalation, applyEscalationToPlan };
+const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, DEFAULT_RISK_SOURCE, BAND_QUANTILES, CMA_PRESETS, applyCmaPreset, realFromNominal, luckyBand, quantileRate, quantileCurve, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, marginalRateAt, taxBreakpoints, TAX_REGION_LABELS, calculateUKNetIncome, nicFor, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, salaryAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSearchPlayer, bridgeIsaAnnual, liquidRealRate, buildTournament, buildPolicyCandidates, pickBest };
+export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, DEFAULT_RISK_SOURCE, BAND_QUANTILES, CMA_PRESETS, applyCmaPreset, realFromNominal, luckyBand, quantileRate, quantileCurve, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans, buildPolicyCandidates, pickBest, accumulationOutlay, solveEscalation, applyEscalationToPlan };
 
 
 const STORAGE_KEY = 'rp_plan_full_v28';          // unchanged: old saved plans are migrated by normalizePlan
@@ -3159,6 +3250,36 @@ export default function App() {
   }), [timelineData, plan?.activeProfileView, isCouple]);
   const visibleData = useMemo(() => chartDisplayData.filter(d => d.ageSelf <= effectiveMaxVisibleAge), [chartDisplayData, effectiveMaxVisibleAge]);
 
+  /*
+   * The lucky / unlucky band.
+   *
+   * Off by default is the wrong instinct here: a range is the first thing anyone wants and the expected
+   * line alone invites reading a single number as a forecast. It is on, and honest about its one bias.
+   *
+   * Quartiles by default because that is what BlackRock actually publish - the decile band is our own
+   * extrapolation outward from their interquartile range - and because the quartile band measures closer
+   * to the simulation (mean error 1.6% against 2.8%), being less exposed to the tail. The toggle to
+   * deciles exists so the band can be compared like for like against the Monte Carlo fan, which is drawn
+   * at the 10th and 90th.
+   */
+  const [bandMode, setBandMode] = useState('quartile');   // 'quartile' | 'decile' | 'off'
+  const bandSpec = BAND_QUANTILES[bandMode] || null;
+  const bandCurves = useMemo(() => {
+    if (!bandSpec) return null;
+    try {
+      return { lo: E.quantileCurve(resolvedPlan, -bandSpec.z), hi: E.quantileCurve(resolvedPlan, bandSpec.z) };
+    } catch { return null; }
+  }, [resolvedPlan, bandSpec]);
+  // pick the same total the expected line is showing, so the band cannot describe a different household
+  const bandKey = (!isCouple || plan?.activeProfileView === 'Myself') ? 'totalSelf'
+    : (isCouple && plan?.activeProfileView === 'Partner') ? 'totalPart' : 'totalCombined';
+  const bandData = useMemo(() => {
+    if (!bandCurves) return null;
+    return bandCurves.lo.pot
+      .map((d, i) => ({ ageSelf: d.ageSelf, lo: d[bandKey], hi: bandCurves.hi.pot[i][bandKey] }))
+      .filter(d => d.ageSelf <= effectiveMaxVisibleAge);
+  }, [bandCurves, bandKey, effectiveMaxVisibleAge]);
+
   // ------------------------------------------------------------ chart scales
   const chartWidth = 960, chartHeight = 420;
   const margin = { top: 25, right: 35, bottom: 45, left: 80 };
@@ -3171,14 +3292,25 @@ export default function App() {
     if (isSandboxModified) sandboxTimeline.forEach(d => { if (d.ageSelf <= effectiveMaxVisibleAge && d.totalCombined > max) max = d.totalCombined; });
     // an overlaid scenario that outgrows the live plan must lift the axis, not run off the top of it
     compareRuns.forEach(r => { if (r.rows) r.rows.forEach(d => { if (d.ageSelf <= effectiveMaxVisibleAge && d.totalCombined > max) max = d.totalCombined; }); });
+    // and so must the lucky edge, which by construction sits above everything else on the chart
+    if (bandData) bandData.forEach(d => { if (d.hi > max) max = d.hi; });
     return Math.max(max * 1.08, 100000);
-  }, [visibleData, activeSeries, isSandboxModified, sandboxTimeline, compareRuns, effectiveMaxVisibleAge]);
+  }, [visibleData, activeSeries, isSandboxModified, sandboxTimeline, compareRuns, effectiveMaxVisibleAge, bandData]);
   const yScale = useMemo(() => d3.scaleLinear().domain([0, maxY]).range([innerHeight, 0]).nice(), [maxY, innerHeight]);
   const pathGenerators = useMemo(() => {
     const paths = {};
     SERIES_CONFIG.forEach(s => { if (activeSeries[s.id]) paths[s.id] = d3.line().x(d => xScale(d.ageSelf)).y(d => yScale(d[s.id] || 0)).curve(d3.curveMonotoneX)(visibleData); });
     return paths;
   }, [visibleData, activeSeries, xScale, yScale]);
+  const bandPaths = useMemo(() => {
+    if (!bandData || bandData.length < 2) return null;
+    const x = (d) => xScale(d.ageSelf);
+    return {
+      area: d3.area().x(x).y0(d => yScale(Math.max(0, d.lo))).y1(d => yScale(d.hi)).curve(d3.curveMonotoneX)(bandData),
+      lo: d3.line().x(x).y(d => yScale(Math.max(0, d.lo))).curve(d3.curveMonotoneX)(bandData),
+      hi: d3.line().x(x).y(d => yScale(d.hi)).curve(d3.curveMonotoneX)(bandData)
+    };
+  }, [bandData, xScale, yScale]);
   const sandboxLinePath = useMemo(() => {
     if (!isSandboxModified || !sandboxTimeline.length) return null;
     return d3.line().x(d => xScale(d.ageSelf)).y(d => yScale(d.totalCombined)).curve(d3.curveMonotoneX)(sandboxTimeline.filter(d => d.ageSelf <= effectiveMaxVisibleAge));
@@ -4450,8 +4582,10 @@ export default function App() {
 
               <div className="flex flex-wrap items-center gap-2 pt-1">
                 <span className="text-xs text-slate-500 font-semibold whitespace-nowrap">Assumptions:</span>
-                {[['builtin', 'Built-in defaults', 'The figures this planner shipped with.'],
-                  ...Object.entries(E.CMA_PRESETS).map(([k, v]) => [k, v.name, `${v.detail} · published ${v.published}`])
+                {/* The published set is what a new plan starts on now, so the house figures are labelled as
+                    the fallback they became: dateless, and the thing to reach for when the CMA expires. */}
+                {[['builtin', 'House figures (no expiry)', 'The planner’s own dateless figures. No forecast-uncertainty term, so the band is drawn from volatility alone.'],
+                  ...Object.entries(E.CMA_PRESETS).map(([k, v]) => [k, `${v.name}${k === E.DEFAULT_RISK_SOURCE ? ' (default)' : ''}`, `${v.detail} · published ${v.published} · expires ${v.expires}`])
                 ].map(([key, name, detail]) => {
                   const on = (plan?.riskSource || 'builtin') === key;
                   return (
@@ -4560,7 +4694,7 @@ export default function App() {
             <div className="p-4 bg-blue-50/80 border border-blue-200 rounded-2xl text-xs text-slate-700 space-y-1.5 shadow-2xs">
               <div className="flex items-center gap-2 font-bold text-blue-950 text-sm"><Layers className="w-4 h-4 text-blue-600" /> Deterministic Portfolio Trajectory &amp; Sandbox</div>
               <p className="leading-relaxed"><strong>What it does:</strong> Models compound wealth paths and tax-wrapper decumulation at one steady real rate per wrapper, recalculated live as you type. It is the fast view: change a contribution or a retirement age in the Sandbox and the whole projection moves with you.</p>
-              <p className="text-slate-500 text-[11px] leading-relaxed"><strong>Where are the lucky and unlucky curves?</strong> This tab used to draw one either side of the expected line, and both were removed because a constant rate cannot carry sequence-of-returns risk. That risk applies only on the way down, once you are withdrawing: a bad run of years early in retirement forces selling units cheaply and the loss never comes back. Measured against the simulation the upper line was fine, but the lower one finished a mean 23% above the 10-in-100 worst outcome, and 70% above it at worst. A smooth curve is the wrong shape for that question, so the range now comes from the Monte Carlo tab, where it is read off {MC_TRIALS.toLocaleString()} actual paths.</p>
+              <p className="text-slate-500 text-[11px] leading-relaxed"><strong>About the shaded band.</strong> These curves were once removed from this tab for being inaccurate, and the reason turned out to be how they were drawn rather than what they were: a single rate held across the whole chart. The quantile rate depends on the horizon &mdash; the spread is &radic;(sp&sup2; + &sigma;&sup2;/T), which narrows as T grows &mdash; so a 45-year rate compounded across the first five years understates the early spread threefold, and a fixed-rate band measured 24&ndash;29% away from the simulation at age 50, in pure accumulation, where sequence risk cannot be the cause. Re-deriving the rate at every age brings that to 2&ndash;3%, which is what is drawn here.</p>
               <p className={`text-[11px] font-semibold ${deterministicVerdict.survived ? 'text-emerald-700' : 'text-rose-700'}`}>
                 {deterministicVerdict.survived ? `Expected path survives to ${terminalAge}` : `Expected path fails at age ${deterministicVerdict.failAge} (${deterministicVerdict.failReason === 'pre-access' ? 'pre-SIPP access bridge exhausted' : deterministicVerdict.failReason === 'floor' ? 'below the bequest floor' : 'spending shortfall'})`}; lifetime tax {formatGBP(deterministicVerdict.lifetimeTax)}{P.cgtEnabled ? ' (income tax + CGT)' : ''}.
               </p>
@@ -4592,9 +4726,18 @@ export default function App() {
                   <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Layers className="w-4 h-4 text-blue-600" /> Projected Portfolio Trajectory</h2>
                   <span className="text-xs text-slate-500">Real purchasing power by account wrapper{isSandboxModified && <span className="ml-2 font-bold text-amber-600">• Showing Sandbox Impact (dashed)</span>}</span>
                 </div>
-                <div className="flex items-center gap-3 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl text-xs w-full sm:w-auto">
-                  <span className="text-slate-600 whitespace-nowrap">Horizon: <strong>Age {effectiveMaxVisibleAge}</strong></span>
-                  <input type="range" min={currentAge + 1} max={terminalAge} value={effectiveMaxVisibleAge} onChange={(e) => setMaxVisibleAge(Number(e.target.value))} className="w-32 sm:w-40 accent-blue-600 cursor-pointer" />
+                <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
+                  <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 px-1 py-1 rounded-xl text-xs">
+                    <span className="text-slate-500 px-1.5 whitespace-nowrap">Band:</span>
+                    {[['quartile', '1 in 4'], ['decile', '1 in 10'], ['off', 'Off']].map(([k, label]) => (
+                      <button key={k} type="button" onClick={() => setBandMode(k)} title={k === 'quartile' ? 'The 25th and 75th percentile: what BlackRock publish' : k === 'decile' ? 'The 10th and 90th percentile: matches the Monte Carlo fan' : 'Expected line only'}
+                        className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${bandMode === k ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}>{label}</button>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-3 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl text-xs">
+                    <span className="text-slate-600 whitespace-nowrap">Horizon: <strong>Age {effectiveMaxVisibleAge}</strong></span>
+                    <input type="range" min={currentAge + 1} max={terminalAge} value={effectiveMaxVisibleAge} onChange={(e) => setMaxVisibleAge(Number(e.target.value))} className="w-32 sm:w-40 accent-blue-600 cursor-pointer" />
+                  </div>
                 </div>
               </div>
               <div className="relative overflow-x-auto">
@@ -4603,6 +4746,11 @@ export default function App() {
                     {yScale.ticks(6).map((t, i) => <g key={i} transform={`translate(0, ${yScale(t)})`}><line x2={innerWidth} stroke={cp.gridMajor} strokeDasharray="3,3" /><text x={-10} dy="0.32em" fill={cp.axisText} fontSize="10" textAnchor="end" fontFamily="monospace">£{(t / 1000).toFixed(0)}k</text></g>)}
                     {xScale.ticks(10).map((t, i) => <g key={i} transform={`translate(${xScale(t)}, 0)`}><line y2={innerHeight} stroke={cp.gridMinor} /><text y={innerHeight + 20} fill={cp.axisText} fontSize="11" textAnchor="middle" fontFamily="monospace">{t}</text></g>)}
                     {markers(xScale)}
+                    {bandPaths && <>
+                      <path d={bandPaths.area} fill={cp.fanBand} stroke="none" />
+                      <path d={bandPaths.lo} fill="none" stroke={cp.fanEdge} strokeWidth="1.5" strokeDasharray="5,4" />
+                      <path d={bandPaths.hi} fill="none" stroke={cp.fanEdge} strokeWidth="1.5" strokeDasharray="5,4" />
+                    </>}
                     {themedSeries.map(s => (activeSeries[s.id] && pathGenerators[s.id]) ? <path key={s.id} d={pathGenerators[s.id]} fill="none" stroke={s.color} strokeWidth={s.strokeWidth} strokeDasharray={s.dash} strokeLinecap="round" /> : null)}
                     {sandboxLinePath && <path d={sandboxLinePath} fill="none" stroke={cp.sandboxDash} strokeWidth="3.5" strokeDasharray="6,4" strokeLinecap="round" />}
                     {comparePaths.map(c => <path key={c.id} d={c.d} fill="none" stroke={c.tone} strokeWidth="2.5" strokeDasharray="5,3" strokeLinecap="round" />)}
@@ -4615,6 +4763,7 @@ export default function App() {
                     <div className="font-bold text-slate-800 border-b border-slate-100 pb-1 flex justify-between gap-4"><span>Age {hoveredPoint.ageSelf} ({hoveredPoint.year})</span><span className="text-slate-500">Spend Demand: {formatGBP(hoveredPoint.targetSpend)}/yr</span></div>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-1 font-mono">
                       {activeSeries.expected && <div className="text-blue-600 font-bold">Projected Pot: {formatGBP(hoveredPoint.expected)}</div>}
+                      {bandData && (() => { const b = bandData.find(d => d.ageSelf === hoveredPoint.ageSelf); return b ? <div className="text-slate-600 col-span-2 border-t border-slate-100 pt-1 mt-0.5">{bandSpec.highPct} {formatGBP(b.hi)} &nbsp;&middot;&nbsp; {bandSpec.lowPct} {formatGBP(Math.max(0, b.lo))}</div> : null; })()}
                       {isSandboxModified && <div className="text-amber-600 font-bold">Sandbox Pot: {formatGBP(sandboxTimeline.find(d => d.ageSelf === hoveredPoint.ageSelf)?.totalCombined)}</div>}
                       {activeSeries.pensions && <div className="text-sky-600">Pensions: {formatGBP(hoveredPoint.pensions)}</div>}
                       {activeSeries.isas && <div className="text-teal-600">ISAs: {formatGBP(hoveredPoint.isas)}</div>}
@@ -4636,6 +4785,16 @@ export default function App() {
                 </div>
                 {isSandboxModified && <div className="flex items-center gap-2 text-xs font-mono font-bold text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1 rounded-xl"><span className="w-2.5 h-2.5 rounded-full bg-amber-500 border border-amber-600" /> Sandbox Active (Dashed Line)</div>}
               </div>
+              {bandCurves && bandSpec && (
+                <p className="text-[11px] text-slate-500 leading-relaxed pt-1">
+                  <span className="inline-flex items-center gap-1.5 mr-1.5 align-middle"><span className="w-4 h-2.5 rounded-sm inline-block" style={{ background: cp.fanBand, border: `1px solid ${cp.fanEdge}` }} /></span>
+                  <strong className="text-slate-700">{bandSpec.lowPct} to {bandSpec.highPct} percentile:</strong> {bandMode === 'quartile' ? <>outcomes better and worse than this happen about {bandSpec.label} either way. {plan?.riskSource === 'blackrock2026' ? <>These are the quartiles BlackRock publish, not an extrapolation.</> : <>Quartiles, from the return matrix in Config.</>}</> : <>{bandSpec.label} either way, the same percentiles the Monte Carlo fan is drawn at, so the two can be compared directly.</>} Each edge re-derives its rate at every age, because the spread of an annualised return narrows the longer you hold.{' '}
+                  {bandCurves.lo.failAge !== null
+                    ? <><strong className="text-rose-700">The lower edge runs dry at age {bandCurves.lo.failAge}.</strong> Past that point treat it as broken rather than as a floor: a smooth line cannot go below zero and the real 1-in-{bandMode === 'quartile' ? '4' : '10'} outcome can stay there. </>
+                    : <>The lower edge is the one to distrust first: it cannot run dry, so on a plan under strain it sits above the truth. Measured at the final age, it is 5.5% optimistic on a plan surviving 99.5% of the time, 16.2% at 97.3%, and 98% at 91.3% &mdash; the weaker the plan, the more flattering this line. </>}
+                  For a downside that can fail, run the Monte Carlo.
+                </p>
+              )}
               {scenarios.filter(s => s.id !== activeScenarioId).length > 0 && (
                 <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100">
                   <span className="text-xs text-slate-500 font-semibold whitespace-nowrap">Compare saved scenarios:</span>
@@ -5086,7 +5245,8 @@ export default function App() {
               <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1 text-xs">
                 <strong className="text-slate-800 block">The range chart, and why it is not a pair of lines</strong>
                 <p className="text-slate-500">Stage 1 keeps every simulated path, not just its ending, so the chart can show where all {MC_TRIALS.toLocaleString()} of them stood at each age: the shaded band is the 10th to 90th percentile, the solid line the median. Read the right-hand edge and you get the same three pot figures reported underneath it, because both use the same quantile. No path follows any of the three lines, and the band widens with age because nothing cancels out the early years.</p>
-                <p className="text-slate-500">The Trajectory tab used to answer this with two deterministic lines run at a steady 90th and 10th percentile rate. The upper one was close to the simulated 90th-percentile pot. The lower one was not: it finished a mean 23% above the simulated 10th-percentile pot, and 70% above it at worst. The reason is sequence-of-returns risk, which applies only while you are withdrawing. A bad run of years early in retirement forces selling units cheaply and the loss never comes back, and a constant rate has no bad years to express that with. Holding one household fixed and changing only the length of drawdown isolates it: −2.5% over 7 years, +16.3% over 32, −0.9% with no withdrawals at all, and 0.3% once volatility is set to nearly zero. So the lines went, and the distribution took their place.</p>
+                <p className="text-slate-500">The Trajectory tab answers the same question more cheaply, with a shaded band either side of the expected line, and it is worth knowing exactly how the two differ. That band once drew both edges at a single steady rate, and was removed for being badly wrong: its lower edge finished a mean 23% above the simulated 10th-percentile pot, and 70% above it at worst. The diagnosis at the time blamed sequence-of-returns risk, and that was only half right. A fixed-rate band is also 24&ndash;29% out at age 50 in pure accumulation, years before any withdrawal &mdash; so something else was wrong, and it was the construction: the spread of an annualised return is &radic;(sp&sup2; + &sigma;&sup2;/T), which narrows with the horizon, so one rate cannot describe every age on a chart. Re-deriving it at each age brings the band to within 2&ndash;3% of the simulation, and that is what it now draws.</p>
+                <p className="text-slate-500">What survives is the real difference between the two. The band cannot run dry, because a smooth line has no bad decade in it; the fan can, because it is made of paths that did. So the band&rsquo;s lower edge stays optimistic, and increasingly so as a plan weakens &mdash; 5.5% out at 99.5% survival, 16.2% at 97.3%, 98% at 91.3%. Use the band to see the shape of the range as you type, and the fan when the downside is the decision.</p>
                 <p className="text-slate-500">Where the lower edge touches zero, a tenth of the paths have run dry by that age. That is a statement no smooth line could have made.</p>
                 <p className="text-slate-500"><strong className="text-slate-800">Sequence risk, priced.</strong> The card under the chart puts a number on the same effect rather than describing it. It takes each tier&rsquo;s 10th-percentile annualised return &mdash; the unlucky column of the Config risk matrix, over your own horizon &mdash; compounds it evenly to age {terminalAge}, and sets that against the 10th-percentile pot the simulation actually produced. The two runs share an expected return, a plan and a horizon; all that separates them is the order the returns arrive in, so the difference is sequence risk in pounds. It is one-sided by nature: the same comparison at the 90th percentile comes out far smaller, and sometimes favourable, because selling units cheaply to live on is irreversible in a way that buying them cheaply is not. While you are still contributing it disappears, and can turn mildly favourable &mdash; a bumpy path buys more units when prices are low. This is also the one thing a published return forecast cannot supply, however detailed: withdrawal order is not a property of a return distribution.</p>
               </div>
