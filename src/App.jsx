@@ -88,6 +88,62 @@ const DEFAULT_RISK_PROFILES = {
   'Cash Equivalents': { label: 'Instant cash savings/money market', real: -0.50, nominal: 1.99, volatility: 0.5, sigmaParam: 0 }
 };
 
+/*
+ * Published capital market assumptions, offered as an alternative to the built-in defaults.
+ *
+ * Stored in NOMINAL terms because that is how they are published, and deflated to real at the plan's
+ * own inflation setting when applied. The engine is real throughout and deflates nothing by itself, so
+ * putting a nominal figure straight into `real` would overstate every projection by inflation
+ * compounded over the horizon — the deflation is the whole reason this is a table of source figures
+ * rather than a table of tier values.
+ *
+ * Figures are a two-asset blend at each tier's equity weight, using the provider's own correlation, at
+ * the 30-year horizon. `sigmaParam` is fitted from the provider's published percentile band, in log
+ * space to match how the engine consumes it; see scratchpad/cma-import.py, which regenerates this table
+ * from the source workbook. Each set carries the date it was published and the date it expires, because
+ * a stale assumption that looks current is worse than an obviously old one.
+ */
+const CMA_PRESETS = {
+  blackrock2026: {
+    name: 'BlackRock CMA',
+    detail: 'GBP · data as of 30 June 2026',
+    published: 'August 2026',
+    expires: 'August 2027',
+    note: 'Global ex-UK equities blended with UK gilts at each tier\u2019s equity weight, 30-year horizon.',
+    nominal: {
+      'High Risk': { nominal: 7.41, volatility: 17.10, sigmaParam: 2.14 },
+      'Medium/High Risk': { nominal: 6.85, volatility: 13.42, sigmaParam: 1.69 },
+      'Medium Risk': { nominal: 6.28, volatility: 9.93, sigmaParam: 1.31 },
+      'Medium/Low Risk': { nominal: 5.72, volatility: 6.89, sigmaParam: 1.03 },
+      'Low Risk': { nominal: 5.16, volatility: 5.19, sigmaParam: 0.97 },
+      'Cash Equivalents': { nominal: 3.54, volatility: 0.00, sigmaParam: 1.57 }
+    }
+  }
+};
+
+// Fisher, by division. The built-in defaults already satisfy this at 2.5% to the stored two decimals.
+function realFromNominal(nominal, inflationPct) {
+  return ((1 + num(nominal, 0) / 100) / (1 + num(inflationPct, 0) / 100) - 1) * 100;
+}
+
+/*
+ * A preset resolved into the app's tier shape at a given inflation rate. Labels stay with the built-in
+ * tiers so a preset cannot rename them out from under a saved plan, and any tier the preset does not
+ * mention keeps its built-in figures rather than silently becoming zero.
+ */
+function applyCmaPreset(presetKey, inflationPct) {
+  const preset = CMA_PRESETS[presetKey];
+  if (!preset) return null;
+  const out = {};
+  Object.keys(DEFAULT_RISK_PROFILES).forEach(k => {
+    const src = preset.nominal[k];
+    out[k] = src
+      ? { label: DEFAULT_RISK_PROFILES[k].label, nominal: src.nominal, real: Math.round(realFromNominal(src.nominal, inflationPct) * 100) / 100, volatility: src.volatility, sigmaParam: src.sigmaParam }
+      : { ...DEFAULT_RISK_PROFILES[k] };
+  });
+  return out;
+}
+
 // 90th percentile of the standard normal. The 10th is its negative.
 const Z90 = 1.2815515655446004;
 
@@ -250,6 +306,7 @@ const BLANK_PLAN = Object.freeze({
   },
   accounts: defaultAccounts(),
   riskProfiles: DEFAULT_RISK_PROFILES,
+  riskSource: '',
   otherIncomes: [],
   oneOffContributions: [],
   oneOffCosts: [],
@@ -339,6 +396,8 @@ function normalizePlan(raw) {
     spending: { ...BLANK_PLAN.spending, ...s, spendBands: normaliseSpendBands(s, d) },
     accounts: [],
     riskProfiles: {},
+    // which published set the matrix came from, '' once any field has been edited by hand
+    riskSource: CMA_PRESETS[src.riskSource] ? src.riskSource : '',
     // legacy plans carried taxTreatment: 'Taxable' | 'Tax-free'; 'Taxable' migrates to otherTaxable so an
     // upgrade can never silently raise someone's pension headroom.
     otherIncomes: Array.isArray(src.otherIncomes) ? src.otherIncomes.filter(isPlainObject).map(i => ({ id: String(i.id || 'inc_' + Math.random().toString(36).slice(2)), name: i.name ?? '', owner: i.owner === 'Partner' ? 'Partner' : 'Myself', startAge: i.startAge ?? '', endAge: i.endAge ?? '', amount: i.amount ?? '', incomeType: INCOME_TYPES[i.incomeType] ? i.incomeType : (i.taxTreatment === 'Tax-free' ? 'taxFree' : 'otherTaxable'), notes: i.notes ?? '' })) : [],
@@ -2194,8 +2253,8 @@ function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
 }
 
 // Namespace used by the UI (mirrors the modular engine.js exports)
-const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, luckyBand, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, marginalRateAt, taxBreakpoints, TAX_REGION_LABELS, calculateUKNetIncome, nicFor, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, salaryAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSearchPlayer, bridgeIsaAnnual, liquidRealRate, buildTournament, buildPolicyCandidates, pickBest };
-export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, luckyBand, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans, buildPolicyCandidates, pickBest, accumulationOutlay, solveEscalation, applyEscalationToPlan };
+const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, CMA_PRESETS, applyCmaPreset, realFromNominal, luckyBand, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, marginalRateAt, taxBreakpoints, TAX_REGION_LABELS, calculateUKNetIncome, nicFor, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, salaryAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSearchPlayer, bridgeIsaAnnual, liquidRealRate, buildTournament, buildPolicyCandidates, pickBest };
+export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, CMA_PRESETS, applyCmaPreset, realFromNominal, luckyBand, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans, buildPolicyCandidates, pickBest, accumulationOutlay, solveEscalation, applyEscalationToPlan };
 
 
 const STORAGE_KEY = 'rp_plan_full_v28';          // unchanged: old saved plans are migrated by normalizePlan
@@ -3170,7 +3229,35 @@ export default function App() {
 
   // ------------------------------------------------------------ plan mutators
   const updateAccountField = (id, field, value) => setPlan(prev => ({ ...prev, accounts: (prev.accounts || []).map(a => a.id === id ? { ...a, [field]: field === 'risk' ? value : parseInputNumber(value) } : a) }));
-  const updateRiskField = (riskKey, field, value) => setPlan(prev => ({ ...prev, riskProfiles: { ...(prev.riskProfiles || E.DEFAULT_RISK_PROFILES), [riskKey]: { ...(prev.riskProfiles || E.DEFAULT_RISK_PROFILES)[riskKey], [field]: parseInputNumber(value) } } }));
+  /*
+   * Applying a preset writes the resolved tier table AND records which preset it came from, so a later
+   * change to the inflation setting can re-derive `real` from the stored nominal figures. Without that
+   * the two drift apart silently: the published nominal stays put while the real rate it implies moves.
+   * Editing any field by hand clears the marker, because the table is then no longer the preset.
+   */
+  /*
+   * A preset stores published NOMINAL figures; the engine runs on real. If inflation changes while a
+   * preset is active the real rates it implies change with it, so re-derive rather than leave the two
+   * disagreeing. This is the one place the app maintains the Fisher relationship as an invariant rather
+   * than a convention — outside a preset, `real` and `nominal` remain independent fields as before.
+   */
+  useEffect(() => {
+    if (!plan?.riskSource || !E.CMA_PRESETS[plan.riskSource]) return;
+    const infl = E.num(plan?.config?.inflation, E.DEFAULT_CONFIG.inflation);
+    const want = E.applyCmaPreset(plan.riskSource, infl);
+    if (!want) return;
+    const stale = Object.keys(want).some(k => Math.abs(E.num(want[k].real, 0) - E.num(plan.riskProfiles?.[k]?.real, 0)) > 0.005);
+    if (stale) setPlan(prev => ({ ...prev, riskProfiles: want, riskSource: prev.riskSource }));
+  }, [plan?.config?.inflation, plan?.riskSource]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const applyRiskPreset = (key) => setPlan(prev => {
+    const infl = E.num(prev?.config?.inflation, E.DEFAULT_CONFIG.inflation);
+    return key === 'builtin'
+      ? { ...prev, riskProfiles: { ...E.DEFAULT_RISK_PROFILES }, riskSource: '' }
+      : { ...prev, riskProfiles: E.applyCmaPreset(key, infl) || prev.riskProfiles, riskSource: key };
+  });
+
+  const updateRiskField = (riskKey, field, value) => setPlan(prev => ({ ...prev, riskSource: '', riskProfiles: { ...(prev.riskProfiles || E.DEFAULT_RISK_PROFILES), [riskKey]: { ...(prev.riskProfiles || E.DEFAULT_RISK_PROFILES)[riskKey], [field]: parseInputNumber(value) } } }));
   const updateDemographics = (field, value) => setPlan(prev => ({ ...prev, demographics: { ...(prev.demographics || {}), [field]: field === 'planningMode' ? value : parseInputNumber(value) } }));
   const updateSpending = (field, value) => setPlan(prev => ({ ...prev, spending: { ...(prev.spending || {}), [field]: (field === 'drawdownStrategy' || field === 'decumulationPolicy') ? value : parseInputNumber(value) } }));
   const updateConfig = (field, value) => setPlan(prev => ({ ...prev, config: { ...(prev.config || {}), [field]: (field === 'valuationDate' || field === 'taxRegion' || typeof value === 'boolean') ? value : parseInputNumber(value) } }));
@@ -4296,24 +4383,50 @@ export default function App() {
               <div className="flex justify-between items-center">
                 <div>
                   <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">Asset Allocations, Return Matrix &amp; Volatilities (σ)</h3>
-                  <span className="text-[11px] text-slate-500">Expected real return is treated as the median (geometric) annual rate; Monte Carlo paths are log-normal around it with the stated σ, one market factor for all wrappers. Default rates and volatilities are drawn from Vanguard's Capital Markets Model (VCMM). The lucky and unlucky columns are calculated from the expected rate, σ and your {ctx.totalYears}-year horizon, so they are not editable.</span>
+                  <span className="text-[11px] text-slate-500">Expected real return is treated as the median (geometric) annual rate; Monte Carlo paths are log-normal around it with the stated σ, one market factor for all wrappers. The lucky and unlucky columns are calculated from the expected rate, σ, forecast uncertainty and your {ctx.totalYears}-year horizon, so they are not editable.</span>
                 </div>
                 <button onClick={() => setIsEditingRisk(!isEditingRisk)} className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border ${isEditingRisk ? 'bg-blue-600 text-white border-blue-600' : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'}`}><Pencil className="w-3.5 h-3.5" />{isEditingRisk ? 'Done Editing' : 'Edit Matrix'}</button>
               </div>
+
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <span className="text-xs text-slate-500 font-semibold whitespace-nowrap">Assumptions:</span>
+                {[['builtin', 'Built-in defaults', 'The figures this planner shipped with.'],
+                  ...Object.entries(E.CMA_PRESETS).map(([k, v]) => [k, v.name, `${v.detail} · published ${v.published}`])
+                ].map(([key, name, detail]) => {
+                  const on = (plan?.riskSource || 'builtin') === key;
+                  return (
+                    <button key={key} type="button" onClick={() => applyRiskPreset(key)} title={detail}
+                      className={`px-2.5 py-1.5 rounded-xl text-xs font-medium border transition-all cursor-pointer ${on ? 'bg-slate-100 border-slate-300 text-slate-900 font-semibold' : 'bg-surface border-slate-200 text-slate-500 hover:text-slate-800'}`}>
+                      {name}{on && <Check className="w-3 h-3 inline ml-1.5 -mt-0.5 text-slate-600" />}
+                    </button>
+                  );
+                })}
+                {plan?.riskSource && E.CMA_PRESETS[plan.riskSource] && (
+                  <span className="text-[11px] text-slate-500">
+                    {E.CMA_PRESETS[plan.riskSource].detail}. {E.CMA_PRESETS[plan.riskSource].note} Published figures are
+                    nominal and are shown here deflated at your {E.num(plan?.config?.inflation, 2.5)}% inflation setting;
+                    change that and these update. Expires {E.CMA_PRESETS[plan.riskSource].expires} — refresh from the
+                    source after that. Editing any cell makes the table your own.
+                  </span>
+                )}
+                {!plan?.riskSource && (
+                  <span className="text-[11px] text-slate-500">Or load a published set of capital market assumptions. Every figure stays editable either way.</span>
+                )}
+              </div>
               <table className="w-full text-left text-xs border-collapse">
-                <thead><tr className="border-b border-slate-200 text-slate-500 font-semibold"><th className="pb-2">Allocation Category</th><th className="pb-2">Expected Real Return (% pa)</th><th className="pb-2">Unlucky, 10th %ile (% pa)</th><th className="pb-2">Lucky, 90th %ile (% pa)</th><th className="pb-2">Nominal Return (% pa)</th><th className="pb-2">Annual Volatility (σ % pa)</th></tr></thead>
+                <thead><tr className="border-b border-slate-200 text-slate-500 font-semibold"><th className="pb-2">Allocation Category</th><th className="pb-2">Expected Real Return (% pa)</th><th className="pb-2">Unlucky, 10th %ile (% pa)</th><th className="pb-2">Lucky, 90th %ile (% pa)</th><th className="pb-2">Nominal Return (% pa)</th><th className="pb-2">Annual Volatility (σ % pa)</th><th className="pb-2">Forecast Uncertainty (% pa)</th></tr></thead>
                 <tbody className="divide-y divide-slate-100 font-mono">
                   {Object.entries(activeRiskMatrix).map(([key, val]) => {
-                    const band = E.luckyBand(E.num(val.real, 0) / 100, E.num(val.volatility, 12) / 100, ctx.totalYears);
+                    const band = E.luckyBand(E.num(val.real, 0) / 100, E.num(val.volatility, 12) / 100, ctx.totalYears, E.num(val.sigmaParam, 0) / 100);
                     return (
                     <tr key={key} className="hover:bg-slate-50/80">
                       <td className="py-2.5 font-sans font-bold text-slate-800">{val.label || key}</td>
-                      {[['real', 'text-blue-700', 0.05], ['unlucky', 'text-rose-700', 0.05], ['lucky', 'text-emerald-700', 0.05], ['nominal', 'text-purple-700', 0.05], ['volatility', 'text-amber-700', 0.5]].map(([field, color, step]) => (
+                      {[['real', 'text-blue-700', 0.05], ['unlucky', 'text-rose-700', 0.05], ['lucky', 'text-emerald-700', 0.05], ['nominal', 'text-purple-700', 0.05], ['volatility', 'text-amber-700', 0.5], ['sigmaParam', 'text-slate-600', 0.05]].map(([field, color, step]) => (
                         <td key={field} className="py-2.5">
                           {field === 'lucky' || field === 'unlucky' ? (
                             <span className={`${color} font-bold`}>{(band[field] * 100).toFixed(2)}%</span>
                           ) : isEditingRisk ? (
-                            <input type="number" step={step} min={field === 'volatility' ? 0 : undefined} onFocus={handleFocus} value={val[field] ?? ''} onChange={(e) => updateRiskField(key, field, e.target.value)} className={`w-20 p-1 bg-slate-50 border border-slate-300 rounded font-mono ${color} font-bold focus:bg-surface focus:ring-1 focus:ring-blue-500`} />
+                            <input type="number" step={step} min={field === 'volatility' || field === 'sigmaParam' ? 0 : undefined} onFocus={handleFocus} value={val[field] ?? ''} onChange={(e) => updateRiskField(key, field, e.target.value)} className={`w-20 p-1 bg-slate-50 border border-slate-300 rounded font-mono ${color} font-bold focus:bg-surface focus:ring-1 focus:ring-blue-500`} />
                           ) : <span className={`${color} font-bold`}>{E.num(val[field], 0).toFixed(field === 'volatility' ? 1 : 2)}%</span>}
                         </td>
                       ))}
@@ -4941,7 +5054,8 @@ export default function App() {
 
             <div id="doc-risk-profiles" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-blue-600" /> Asset Allocations, Return Bounds &amp; Volatility (σ)</h2>
-              <p className="text-xs text-slate-600 leading-relaxed">Each wrapper is assigned a risk tier with an expected real return (treated as the median annual rate) and a volatility used by the Monte Carlo. The 10th and 90th percentile columns beside them are calculated from those two figures and the plan horizon, as exp(ln(1 + expected) ± 1.2816·σ/√T) − 1: over your horizon the annualised return lands between them eight times in ten. They are there to make a volatility figure legible, and they drive no chart. Nothing turns them into a percentile <em>pot</em>, because that leap is the one that fails once withdrawals start. All wrappers move together (one market factor scaled by each tier's σ); the historical backtest blends real US equity and bond returns by the tier's equity weight ({Object.entries(E.RISK_EQUITY_WEIGHTS).map(([k, v]) => `${k.replace(' Risk', '')} ${Math.round(v * 100)}%`).join(', ')}).</p>
+              <p className="text-xs text-slate-600 leading-relaxed">Each wrapper is assigned a risk tier carrying an expected real return (treated as the median annual rate), a volatility, and a forecast uncertainty. The first two describe the <em>path</em>; the third describes how sure we are of the average that path is scattered around, and the distinction matters more the longer you plan for. Volatility averages out as σ/√T. Being wrong about the long-run average does not average out at all, so it is drawn once per simulated path and then lived with, giving an annualised spread of √(u² + σ²/T). The built-in tiers set that uncertainty to zero, which is itself a claim — that we know the long-run average and are only unsure of the route — and a published set of capital market assumptions will generally say otherwise.</p>
+              <p className="text-xs text-slate-600 leading-relaxed">The 10th and 90th percentile columns beside them are that spread at the two tails: over your horizon the annualised return lands between them eight times in ten. They are there to make the risk figures legible, and they drive no chart. Nothing turns them into a percentile <em>pot</em>, because that leap is the one that fails once withdrawals start. All wrappers move together (one market factor scaled by each tier's σ), so the correlations a published set also carries cannot be used without a second factor; the historical backtest blends real US equity and bond returns by the tier's equity weight ({Object.entries(E.RISK_EQUITY_WEIGHTS).map(([k, v]) => `${k.replace(' Risk', '')} ${Math.round(v * 100)}%`).join(', ')}).</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                 {Object.entries(activeRiskMatrix).map(([k, v]) => (
                   <div key={k} className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1"><span className="font-bold text-slate-800">{k} ({v.label})</span><p className="text-slate-500">Expected real {E.num(v.real, 0).toFixed(2)}% pa, σ = {E.num(v.volatility, 0).toFixed(1)}%.</p></div>
