@@ -3209,6 +3209,20 @@ export default function App() {
   const [seeAll, setSeeAll] = useState(false);
   const [sandboxRevealed, setSandboxRevealed] = useState(false);
   const showSlide = (n) => seeAll || slide === n;
+
+  /*
+   * Bring what you just asked for into view.
+   *
+   * Both controls sit at the FOOT of a card, so without this the click appears to do nothing: pressing
+   * Next leaves you looking at the bottom of the next step, and "Change something" reveals a sandbox that
+   * lands below the fold with the page still at the same scroll position. Measured before this existed:
+   * the button at y=853 in a 900px viewport, the sandbox arriving at y=893, scrollY unchanged at 0.
+   */
+  const slideRef = useRef(null);
+  const sandboxRef = useRef(null);
+  const scrollTo = (el) => el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  useEffect(() => { if (!seeAll) scrollTo(slideRef.current); }, [slide, seeAll]);
+  useEffect(() => { if (sandboxRevealed) scrollTo(sandboxRef.current); }, [sandboxRevealed]);
   const [simProgress, setSimProgress] = useState(null);
   const [isSimulating, setIsSimulating] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
@@ -5206,7 +5220,7 @@ export default function App() {
 
               {/* ---------------- 1. TOPLINE ---------------- */}
               {showSlide(1) && (
-                <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+                <div ref={slideRef} style={{ scrollMarginTop: 12 }} className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
                   {slideHead(1, 'Your plan as entered', `Spending ${formatGBP(simResult.spend)} a year to age ${terminalAge}.`)}
                   <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 text-xs">
                     <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80"><span className="text-slate-500 block mb-0.5">Survival rate</span><span className={`text-xl font-black font-mono ${simResult.successRate >= 90 ? 'text-emerald-700' : simResult.successRate >= 75 ? 'text-amber-700' : 'text-rose-700'}`}>{simResult.successRate.toFixed(1)}%</span><span className="text-[10px] text-slate-400 block mt-0.5 font-mono">&plusmn;{(1.96 * simResult.standardError).toFixed(1)} pts</span></div>
@@ -5227,7 +5241,7 @@ export default function App() {
 
               {/* ---------------- 2. SAFE SPEND ---------------- */}
               {showSlide(2) && (
-                <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+                <div ref={slideRef} style={{ scrollMarginTop: 12 }} className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
                   {slideHead(2, 'The most you could spend', 'Holds the risk fixed and solves for the income instead.')}
                   <div className="flex flex-wrap items-center gap-2 text-xs">
                     <span className="text-slate-500 font-semibold">Survive at least:</span>
@@ -5262,7 +5276,7 @@ export default function App() {
 
               {/* ---------------- 3. RATE-BASED CHART ---------------- */}
               {showSlide(3) && (
-                <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+                <div ref={slideRef} style={{ scrollMarginTop: 12 }} className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
                   {slideHead(3, 'Rate based', 'One steady rate per wrapper, compounded. Redraws as you type.')}
                   <div className="flex flex-wrap items-center gap-3">
                     {bandToggle}
@@ -5283,7 +5297,7 @@ export default function App() {
 
               {/* ---------------- 4. MONTE CARLO CHART ---------------- */}
               {showSlide(4) && (
-                <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+                <div ref={slideRef} style={{ scrollMarginTop: 12 }} className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
                   {slideHead(4, 'Monte Carlo', `${simResult.trials.toLocaleString()} randomised futures, same axes as the last screen.`)}
                   <div className="flex flex-wrap items-center gap-3">
                     {bandToggle}
@@ -5306,7 +5320,7 @@ export default function App() {
 
               {/* ---------------- 5. SIDE BY SIDE ---------------- */}
               {showSlide(5) && (
-                <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+                <div ref={slideRef} style={{ scrollMarginTop: 12 }} className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
                   {slideHead(5, 'Side by side', 'The same plan, both ways, at the same five points.')}
                   {compareRows2 && (
                     <div className="overflow-x-auto border border-slate-200 rounded-xl">
@@ -5435,7 +5449,7 @@ export default function App() {
             {/* The sandbox is the end of the walk, not a permanent fixture: it appears once the five steps
                 have been seen (or straight away on a re-run, when they have been seen already). */}
             {simResult && (sandboxRevealed || seeAll) && (
-              <>
+              <div ref={sandboxRef} style={{ scrollMarginTop: 12 }} className="space-y-6">
                 {renderSandboxPanel()}
                 {simResult && (
                   <div className="bg-surface border border-slate-200/90 p-4 rounded-2xl shadow-xs flex flex-wrap items-center justify-between gap-3">
@@ -5446,7 +5460,7 @@ export default function App() {
                     </button>
                   </div>
                 )}
-              </>
+              </div>
             )}
           </div>
         )}
