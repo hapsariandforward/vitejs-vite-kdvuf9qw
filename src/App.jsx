@@ -62,16 +62,30 @@ const RISK_EQUITY_WEIGHTS = {
   'Medium/Low Risk': 0.30, 'Low Risk': 0.10, 'Cash Equivalents': 0.00
 };
 
-// `real` is the median (geometric) annual real return; `volatility` is the annual σ of the log return.
-// The lucky/unlucky bounds shown on the deterministic chart are no longer stored here: they are derived
-// from these two figures and the plan's own horizon by luckyBand, so the percentile they claim is true.
+/*
+ * `real` is the median (geometric) annual real return; `volatility` is the annual σ of the log return.
+ * The lucky/unlucky bounds shown in the Config matrix are not stored here: they are derived from these
+ * figures and the plan's own horizon by luckyBand, so the percentile they claim is true.
+ *
+ * `sigmaParam` is uncertainty about the expected return ITSELF, as distinct from the year-to-year
+ * scatter around it. The two behave completely differently over a long horizon: volatility averages out
+ * as σ/√T, while being wrong about the long-run average never averages out at all. Institutional capital
+ * market assumptions carry both — BlackRock's own bands are 1.06x our width at five years but 1.56x at
+ * thirty, and the gap is exactly this term. It is drawn once per simulated path rather than once per
+ * year, giving an annualised variance of sigmaParam² + σ²/T.
+ *
+ * It defaults to zero in every built-in tier, so the shipped model is unchanged until a set of
+ * assumptions that quantifies it is loaded. Zero is a real claim, not a placeholder: it says we are
+ * certain of the long-run average and only unsure of the path, which is the assumption this model made
+ * implicitly before the field existed.
+ */
 const DEFAULT_RISK_PROFILES = {
-  'High Risk': { label: 'Highest: 80–100% Equities', real: 4.44, nominal: 7.05, volatility: 15.5 },
-  'Medium/High Risk': { label: 'High: 60–80% Equities', real: 3.72, nominal: 6.31, volatility: 11.5 },
-  'Medium Risk': { label: 'Medium: 40–60% Equities', real: 3.00, nominal: 5.58, volatility: 8.0 },
-  'Medium/Low Risk': { label: 'Medium/Low: 20–40% Equities', real: 2.28, nominal: 4.84, volatility: 5.5 },
-  'Low Risk': { label: 'Low: High interest Cash Savings, Fixed Income, Bonds', real: 1.56, nominal: 4.10, volatility: 3.0 },
-  'Cash Equivalents': { label: 'Instant cash savings/money market', real: -0.50, nominal: 1.99, volatility: 0.5 }
+  'High Risk': { label: 'Highest: 80–100% Equities', real: 4.44, nominal: 7.05, volatility: 15.5, sigmaParam: 0 },
+  'Medium/High Risk': { label: 'High: 60–80% Equities', real: 3.72, nominal: 6.31, volatility: 11.5, sigmaParam: 0 },
+  'Medium Risk': { label: 'Medium: 40–60% Equities', real: 3.00, nominal: 5.58, volatility: 8.0, sigmaParam: 0 },
+  'Medium/Low Risk': { label: 'Medium/Low: 20–40% Equities', real: 2.28, nominal: 4.84, volatility: 5.5, sigmaParam: 0 },
+  'Low Risk': { label: 'Low: High interest Cash Savings, Fixed Income, Bonds', real: 1.56, nominal: 4.10, volatility: 3.0, sigmaParam: 0 },
+  'Cash Equivalents': { label: 'Instant cash savings/money market', real: -0.50, nominal: 1.99, volatility: 0.5, sigmaParam: 0 }
 };
 
 // 90th percentile of the standard normal. The 10th is its negative.
@@ -81,18 +95,22 @@ const Z90 = 1.2815515655446004;
  * The constant annual real rate whose compounded result over `years` lands on the 90th (lucky) and 10th
  * (unlucky) percentile of wealth at the end of that horizon.
  *
- * Monte Carlo draws each year's return as exp(ln(1+real) + σ·z) − 1, so over T years the cumulative log
- * return is normal with mean T·ln(1+real) and standard deviation σ·√T. Dividing by T to annualise gives
- * a spread of σ/√T: the band narrows as the horizon lengthens, because it is the *average* rate that
- * diversifies, not the total. This is the PRIIPs convention for favourable and unfavourable scenarios.
+ * Monte Carlo draws each year's return as exp(ln(1+real) + sp·z_path + σ·z_year) − 1, where z_path is
+ * fixed for a whole path and z_year is redrawn annually. Over T years the annualised log return is
+ * therefore normal with standard deviation √(sp² + σ²/T), and this band is that spread at the 90th and
+ * 10th percentile. The two terms age differently and that is the point: the σ²/T half diversifies away
+ * as the horizon lengthens, the sp² half does not, because no amount of time tells you the long-run
+ * average you assumed was right. With sp = 0 this reduces to σ/√T, the PRIIPs convention for favourable
+ * and unfavourable scenarios, which is what the model used before it could carry the first term.
  *
  * No single simulated path follows one of these lines. Each is a percentile of the outcome at the end,
  * which is a different claim from "the 90th percentile happened every year" — that would be 0.1^T.
  */
-function luckyBand(real, vol, years) {
+function luckyBand(real, vol, years, sigmaParam = 0) {
   const T = Math.max(1, num(years, 1));
   const m = Math.log(1 + clamp(real, -0.99, 50));
-  const spread = Z90 * vol / Math.sqrt(T);
+  const sp = Math.max(0, num(sigmaParam, 0));
+  const spread = Z90 * Math.sqrt(sp * sp + (vol * vol) / T);
   return { lucky: Math.exp(m + spread) - 1, unlucky: Math.exp(m - spread) - 1 };
 }
 
@@ -727,6 +745,8 @@ function buildContext(rawPlan) {
     const [cat, owner] = a.id.split('_');
     const real = clamp(num(prof.real, 0), -50, 50) / 100;
     const vol = clamp(num(prof.volatility, 12), 0, 100) / 100;
+    // uncertainty about the expected return itself, drawn once per path rather than once per year
+    const sigmaParam = clamp(num(prof.sigmaParam, 0), 0, 100) / 100;
     return {
       id: a.id, cat, owner, ownerLabel: a.owner,
       balance: Math.max(0, num(a.balance, 0)),
@@ -738,6 +758,7 @@ function buildContext(rawPlan) {
       risk: a.risk,
       real: real,
       vol,
+      sigmaParam,
       equityWeight: RISK_EQUITY_WEIGHTS[a.risk] !== undefined ? RISK_EQUITY_WEIGHTS[a.risk] : 0.9,
       isCash: a.risk === 'Cash Equivalents'
     };
@@ -967,7 +988,7 @@ const giaDispose = (state, balanceBefore, ownerKey, amount) => {
 };
 
 /*
- * market: 'expected' | { historical: true, startYear } | { z: number }
+ * market: 'expected' | { historical: true, startYear } | { z: number, zPath?: number }
  * Advances `state` by one year (index t) and returns the audit row for that year.
  */
 function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
@@ -1252,8 +1273,10 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
     let g = a.real;
     if (isHistorical) g = (histPoint && !a.isCash) ? (a.equityWeight * histPoint.s + (1 - a.equityWeight) * histPoint.b) / 100 : a.real;
     else if (typeof market === 'object' && market !== null && market.z !== undefined) {
-      // log-return with median equal to the stated expected (geometric) real return
-      g = Math.exp(Math.log(1 + a.real) + a.vol * market.z) - 1;
+      // Log-return with median equal to the stated expected (geometric) real return. The sigmaParam
+      // term shifts that median for the whole path at once, so it compounds instead of averaging out.
+      const zp = market.zPath || 0;
+      g = Math.exp(Math.log(1 + a.real) + a.sigmaParam * zp + a.vol * market.z) - 1;
     }
     pots[a.id] = Math.max(0, (pots[a.id] || 0) * (1 + g * frac));
   });
@@ -1352,8 +1375,14 @@ function runTrial(ctx, zs, spendOverride = null, collectPath = false) {
    * to pay for a path it will not read, so only the fan chart asks.
    */
   const path = collectPath ? new Float64Array(ctx.totalYears + 1) : null;
+  /*
+   * Fixed for the whole path: this is "the long-run average turned out to be better or worse than we
+   * assumed", which is decided once and then lived with, unlike the annual shock which is redrawn.
+   * Absent for a caller that supplied only per-year draws, in which case it is simply zero.
+   */
+  const zPath = zs.length > ctx.totalYears + 1 ? zs[ctx.totalYears + 1] : 0;
   for (let t = 0; t <= ctx.totalYears; t++) {
-    const row = stepYear(ctx, state, t, { z: zs[t] }, spendOverride);
+    const row = stepYear(ctx, state, t, { z: zs[t], zPath }, spendOverride);
     lifetimeTax += row.taxPaid + (row.cgtPaid || 0);
     if (row.totalCombined < minPot) minPot = row.totalCombined;
     // floored the same way terminalPot is, so the last entry of a path is exactly the terminal pot
@@ -1371,9 +1400,18 @@ function runTrial(ctx, zs, spendOverride = null, collectPath = false) {
   return out;
 }
 
+/*
+ * One shock series per trial. The array is one longer than the projection: indices 0..years are the
+ * per-year market shocks and the final entry is the path's expected-return shock, used when a tier
+ * carries a non-zero sigmaParam.
+ *
+ * The extra draw is appended rather than prepended deliberately. gaussianPath fills sequentially from a
+ * seeded generator, so asking it for one more normal leaves every earlier value untouched — which is
+ * what lets this change be verified as a no-op at sigmaParam = 0 rather than merely argued to be one.
+ */
 function pathsForSeed(seed, trials, years) {
   const out = new Array(trials);
-  for (let i = 0; i < trials; i++) out[i] = gaussianPath((seed + i * 7919) >>> 0, years + 1);
+  for (let i = 0; i < trials; i++) out[i] = gaussianPath((seed + i * 7919) >>> 0, years + 2);
   return out;
 }
 
