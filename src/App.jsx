@@ -2101,6 +2101,18 @@ const CHART_PALETTE = {
   dark:    { gridMajor: '#1e232b', gridMinor: '#171b21', axisText: '#8a939b', hoverCrosshair: '#5b636c', sandboxDash: '#e89a4a', historicalLine: '#8b7cf6', trajectoryHoverFill: '#3D74E8', historicalHoverFill: '#8b7cf6', hoverDotStroke: '#14171B', fanBand: 'rgba(61, 116, 232, 0.22)', fanEdge: 'rgba(61, 116, 232, 0.55)', fanMedian: '#6F9BFF' },
 };
 
+/*
+ * Colours for scenarios overlaid on the Trajectory chart. Deliberately clear of the six SERIES_CONFIG
+ * hues and of the amber sandbox dash, since all of them can be on screen at once: the three series that
+ * default to on are blue, sky and teal, so these are pink, olive, red and purple.
+ */
+const COMPARE_PALETTE = {
+  classic: ['#db2777', '#65a30d', '#b91c1c', '#6b21a8'],
+  light: ['#A63D5E', '#5F7A28', '#99342B', '#6B4A8A'],
+  dark: ['#F472B6', '#A3D65C', '#F87171', '#C084FC'],
+};
+const MAX_COMPARE = 4;
+
 const MARKER_PALETTE = {
   classic: {
     retireSelf: { line: '#f59e0b', fill: '#fef3c7', stroke: '#fde68a', text: '#b45309' },
@@ -2760,6 +2772,10 @@ export default function App() {
     entrantIds: [], results: null, progress: null, isEvaluating: false, basePlan: null, autoRun: 0
   });
   const tournamentCancelRef = useRef(false);
+  // Which saved scenarios are overlaid on the Trajectory chart. Held here, like the tournament's state,
+  // so a selection survives a trip to another tab.
+  const [compareIds, setCompareIds] = useState([]);
+  const [compareSort, setCompareSort] = useState({ key: null, dir: 'desc' });
   // Both tabs render the same sandbox, but each remembers its own expanded state: the Trajectory tab is
   // the sandbox's home so it starts open, while the Monte Carlo tab leads with the tournament.
   const [sandboxOpen, setSandboxOpen] = useState({ trajectory: true, simulation: false });
@@ -2846,6 +2862,76 @@ export default function App() {
   }), [plan?.accounts, sandboxAccounts, isRetireModified]);
   const sandboxTimeline = useMemo(() => E.simulateDeterministic(sandboxCtx, 'expected'), [sandboxCtx]);
 
+  /*
+   * Saved scenarios overlaid on the Trajectory chart, projected the same way the live plan is.
+   *
+   * The dependency list is the point: a scenario's `data` only changes when it is saved, so these runs
+   * are not repeated on every keystroke the way timelineData is. buildContext throws on a plan that is
+   * missing required inputs, so each is guarded individually — a half-finished saved scenario reports
+   * itself in the table rather than blanking the tab.
+   */
+  const selectedCompare = useMemo(
+    () => scenarios.filter(s => s.id !== activeScenarioId && compareIds.includes(s.id)).slice(0, MAX_COMPARE),
+    [scenarios, activeScenarioId, compareIds]
+  );
+  const compareRuns = useMemo(() => selectedCompare.map((s, i) => {
+    const tone = COMPARE_PALETTE[theme][i % COMPARE_PALETTE[theme].length];
+    try {
+      const sctx = E.buildContext(s.data);
+      const rows = E.simulateDeterministic(sctx, 'expected');
+      if (!rows.length) return { id: s.id, name: s.name, tone, error: 'produced no projection' };
+      const retAge = sctx.owners[0].retireAge;
+      return {
+        id: s.id, name: s.name, tone, rows,
+        retireAge: retAge,
+        startAge: rows[0].ageSelf,
+        years: sctx.totalYears,
+        retirePot: (rows.find(r => r.ageSelf === retAge) || rows[0]).totalCombined,
+        verdict: E.evaluateRows(sctx, rows)
+      };
+    } catch (err) {
+      return { id: s.id, name: s.name, tone, error: err?.message || 'cannot be projected' };
+    }
+  }), [selectedCompare, theme]);
+
+  /*
+   * The comparison table's rows, current plan first. Both sides are measured identically — terminalPot
+   * and lifetimeTax come from evaluateRows either way — so a difference in the table is a difference in
+   * the plans rather than in how they were read. The retirement pot is taken at each scenario's *own*
+   * retirement age, since comparing "retire at 55" against "retire at 60" at a single age would answer
+   * a question nobody asked.
+   */
+  const compareRows = useMemo(() => {
+    const baseRetAge = ctx.owners[0].retireAge;
+    const baseTerminal = deterministicVerdict.terminalPot;
+    const rows = [{
+      id: '__current__', name: 'Current plan', isBase: true, tone: SERIES_CONFIG[0].colors[theme],
+      retireAge: baseRetAge, retirePot: (timelineData.find(r => r.ageSelf === baseRetAge) || timelineData[0])?.totalCombined || 0,
+      terminal: baseTerminal, delta: null, lifetimeTax: deterministicVerdict.lifetimeTax,
+      survived: deterministicVerdict.survived, failAge: deterministicVerdict.failAge, failReason: deterministicVerdict.failReason,
+      years: ctx.totalYears, startAge: currentAge
+    }];
+    compareRuns.forEach(r => rows.push(r.error
+      ? { id: r.id, name: r.name, tone: r.tone, error: r.error }
+      : {
+        id: r.id, name: r.name, tone: r.tone, retireAge: r.retireAge, retirePot: r.retirePot,
+        terminal: r.verdict.terminalPot, delta: r.verdict.terminalPot - baseTerminal, lifetimeTax: r.verdict.lifetimeTax,
+        survived: r.verdict.survived, failAge: r.verdict.failAge, failReason: r.verdict.failReason,
+        years: r.years, startAge: r.startAge
+      }));
+    return rows;
+  }, [ctx, theme, timelineData, deterministicVerdict, compareRuns, currentAge]);
+
+  // Sorted for display, with the current plan pinned to the top: it is the thing everything else is a
+  // delta against, so sorting it into the middle of the table would make the deltas hard to read.
+  const sortedCompareRows = useMemo(() => {
+    if (!compareSort.key) return compareRows;
+    const [base, ...rest] = compareRows;
+    const val = (r) => (r.error ? -Infinity : (r[compareSort.key] ?? -Infinity));
+    rest.sort((a, b) => (compareSort.dir === 'asc' ? val(a) - val(b) : val(b) - val(a)));
+    return [base, ...rest];
+  }, [compareRows, compareSort]);
+
   const sandboxMetrics = useMemo(() => {
     if (!timelineData.length || !sandboxTimeline.length) return null;
     const baseTerminal = timelineData[timelineData.length - 1]?.totalCombined || 0;
@@ -2902,8 +2988,10 @@ export default function App() {
     let max = 0;
     visibleData.forEach(d => { if (activeSeries.expected && d.expected > max) max = d.expected; if (activeSeries.nominal && d.nominal > max) max = d.nominal; });
     if (isSandboxModified) sandboxTimeline.forEach(d => { if (d.ageSelf <= effectiveMaxVisibleAge && d.totalCombined > max) max = d.totalCombined; });
+    // an overlaid scenario that outgrows the live plan must lift the axis, not run off the top of it
+    compareRuns.forEach(r => { if (r.rows) r.rows.forEach(d => { if (d.ageSelf <= effectiveMaxVisibleAge && d.totalCombined > max) max = d.totalCombined; }); });
     return Math.max(max * 1.08, 100000);
-  }, [visibleData, activeSeries, isSandboxModified, sandboxTimeline, effectiveMaxVisibleAge]);
+  }, [visibleData, activeSeries, isSandboxModified, sandboxTimeline, compareRuns, effectiveMaxVisibleAge]);
   const yScale = useMemo(() => d3.scaleLinear().domain([0, maxY]).range([innerHeight, 0]).nice(), [maxY, innerHeight]);
   const pathGenerators = useMemo(() => {
     const paths = {};
@@ -2914,6 +3002,12 @@ export default function App() {
     if (!isSandboxModified || !sandboxTimeline.length) return null;
     return d3.line().x(d => xScale(d.ageSelf)).y(d => yScale(d.totalCombined)).curve(d3.curveMonotoneX)(sandboxTimeline.filter(d => d.ageSelf <= effectiveMaxVisibleAge));
   }, [isSandboxModified, sandboxTimeline, effectiveMaxVisibleAge, xScale, yScale]);
+  // Same generator as the sandbox line, one per overlaid scenario. Like the sandbox these are raw engine
+  // rows, so the pot is read off totalCombined rather than the profile-aware `expected` key.
+  const comparePaths = useMemo(() => compareRuns.filter(r => r.rows).map(r => ({
+    id: r.id, tone: r.tone,
+    d: d3.line().x(d => xScale(d.ageSelf)).y(d => yScale(d.totalCombined)).curve(d3.curveMonotoneX)(r.rows.filter(d => d.ageSelf <= effectiveMaxVisibleAge))
+  })), [compareRuns, effectiveMaxVisibleAge, xScale, yScale]);
   const histXScale = useMemo(() => d3.scaleLinear().domain([currentAge, Math.max(currentAge + 1, terminalAge)]).range([0, innerWidth]), [currentAge, terminalAge, innerWidth]);
   /*
    * The Monte Carlo fan: the 10th to 90th percentile of simulated wealth at every year, not a line any
@@ -3000,7 +3094,16 @@ export default function App() {
     const remaining = scenarios.filter(s => s.id !== idToDelete);
     setScenarios(remaining);
     if (activeScenarioId === idToDelete) { setActiveScenarioId(remaining[0].id); setPlan(E.normalizePlan(remaining[0].data)); }
+    setCompareIds(prev => prev.filter(id => id !== idToDelete));
   };
+
+  const toggleCompare = (id) => setCompareIds(prev => (prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]));
+  const sortCompareBy = (key) => setCompareSort(prev => (prev.key === key ? { key, dir: prev.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' }));
+  // The same three outcome states the Historical backtest reports, worded the same way. A floor failure
+  // funds every year and only then ends short, so it is not a "ran dry after N of N years".
+  const outcomeLabel = (r) => (r.survived ? `Survived all ${r.years} years`
+    : r.failReason === 'floor' ? `All ${r.years} years funded, below floor`
+      : `Ran dry after ${Math.max(0, r.failAge - r.startAge)} of ${r.years} years`);
 
   // ------------------------------------------------------------ sandbox
   // The sandbox as a plan object: the saved plan with its contributions, escalation and retirement ages
@@ -4181,6 +4284,7 @@ export default function App() {
                     {markers(xScale)}
                     {themedSeries.map(s => (activeSeries[s.id] && pathGenerators[s.id]) ? <path key={s.id} d={pathGenerators[s.id]} fill="none" stroke={s.color} strokeWidth={s.strokeWidth} strokeDasharray={s.dash} strokeLinecap="round" /> : null)}
                     {sandboxLinePath && <path d={sandboxLinePath} fill="none" stroke={cp.sandboxDash} strokeWidth="3.5" strokeDasharray="6,4" strokeLinecap="round" />}
+                    {comparePaths.map(c => <path key={c.id} d={c.d} fill="none" stroke={c.tone} strokeWidth="2.5" strokeDasharray="5,3" strokeLinecap="round" />)}
                     <rect width={innerWidth} height={innerHeight} fill="transparent" onMouseMove={(e) => { const rect = e.currentTarget.getBoundingClientRect(); const age = Math.round(xScale.invert((e.clientX - rect.left) * (innerWidth / Math.max(1, rect.width)))); setHoveredPoint(visibleData.find(d => d.ageSelf === age) || null); }} />
                     {hoveredPoint && <g transform={`translate(${xScale(hoveredPoint.ageSelf)}, 0)`}><line y2={innerHeight} stroke={cp.hoverCrosshair} strokeWidth="1" strokeDasharray="2,2" /><circle cy={yScale(hoveredPoint.expected || 0)} r="4" fill={cp.trajectoryHoverFill} stroke={cp.hoverDotStroke} strokeWidth="2" /></g>}
                   </g>
@@ -4194,6 +4298,9 @@ export default function App() {
                       {activeSeries.pensions && <div className="text-sky-600">Pensions: {formatGBP(hoveredPoint.pensions)}</div>}
                       {activeSeries.isas && <div className="text-teal-600">ISAs: {formatGBP(hoveredPoint.isas)}</div>}
                       <div className="text-slate-600">Tax this year: {formatGBP(hoveredPoint.taxPaid)}</div>
+                      {compareRuns.filter(r => r.rows).map(r => (
+                        <div key={r.id} className="font-bold truncate" style={{ color: r.tone }}>{r.name}: {formatGBP(r.rows.find(d => d.ageSelf === hoveredPoint.ageSelf)?.totalCombined)}</div>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -4208,7 +4315,81 @@ export default function App() {
                 </div>
                 {isSandboxModified && <div className="flex items-center gap-2 text-xs font-mono font-bold text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1 rounded-xl"><span className="w-2.5 h-2.5 rounded-full bg-amber-500 border border-amber-600" /> Sandbox Active (Dashed Line)</div>}
               </div>
+              {scenarios.filter(s => s.id !== activeScenarioId).length > 0 && (
+                <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100">
+                  <span className="text-xs text-slate-500 font-semibold whitespace-nowrap">Compare saved scenarios:</span>
+                  {scenarios.filter(s => s.id !== activeScenarioId).map(s => {
+                    const run = compareRuns.find(r => r.id === s.id);
+                    const atCap = !run && selectedCompare.length >= MAX_COMPARE;
+                    return (
+                      <button key={s.id} type="button" disabled={atCap} onClick={() => toggleCompare(s.id)} title={atCap ? `Up to ${MAX_COMPARE} at once` : s.name}
+                        className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center gap-2 transition-all border max-w-[16rem] ${run ? 'bg-slate-100 border-slate-300 text-slate-900 font-semibold cursor-pointer' : atCap ? 'bg-surface border-slate-200 text-slate-300 cursor-not-allowed' : 'bg-surface border-slate-200 text-slate-500 opacity-70 cursor-pointer hover:opacity-100'}`}>
+                        <span className="w-2.5 h-2.5 rounded-full shrink-0 border" style={{ backgroundColor: run ? run.tone : 'transparent', borderColor: run ? run.tone : 'currentColor' }} />
+                        <span className="truncate">{s.name}</span>{run && <Check className="w-3 h-3 text-slate-600 shrink-0" />}
+                      </button>
+                    );
+                  })}
+                  {selectedCompare.length > 0 && <button type="button" onClick={() => setCompareIds([])} className="text-xs text-slate-500 hover:text-slate-800 hover:underline font-semibold cursor-pointer">Clear</button>}
+                </div>
+              )}
             </div>
+
+            {selectedCompare.length > 0 && (
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+                <div>
+                  <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Table className="w-4 h-4 text-blue-600" /> Scenario Comparison</h2>
+                  <span className="text-xs text-slate-500">Every figure on the expected-return path, in today&rsquo;s money. Each scenario&rsquo;s retirement pot is read at its own retirement age. Click a column to sort.</span>
+                </div>
+                <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans">
+                      <tr>
+                        <th className="p-2.5">Scenario</th>
+                        {[['retireAge', 'Retires'], ['retirePot', 'Pot at retirement'], ['terminal', 'Terminal pot'], ['delta', 'vs current'], ['lifetimeTax', 'Lifetime tax']].map(([key, label]) => (
+                          <th key={key} className="p-2.5">
+                            <button type="button" onClick={() => sortCompareBy(key)} className="font-semibold hover:text-slate-900 cursor-pointer flex items-center gap-1">
+                              {label}{compareSort.key === key && <span className="text-[9px]">{compareSort.dir === 'desc' ? '▼' : '▲'}</span>}
+                            </button>
+                          </th>
+                        ))}
+                        <th className="p-2.5 text-right">Outcome</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
+                      {sortedCompareRows.map(r => (
+                        <tr key={r.id} className={`transition-colors ${r.isBase ? 'bg-slate-50/80' : 'hover:bg-slate-50/80'}`}>
+                          <td className="p-2 font-sans font-semibold text-slate-800">
+                            <span className="flex items-center gap-2">
+                              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: r.tone }} />
+                              <span className="truncate max-w-[14rem]">{r.name}</span>
+                              {r.isBase && <span className="px-1.5 py-0.5 bg-slate-200 text-slate-600 rounded text-[9px] font-bold uppercase tracking-wide shrink-0">Baseline</span>}
+                            </span>
+                          </td>
+                          {r.error ? (
+                            <td colSpan={5} className="p-2 font-sans text-slate-400 italic">This scenario cannot be projected: {r.error}</td>
+                          ) : (
+                            <>
+                              <td className="p-2 text-slate-700">{r.retireAge}</td>
+                              <td className="p-2 text-slate-700">{formatGBP(r.retirePot)}</td>
+                              <td className="p-2 font-bold text-blue-700">{formatGBP(r.terminal)}</td>
+                              <td className={`p-2 font-semibold ${r.delta === null ? 'text-slate-300' : r.delta > 0 ? 'text-emerald-700' : r.delta < 0 ? 'text-rose-700' : 'text-slate-500'}`}>
+                                {r.delta === null ? '—' : `${r.delta > 0 ? '+' : r.delta < 0 ? '−' : ''}${formatGBP(Math.abs(r.delta))}`}
+                              </td>
+                              <td className="p-2 text-slate-600">{formatGBP(r.lifetimeTax)}</td>
+                            </>
+                          )}
+                          <td className="p-2 text-right">
+                            {r.error ? <span className="px-2 py-0.5 bg-slate-100 text-slate-500 rounded font-sans text-[10px] font-bold">Unavailable</span>
+                              : <span className={`px-2 py-0.5 rounded font-sans text-[10px] font-bold ${r.survived ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>{outcomeLabel(r)}</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="text-[11px] text-slate-500 leading-relaxed">One steady real rate per wrapper, so this ranks the plans against each other rather than against a market. It carries no sequence-of-returns risk: for the chance each scenario survives, enter them in the tournament on the Monte Carlo tab, which runs every scenario on the same market paths.</p>
+              </div>
+            )}
 
             {renderSandboxPanel({ tab: 'trajectory' })}
           </div>
