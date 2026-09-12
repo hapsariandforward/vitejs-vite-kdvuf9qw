@@ -2374,7 +2374,7 @@ const CHART_PALETTE = {
 };
 
 /*
- * Colours for scenarios overlaid on the Trajectory chart. Deliberately clear of the six SERIES_CONFIG
+ * Colours for scenarios overlaid on the Projection chart. Deliberately clear of the six SERIES_CONFIG
  * hues and of the amber sandbox dash, since all of them can be on screen at once: the three series that
  * default to on are blue, sky and teal, so these are pink, olive, red and purple.
  */
@@ -3034,7 +3034,7 @@ export default function App() {
   useEffect(() => { if (!sandboxCustomized) setSandboxAccounts(sandboxFromPlan(plan)); }, [plan?.accounts, sandboxCustomized]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (!sandboxCustomized) setSandboxRetire(sandboxRetireFromPlan(plan)); }, [plan?.demographics?.retireAgeSelf, plan?.demographics?.retireAgePart, sandboxCustomized]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // The tournament lives inside the Monte Carlo tab, which unmounts on every tab switch. Its settings and
+  // The tournament lives inside the Strategy tab, which unmounts on every tab switch. Its settings and
   // results are held here instead so a run that took a minute to produce survives a trip to another tab —
   // and so a run left in flight can still land its results when the user navigates away mid-evaluation.
   // `basePlan` holds a frozen copy of the sandbox when the user scores the tournament against it rather than
@@ -3044,13 +3044,13 @@ export default function App() {
     entrantIds: [], results: null, progress: null, isEvaluating: false, basePlan: null, autoRun: 0
   });
   const tournamentCancelRef = useRef(false);
-  // Which saved scenarios are overlaid on the Trajectory chart. Held here, like the tournament's state,
+  // Which saved scenarios are overlaid on the Projection chart. Held here, like the tournament's state,
   // so a selection survives a trip to another tab.
   const [compareIds, setCompareIds] = useState([]);
   const [compareSort, setCompareSort] = useState({ key: null, dir: 'desc' });
-  // Both tabs render the same sandbox, but each remembers its own expanded state: the Trajectory tab is
-  // the sandbox's home so it starts open, while the Monte Carlo tab leads with the tournament.
-  const [sandboxOpen, setSandboxOpen] = useState({ trajectory: true, simulation: false });
+  // One sandbox, on the Projection tab. It used to be rendered on two tabs with separate open/closed
+  // state; there is only one chart to test against now, so there is only one panel and one flag.
+  const [sandboxOpen, setSandboxOpen] = useState(true);
 
   useEffect(() => { safeStorageSet(STORAGE_KEY, JSON.stringify(plan)); }, [plan]);
   useEffect(() => { safeStorageSet(SCENARIOS_STORAGE_KEY, JSON.stringify(scenarios)); }, [scenarios]);
@@ -3083,7 +3083,9 @@ export default function App() {
   // what stops the metric tiles quietly changing meaning depending on which button was pressed last.
   const [simResult, setSimResult] = useState(null);
   const [safeMaxResult, setSafeMaxResult] = useState(null);
-  const [mcStages, setMcStages] = useState({ safeMax: true, tournament: true });
+  // Only the safe-max solve is optional here now; the tournament moved to its own tab, where it has its
+  // own button, rather than being armed from a checkbox on a tab that cannot show it running.
+  const [mcStages, setMcStages] = useState({ safeMax: true });
   const [mcDetailOpen, setMcDetailOpen] = useState(true);
   const [simProgress, setSimProgress] = useState(null);
   const [isSimulating, setIsSimulating] = useState(false);
@@ -3135,7 +3137,7 @@ export default function App() {
   const sandboxTimeline = useMemo(() => E.simulateDeterministic(sandboxCtx, 'expected'), [sandboxCtx]);
 
   /*
-   * Saved scenarios overlaid on the Trajectory chart, projected the same way the live plan is.
+   * Saved scenarios overlaid on the Projection chart, projected the same way the live plan is.
    *
    * The dependency list is the point: a scenario's `data` only changes when it is saved, so these runs
    * are not repeated on every keystroke the way timelineData is. buildContext throws on a plan that is
@@ -3263,6 +3265,10 @@ export default function App() {
    * at the 10th and 90th.
    */
   const [bandMode, setBandMode] = useState('quartile');   // 'quartile' | 'decile' | 'off'
+  // The simulated fan, overlaid on the same axes. Two controls rather than one because they are genuinely
+  // independent: the band is live and free, the fan costs a run, and having both on at once is the most
+  // useful view on the chart - the gap between them is sequence risk, drawn.
+  const [showFan, setShowFan] = useState(true);
   const bandSpec = BAND_QUANTILES[bandMode] || null;
   const bandCurves = useMemo(() => {
     if (!bandSpec) return null;
@@ -3280,6 +3286,24 @@ export default function App() {
       .filter(d => d.ageSelf <= effectiveMaxVisibleAge);
   }, [bandCurves, bandKey, effectiveMaxVisibleAge]);
 
+  /*
+   * The Monte Carlo fan: the 10th to 90th percentile of simulated wealth at every year, not a line any
+   * one path follows. `bands` only exists when a run asked runTrial to keep its paths, which is stage 1.
+   *
+   * It shares the trajectory chart's axes rather than owning its own. That used to be impossible - the
+   * spread of 5,000 outcomes reaches far above a single expected curve, so one axis flattened the other -
+   * and it is worth being clear that nothing about that changed. The fan still sets the ceiling and the
+   * expected line still sits low against it. That is the correct picture: an expected path is not the
+   * middle of the distribution, and putting them on one axis is what makes it visible.
+   */
+  const fanBands = simResult?.bands || null;
+  const fanData = useMemo(
+    () => (fanBands ? fanBands.map(b => ({ ...b, ageSelf: currentAge + b.t })) : []),
+    [fanBands, currentAge]);
+  const fanVisible = useMemo(
+    () => (showFan && fanData.length ? fanData.filter(d => d.ageSelf <= effectiveMaxVisibleAge) : null),
+    [showFan, fanData, effectiveMaxVisibleAge]);
+
   // ------------------------------------------------------------ chart scales
   const chartWidth = 960, chartHeight = 420;
   const margin = { top: 25, right: 35, bottom: 45, left: 80 };
@@ -3294,8 +3318,12 @@ export default function App() {
     compareRuns.forEach(r => { if (r.rows) r.rows.forEach(d => { if (d.ageSelf <= effectiveMaxVisibleAge && d.totalCombined > max) max = d.totalCombined; }); });
     // and so must the lucky edge, which by construction sits above everything else on the chart
     if (bandData) bandData.forEach(d => { if (d.hi > max) max = d.hi; });
+    // The simulated fan reaches highest of all - its 90th percentile is a genuine tail, not a smooth
+    // curve - which is why these two charts used to need separate y-axes. On one axis it simply sets the
+    // ceiling, and the expected line reading low against it is the honest picture rather than a defect.
+    if (fanVisible) fanVisible.forEach(d => { if (d.p90 > max) max = d.p90; });
     return Math.max(max * 1.08, 100000);
-  }, [visibleData, activeSeries, isSandboxModified, sandboxTimeline, compareRuns, effectiveMaxVisibleAge, bandData]);
+  }, [visibleData, activeSeries, isSandboxModified, sandboxTimeline, compareRuns, effectiveMaxVisibleAge, bandData, fanVisible]);
   const yScale = useMemo(() => d3.scaleLinear().domain([0, maxY]).range([innerHeight, 0]).nice(), [maxY, innerHeight]);
   const pathGenerators = useMemo(() => {
     const paths = {};
@@ -3322,33 +3350,19 @@ export default function App() {
     d: d3.line().x(d => xScale(d.ageSelf)).y(d => yScale(d.totalCombined)).curve(d3.curveMonotoneX)(r.rows.filter(d => d.ageSelf <= effectiveMaxVisibleAge))
   })), [compareRuns, effectiveMaxVisibleAge, xScale, yScale]);
   const histXScale = useMemo(() => d3.scaleLinear().domain([currentAge, Math.max(currentAge + 1, terminalAge)]).range([0, innerWidth]), [currentAge, terminalAge, innerWidth]);
-  /*
-   * The Monte Carlo fan: the 10th to 90th percentile of simulated wealth at every year, not a line any
-   * one path follows. Its own scales, because the spread of 5,000 outcomes reaches far above the single
-   * expected curve next door and sharing a y-axis would flatten one of them.
-   *
-   * `bands` only exists when a run asked runTrial to keep its paths, which is stage 1 alone.
-   */
-  const fanBands = simResult?.bands || null;
-  const fanData = useMemo(
-    () => (fanBands ? fanBands.map(b => ({ ...b, ageSelf: currentAge + b.t })) : []),
-    [fanBands, currentAge]);
-  const fanYScale = useMemo(() => {
-    const max = fanData.reduce((m, d) => Math.max(m, d.p90), 0);
-    return d3.scaleLinear().domain([0, max || 1]).range([innerHeight, 0]).nice();
-  }, [fanData, innerHeight]);
   const fanPaths = useMemo(() => {
-    if (!fanData.length) return null;
-    const x = (d) => histXScale(d.ageSelf);
+    if (!fanVisible || fanVisible.length < 2) return null;
+    const x = (d) => xScale(d.ageSelf);
     return {
-      band: d3.area().x(x).y0(d => fanYScale(d.p10)).y1(d => fanYScale(d.p90)).curve(d3.curveMonotoneX)(fanData),
-      median: d3.line().x(x).y(d => fanYScale(d.p50)).curve(d3.curveMonotoneX)(fanData),
-      lower: d3.line().x(x).y(d => fanYScale(d.p10)).curve(d3.curveMonotoneX)(fanData),
-      upper: d3.line().x(x).y(d => fanYScale(d.p90)).curve(d3.curveMonotoneX)(fanData)
+      band: d3.area().x(x).y0(d => yScale(Math.max(0, d.p10))).y1(d => yScale(d.p90)).curve(d3.curveMonotoneX)(fanVisible),
+      median: d3.line().x(x).y(d => yScale(d.p50)).curve(d3.curveMonotoneX)(fanVisible),
+      lower: d3.line().x(x).y(d => yScale(Math.max(0, d.p10))).curve(d3.curveMonotoneX)(fanVisible),
+      upper: d3.line().x(x).y(d => yScale(d.p90)).curve(d3.curveMonotoneX)(fanVisible)
     };
-  }, [fanData, histXScale, fanYScale]);
+  }, [fanVisible, xScale, yScale]);
   // The first age at which a tenth of the paths are broke. Worth naming: it is the most actionable thing
-  // on the chart, and a smooth deterministic line could never have produced it.
+  // on the chart, and a smooth deterministic line could never have produced it. Read off the whole fan,
+  // not the visible slice, so dragging the horizon slider cannot change the answer.
   const fanRuinAge = useMemo(() => {
     const hit = fanData.find(d => d.p10 <= 0);
     return hit ? hit.ageSelf : null;
@@ -3413,7 +3427,6 @@ export default function App() {
     return { smoothLow, smoothHigh, actualLow, actualHigh, gapLow, gapHigh, pctLow, pctHigh, state, smoothSurvives: smoothLow > 0 };
   }, [simResult, ctx.totalYears, ctx.terminalAge, ctx.owners, resolvedPlan, activeRiskMatrix]);
 
-  const [hoveredFanPoint, setHoveredFanPoint] = useState(null);
 
   const histMaxY = useMemo(() => Math.max(Math.max(0, ...historicalTimeline.map(d => d.totalCombined)) * 1.12, 100000), [historicalTimeline]);
   const histYScale = useMemo(() => d3.scaleLinear().domain([0, histMaxY]).range([innerHeight, 0]).nice(), [histMaxY, innerHeight]);
@@ -3532,7 +3545,7 @@ export default function App() {
   const handleRunTournamentFromSandbox = () => {
     const base = E.normalizePlan(clone(planFromSandbox(plan)));
     setTournament(prev => ({ ...prev, basePlan: base, results: null, autoRun: prev.autoRun + 1 }));
-    setActiveTab('simulation');
+    setActiveTab('strategy');
     flash('Running the tournament on your sandbox figures', 4000);
   };
   const handleResetSandbox = () => { setSandboxCustomized(false); setSandboxAccounts(sandboxFromPlan(plan)); setSandboxRetire(sandboxRetireFromPlan(plan)); };
@@ -3562,8 +3575,8 @@ export default function App() {
       if (Array.isArray(a.contribByYear)) fresh[a.id].contribByYear = a.contribByYear;
     });
     setSandboxAccounts(fresh);
-    setActiveTab('trajectory');
-    flash(`"${strategy.name}" applied to Sandbox & Trajectory chart`, 3500);
+    setActiveTab('projection');
+    flash(`"${strategy.name}" applied to the Sandbox on the Projection chart`, 3500);
   };
 
   // Writes the strategy straight into the plan rather than the sandbox. Contributions and escalation are
@@ -3673,9 +3686,11 @@ export default function App() {
   };
 
   /*
-   * The single action on the tab. Each stage renders as it lands rather than at the end, so the fast
-   * answer is on screen in about a second while the slower ones are still working. Stage 3 hands off to
-   * the tournament panel, which owns its own progress and results, by bumping the token it watches.
+   * The single action on the Projection tab. Each stage renders as it lands rather than at the end, so the
+   * fast answer is on screen in about a second while the slower one is still working.
+   *
+   * It clears any tournament results as it goes. Those live on another tab and were scored against the
+   * plan as it was, so leaving them up after a fresh run would present stale figures as current ones.
    */
   const handleRunAll = async () => {
     if (isSimulating || isOptimizing) return;
@@ -3696,8 +3711,6 @@ export default function App() {
     } finally {
       setIsSimulating(false); setIsOptimizing(false); setSimProgress(null);
     }
-    if (mcCancelRef.current) return;
-    if (mcStages.tournament) setTournament(prev => ({ ...prev, autoRun: prev.autoRun + 1 }));
   };
 
   // Re-solve stage 2 alone, which is what a change of target survival rate needs: stage 1 does not depend on it.
@@ -3801,12 +3814,9 @@ export default function App() {
     { id: 'dark', Icon: Moon, title: 'Control Room (dark)' },
   ];
 
-  // One sandbox shared by the Trajectory and Monte Carlo tabs: both render this same markup, so it is
-  // backed by a single piece of state and an edit made in one tab is already present in the other.
-  // On the Monte Carlo tab it sits below the tournament and starts collapsed, since the tournament is
-  // what that tab is for and the sandbox is the follow-on.
-  const renderSandboxPanel = ({ tab }) => {
-    const open = !!sandboxOpen[tab];
+  // The sandbox, rendered once at the foot of the Projection tab, directly under the chart it edits.
+  const renderSandboxPanel = () => {
+    const open = sandboxOpen;
     return (
     <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-5">
       <div className={open ? 'pb-3 border-b border-slate-100' : ''}>
@@ -3815,7 +3825,7 @@ export default function App() {
             <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Sparkles className="w-4 h-4 text-amber-500" /> Sandbox</h3>
             <p className="text-xs text-slate-500 mt-0.5">Test contributions, escalation rates and tournament strategies without modifying your base plan inputs.</p>
           </div>
-          <button type="button" onClick={() => setSandboxOpen(o => ({ ...o, [tab]: !o[tab] }))} className="shrink-0 px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 cursor-pointer">
+          <button type="button" onClick={() => setSandboxOpen(o => !o)} className="shrink-0 px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 cursor-pointer">
             {open ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
             {open ? 'Hide' : isSandboxModified ? 'Show (edited)' : 'Show'}
           </button>
@@ -3931,8 +3941,8 @@ export default function App() {
                 {tabBtn('home', Home, 'Start Here')}
                 {tabBtn('inputs', Sliders, 'Plan Inputs')}
                 {tabBtn('config', Settings, 'Config & Assumptions')}
-                {tabBtn('trajectory', Layers, 'Portfolio Trajectory')}
-                {tabBtn('simulation', Dices, 'Monte Carlo Simulation', 'indigo')}
+                {tabBtn('projection', Layers, 'Projection')}
+                {tabBtn('strategy', Zap, 'Strategy', 'indigo')}
                 {tabBtn('historical', History, 'Historical Backtest', 'indigo')}
                 {tabBtn('audit', Table, 'Audit Data Table')}
                 {tabBtn('docs', BookOpen, 'Documentation')}
@@ -4022,10 +4032,10 @@ export default function App() {
                     body: 'Who you are, when you stop working, what you spend, and what each wrapper holds. One-off costs and deposits live here too. Choose Advanced inputs if either of you is self-employed.' },
                   { tab: 'config', Icon: Settings, name: 'Config & Assumptions', accent: 'blue', need: 'Optional',
                     body: 'Tax rates, allowances, return and volatility assumptions, drawdown policy and the random seed. Defaults are current-year figures, so change them to test a different assumption, not because the tab exists.' },
-                  { tab: 'trajectory', Icon: Layers, name: 'Portfolio Trajectory', accent: 'blue',
-                    body: 'A single expected-return path, year by year, with a sandbox for testing a different contribution or retirement age against it.' },
-                  { tab: 'simulation', Icon: Dices, name: 'Monte Carlo Simulation', accent: 'indigo',
-                    body: `${MC_TRIALS.toLocaleString()} random market paths, a survival rate, and the safe-spend solver. It also runs the strategy tournament that re-splits your budget across wrappers.` },
+                  { tab: 'projection', Icon: Layers, name: 'Projection', accent: 'blue',
+                    body: `Your plan year by year on one chart: the expected path, a modelled range that updates as you type, and the ${MC_TRIALS.toLocaleString()}-path simulation with its survival rate and safe-spend solver. The sandbox for testing a different contribution or retirement age lives here too.` },
+                  { tab: 'strategy', Icon: Zap, name: 'Strategy', accent: 'indigo',
+                    body: 'The tournament: holds your spending and budget fixed and re-splits the money between wrappers, scoring each strategy on identical market paths.' },
                   { tab: 'historical', Icon: History, name: 'Historical Backtest', accent: 'indigo',
                     body: `Replays real returns from ${E.HISTORICAL_FIRST_YEAR} onwards through your plan. A reality check on the random draws: sequences like 1973 or 2000 actually happened.` },
                   { tab: 'audit', Icon: Table, name: 'Audit Data Table', accent: 'blue',
@@ -4689,15 +4699,53 @@ export default function App() {
 
 
         {/* TAB 3: TRAJECTORY & SANDBOX */}
-        {activeTab === 'trajectory' && (
+        {/* TAB 4: PROJECTION - the deterministic path, the modelled band and the simulated fan on one chart */}
+        {activeTab === 'projection' && (
           <div className="space-y-6">
+            <div className="bg-surface border border-slate-200/90 rounded-2xl p-5 shadow-xs space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Run the numbers</h3>
+                  <span className="text-[11px] text-slate-500">Each stage appears as it finishes, so the first answer arrives while the rest is still working. Every figure is in today&rsquo;s money.</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  {mcBusy && (
+                    <button type="button" onClick={handleCancelMC} className="px-3 py-1.5 rounded-xl text-xs font-bold border border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700 cursor-pointer">Stop</button>
+                  )}
+                  <button onClick={handleRunAll} disabled={mcBusy}
+                    className="px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 dark:from-[#2C5C8F] dark:to-[#A9781F] dark:hover:from-[#204568] text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95 disabled:opacity-60">
+                    <Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300 dark:fill-[#FCD34D] dark:text-[#FCD34D]" />
+                    {isSimulating && !isOptimizing ? 'Testing…' : isOptimizing ? 'Solving…' : tournament.isEvaluating ? 'Comparing…' : '⚡ Run the numbers'}
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-[11px] text-slate-600 pt-2.5 border-t border-slate-100">
+                <span className="text-slate-400">Always runs: how your current spend holds up.</span>
+                <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                  <input type="checkbox" checked={mcStages.safeMax} onChange={(e) => setMcStages(s => ({ ...s, safeMax: e.target.checked }))} className="accent-indigo-600 cursor-pointer" />
+                  <span className="font-semibold text-slate-700">Also solve for the most I could spend</span>
+                </label>
+                <div className={`flex items-center bg-slate-100 border border-slate-200 rounded-xl p-1 ${mcStages.safeMax || safeMaxResult ? '' : 'opacity-40'}`}>
+                  <span className="text-slate-500 px-2">Target survival rate:</span>
+                  {[85, 90, 95].map(rate => <button key={rate} type="button" onClick={() => setTargetSurvivalRate(rate)} className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${targetSurvivalRate === rate ? 'bg-surface text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>{rate}%</button>)}
+                </div>
+                <button type="button" onClick={() => setActiveTab('strategy')} className="text-slate-500 hover:text-slate-800 hover:underline font-semibold cursor-pointer">Comparing wrapper strategies lives on the Strategy tab &rarr;</button>
+              </div>
+              {simProgress && <div className="w-full"><ProgressBar value={simProgress.value} label={simProgress.label} /></div>}
+            </div>
+
             <div className="p-4 bg-blue-50/80 border border-blue-200 rounded-2xl text-xs text-slate-700 space-y-1.5 shadow-2xs">
-              <div className="flex items-center gap-2 font-bold text-blue-950 text-sm"><Layers className="w-4 h-4 text-blue-600" /> Deterministic Portfolio Trajectory &amp; Sandbox</div>
-              <p className="leading-relaxed"><strong>What it does:</strong> Models compound wealth paths and tax-wrapper decumulation at one steady real rate per wrapper, recalculated live as you type. It is the fast view: change a contribution or a retirement age in the Sandbox and the whole projection moves with you.</p>
-              <p className="text-slate-500 text-[11px] leading-relaxed"><strong>About the shaded band.</strong> These curves were once removed from this tab for being inaccurate, and the reason turned out to be how they were drawn rather than what they were: a single rate held across the whole chart. The quantile rate depends on the horizon &mdash; the spread is &radic;(sp&sup2; + &sigma;&sup2;/T), which narrows as T grows &mdash; so a 45-year rate compounded across the first five years understates the early spread threefold, and a fixed-rate band measured 24&ndash;29% away from the simulation at age 50, in pure accumulation, where sequence risk cannot be the cause. Re-deriving the rate at every age brings that to 2&ndash;3%, which is what is drawn here.</p>
+              <div className="flex items-center gap-2 font-bold text-blue-950 text-sm"><Layers className="w-4 h-4 text-blue-600" /> Projection &amp; Sandbox</div>
+              <p className="leading-relaxed"><strong>One chart, three readings of the same plan.</strong> The <strong>expected</strong> path compounds one steady real rate per wrapper and redraws as you type. The <strong>modelled</strong> band puts a range either side of it, also live. The <strong>simulated</strong> fan is the range read off {MC_TRIALS.toLocaleString()} randomised paths, and costs a run. They share an axis on purpose: an expected path is not the middle of a distribution, and the gap between the modelled band and the simulated fan is sequence risk.</p>
+              <p className="text-slate-500 text-[11px] leading-relaxed"><strong>About the modelled band.</strong> These curves were once removed for being inaccurate, and the reason turned out to be how they were drawn rather than what they were: a single rate held across the whole chart. The quantile rate depends on the horizon &mdash; the spread is &radic;(sp&sup2; + &sigma;&sup2;/T), which narrows as T grows &mdash; so a 45-year rate compounded across the first five years understates the early spread threefold, and a fixed-rate band measured 24&ndash;29% away from the simulation at age 50, in pure accumulation, where sequence risk cannot be the cause. Re-deriving the rate at every age brings that to 2&ndash;3%, which is what is drawn here.</p>
               <p className={`text-[11px] font-semibold ${deterministicVerdict.survived ? 'text-emerald-700' : 'text-rose-700'}`}>
                 {deterministicVerdict.survived ? `Expected path survives to ${terminalAge}` : `Expected path fails at age ${deterministicVerdict.failAge} (${deterministicVerdict.failReason === 'pre-access' ? 'pre-SIPP access bridge exhausted' : deterministicVerdict.failReason === 'floor' ? 'below the bequest floor' : 'spending shortfall'})`}; lifetime tax {formatGBP(deterministicVerdict.lifetimeTax)}{P.cgtEnabled ? ' (income tax + CGT)' : ''}.
               </p>
+              <div className="flex flex-wrap gap-x-5 gap-y-1 pt-0.5">
+                <button type="button" onClick={() => goToDoc('doc-mc-buttons')} className="text-[11px] text-blue-700 hover:text-blue-900 hover:underline font-semibold flex items-center gap-1 cursor-pointer">
+                  <HelpCircle className="w-3.5 h-3.5" /> What each stage does, and how to read it &rarr;
+                </button>
+              </div>
             </div>
 
             <div className="bg-surface border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
@@ -4713,11 +4761,14 @@ export default function App() {
               <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Expected Terminal Pot</div><div className="text-2xl font-black font-mono text-blue-600 mt-2">{formatGBP(chartDisplayData[chartDisplayData.length - 1]?.expected)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Target className="w-3.5 h-3.5 text-blue-600" /> Constant expected real growth to age {terminalAge}</div></div>
               <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Expected Pot at Retirement</div><div className="text-2xl font-black font-mono text-indigo-600 mt-2">{formatGBP(timelineData.find(r => r.ageSelf === ctx.owners[0].retireAge)?.totalCombined)}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><TrendingUp className="w-3.5 h-3.5 text-indigo-600" /> The year contributions stop, at age {ctx.owners[0].retireAge}</div></div>
               {/*
-                * Where the two deterministic band lines used to sit. A single constant rate cannot carry
-                * sequence-of-returns risk, so its downside finished well above the simulated one; the
-                * honest range is a distribution, and it lives one tab across.
+                * The third card used to be a link to the Monte Carlo tab. There is no other tab now, so it
+                * reports the simulated downside instead - and once a run exists, the expected pot beside it
+                * is worth reading against the median rather than on its own, which is the comparison the
+                * two charts being separate used to hide.
                 */}
-              <button type="button" onClick={() => setActiveTab('simulation')} className="text-left bg-slate-50 border border-slate-200 p-5 rounded-2xl shadow-xs hover:border-indigo-200 hover:bg-surface transition-colors cursor-pointer group"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">How good or bad could it get?</div><div className="text-base font-bold text-slate-800 mt-2 group-hover:text-indigo-700">Run the Monte Carlo &rarr;</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Dices className="w-3.5 h-3.5 text-indigo-600" /> One smooth line cannot show the spread. {MC_TRIALS.toLocaleString()} simulated paths can.</div></button>
+              {simResult
+                ? <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Simulated survival</div><div className={`text-2xl font-black font-mono mt-2 ${simResult.successRate >= 90 ? 'text-emerald-600' : simResult.successRate >= 75 ? 'text-amber-600' : 'text-rose-600'}`}>{simResult.successRate.toFixed(1)}%</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Dices className="w-3.5 h-3.5 text-indigo-600" /> Median pot {formatGBP(simResult.medianTerminal)}, a tenth end below {formatGBP(simResult.p10Terminal)}</div></div>
+                : <button type="button" onClick={handleRunAll} disabled={mcBusy} className="text-left bg-slate-50 border border-slate-200 p-5 rounded-2xl shadow-xs hover:border-indigo-200 hover:bg-surface transition-colors cursor-pointer group disabled:opacity-60 disabled:cursor-not-allowed"><div className="text-xs font-semibold uppercase tracking-wider text-slate-500">How often does this hold?</div><div className="text-base font-bold text-slate-800 mt-2 group-hover:text-indigo-700">{mcBusy ? 'Running…' : <>Run the simulation &rarr;</>}</div><div className="text-xs text-slate-500 mt-1 flex items-center gap-1.5"><Dices className="w-3.5 h-3.5 text-indigo-600" /> The modelled band cannot run dry. {MC_TRIALS.toLocaleString()} real paths can.</div></button>}
             </div>
 
             <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
@@ -4728,11 +4779,19 @@ export default function App() {
                 </div>
                 <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
                   <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 px-1 py-1 rounded-xl text-xs">
-                    <span className="text-slate-500 px-1.5 whitespace-nowrap">Band:</span>
+                    <span className="text-slate-500 px-1.5 whitespace-nowrap" title="Modelled from the return matrix. Live, no run needed.">Modelled:</span>
                     {[['quartile', '1 in 4'], ['decile', '1 in 10'], ['off', 'Off']].map(([k, label]) => (
-                      <button key={k} type="button" onClick={() => setBandMode(k)} title={k === 'quartile' ? 'The 25th and 75th percentile: what BlackRock publish' : k === 'decile' ? 'The 10th and 90th percentile: matches the Monte Carlo fan' : 'Expected line only'}
+                      <button key={k} type="button" onClick={() => setBandMode(k)} title={k === 'quartile' ? 'The 25th and 75th percentile: what BlackRock publish' : k === 'decile' ? 'The 10th and 90th percentile: matches the simulated fan' : 'Expected line only'}
                         className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${bandMode === k ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}>{label}</button>
                     ))}
+                  </div>
+                  <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 px-1 py-1 rounded-xl text-xs">
+                    <span className="text-slate-500 px-1.5 whitespace-nowrap">Simulated:</span>
+                    <button type="button" onClick={() => fanData.length ? setShowFan(!showFan) : handleRunAll()} disabled={mcBusy}
+                      title={fanData.length ? 'The 10th to 90th percentile read off the simulated paths themselves' : 'Run the simulation to draw this'}
+                      className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${showFan && fanData.length ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}>
+                      {fanData.length ? (showFan ? 'On' : 'Off') : mcBusy ? 'Running…' : 'Run →'}
+                    </button>
                   </div>
                   <div className="flex items-center gap-3 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl text-xs">
                     <span className="text-slate-600 whitespace-nowrap">Horizon: <strong>Age {effectiveMaxVisibleAge}</strong></span>
@@ -4746,8 +4805,16 @@ export default function App() {
                     {yScale.ticks(6).map((t, i) => <g key={i} transform={`translate(0, ${yScale(t)})`}><line x2={innerWidth} stroke={cp.gridMajor} strokeDasharray="3,3" /><text x={-10} dy="0.32em" fill={cp.axisText} fontSize="10" textAnchor="end" fontFamily="monospace">£{(t / 1000).toFixed(0)}k</text></g>)}
                     {xScale.ticks(10).map((t, i) => <g key={i} transform={`translate(${xScale(t)}, 0)`}><line y2={innerHeight} stroke={cp.gridMinor} /><text y={innerHeight + 20} fill={cp.axisText} fontSize="11" textAnchor="middle" fontFamily="monospace">{t}</text></g>)}
                     {markers(xScale)}
+                    {/* simulated fan underneath the modelled band: it is the wider of the two, and drawing
+                        it first means the band reads as sitting inside it, which is the point being made */}
+                    {fanPaths && <>
+                      <path d={fanPaths.band} fill={cp.fanBand} stroke="none" />
+                      <path d={fanPaths.lower} fill="none" stroke={cp.fanEdge} strokeWidth="1.5" />
+                      <path d={fanPaths.upper} fill="none" stroke={cp.fanEdge} strokeWidth="1.5" />
+                      <path d={fanPaths.median} fill="none" stroke={cp.fanMedian} strokeWidth="2" strokeLinecap="round" opacity="0.85" />
+                    </>}
                     {bandPaths && <>
-                      <path d={bandPaths.area} fill={cp.fanBand} stroke="none" />
+                      {!fanPaths && <path d={bandPaths.area} fill={cp.fanBand} stroke="none" />}
                       <path d={bandPaths.lo} fill="none" stroke={cp.fanEdge} strokeWidth="1.5" strokeDasharray="5,4" />
                       <path d={bandPaths.hi} fill="none" stroke={cp.fanEdge} strokeWidth="1.5" strokeDasharray="5,4" />
                     </>}
@@ -4785,6 +4852,16 @@ export default function App() {
                 </div>
                 {isSandboxModified && <div className="flex items-center gap-2 text-xs font-mono font-bold text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1 rounded-xl"><span className="w-2.5 h-2.5 rounded-full bg-amber-500 border border-amber-600" /> Sandbox Active (Dashed Line)</div>}
               </div>
+              {fanPaths && (
+                <p className="text-[11px] text-slate-500 leading-relaxed pt-1">
+                  <span className="inline-flex items-center gap-1.5 mr-1.5 align-middle"><span className="w-4 h-2.5 rounded-sm inline-block" style={{ background: cp.fanBand, border: `1px solid ${cp.fanEdge}` }} /></span>
+                  <strong className="text-slate-700">Simulated, 10th to 90th percentile:</strong> where {simResult.trials.toLocaleString()} randomised paths actually put the pot at each age, spending {formatGBP(simResult.spend)} a year, with the median through the middle. No single path follows any of those lines and none is a forecast &mdash; each is a percentile of where the paths had landed by that age, so the right-hand edge is the same 10th, 50th and 90th percentile pot reported below.{' '}
+                  {fanRuinAge !== null
+                    ? <><strong className="text-rose-700">Its lower edge reaches zero at age {fanRuinAge}:</strong> one plan in ten has run dry by then, which is the statement no smooth curve can make.</>
+                    : <><strong className="text-emerald-700">Its lower edge never reaches zero:</strong> more than nine plans in ten still hold something at age {terminalAge}.</>}
+                  {bandPaths ? <> The dashed edges are the modelled band described below; the gap between the two is sequence risk.</> : null}
+                </p>
+              )}
               {bandCurves && bandSpec && (
                 <p className="text-[11px] text-slate-500 leading-relaxed pt-1">
                   <span className="inline-flex items-center gap-1.5 mr-1.5 align-middle"><span className="w-4 h-2.5 rounded-sm inline-block" style={{ background: cp.fanBand, border: `1px solid ${cp.fanEdge}` }} /></span>
@@ -4814,117 +4891,6 @@ export default function App() {
               )}
             </div>
 
-            {selectedCompare.length > 0 && (
-              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
-                <div>
-                  <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Table className="w-4 h-4 text-blue-600" /> Scenario Comparison</h2>
-                  <span className="text-xs text-slate-500">Every figure on the expected-return path, in today&rsquo;s money. Each scenario&rsquo;s retirement pot is read at its own retirement age. Click a column to sort.</span>
-                </div>
-                <div className="overflow-x-auto border border-slate-200 rounded-xl">
-                  <table className="w-full text-left text-xs border-collapse">
-                    <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans">
-                      <tr>
-                        <th className="p-2.5">Scenario</th>
-                        {[['retireAge', 'Retires'], ['retirePot', 'Pot at retirement'], ['terminal', 'Terminal pot'], ['delta', 'vs current'], ['lifetimeTax', 'Lifetime tax']].map(([key, label]) => (
-                          <th key={key} className="p-2.5">
-                            <button type="button" onClick={() => sortCompareBy(key)} className="font-semibold hover:text-slate-900 cursor-pointer flex items-center gap-1">
-                              {label}{compareSort.key === key && <span className="text-[9px]">{compareSort.dir === 'desc' ? '▼' : '▲'}</span>}
-                            </button>
-                          </th>
-                        ))}
-                        <th className="p-2.5 text-right">Outcome</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
-                      {sortedCompareRows.map(r => (
-                        <tr key={r.id} className={`transition-colors ${r.isBase ? 'bg-slate-50/80' : 'hover:bg-slate-50/80'}`}>
-                          <td className="p-2 font-sans font-semibold text-slate-800">
-                            <span className="flex items-center gap-2">
-                              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: r.tone }} />
-                              <span className="truncate max-w-[14rem]">{r.name}</span>
-                              {r.isBase && <span className="px-1.5 py-0.5 bg-slate-200 text-slate-600 rounded text-[9px] font-bold uppercase tracking-wide shrink-0">Baseline</span>}
-                            </span>
-                          </td>
-                          {r.error ? (
-                            <td colSpan={5} className="p-2 font-sans text-slate-400 italic">This scenario cannot be projected: {r.error}</td>
-                          ) : (
-                            <>
-                              <td className="p-2 text-slate-700">{r.retireAge}</td>
-                              <td className="p-2 text-slate-700">{formatGBP(r.retirePot)}</td>
-                              <td className="p-2 font-bold text-blue-700">{formatGBP(r.terminal)}</td>
-                              <td className={`p-2 font-semibold ${r.delta === null ? 'text-slate-300' : r.delta > 0 ? 'text-emerald-700' : r.delta < 0 ? 'text-rose-700' : 'text-slate-500'}`}>
-                                {r.delta === null ? '—' : `${r.delta > 0 ? '+' : r.delta < 0 ? '−' : ''}${formatGBP(Math.abs(r.delta))}`}
-                              </td>
-                              <td className="p-2 text-slate-600">{formatGBP(r.lifetimeTax)}</td>
-                            </>
-                          )}
-                          <td className="p-2 text-right">
-                            {r.error ? <span className="px-2 py-0.5 bg-slate-100 text-slate-500 rounded font-sans text-[10px] font-bold">Unavailable</span>
-                              : <span className={`px-2 py-0.5 rounded font-sans text-[10px] font-bold ${r.survived ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>{outcomeLabel(r)}</span>}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                <p className="text-[11px] text-slate-500 leading-relaxed">One steady real rate per wrapper, so this ranks the plans against each other rather than against a market. It carries no sequence-of-returns risk: for the chance each scenario survives, enter them in the tournament on the Monte Carlo tab, which runs every scenario on the same market paths.</p>
-              </div>
-            )}
-
-            {renderSandboxPanel({ tab: 'trajectory' })}
-          </div>
-        )}
-
-        {/* TAB 4: MONTE CARLO */}
-        {activeTab === 'simulation' && (
-          <div className="space-y-6">
-            <div className="p-4 bg-indigo-50/80 border border-indigo-200 rounded-2xl text-xs text-slate-700 space-y-2 shadow-2xs">
-              <div className="flex items-center gap-2 font-bold text-indigo-950 text-sm"><Dices className="w-4 h-4 text-indigo-600" /> Monte Carlo Simulation</div>
-              <p className="leading-relaxed">Runs your plan through {MC_TRIALS.toLocaleString()} randomised market paths and answers three questions in one go: how often your current spend holds, the most you could take instead, and whether a different split between wrappers would do better.</p>
-              <div className="flex flex-wrap gap-x-5 gap-y-1">
-                <button type="button" onClick={() => goToDoc('doc-mc-buttons')} className="text-[11px] text-blue-700 hover:text-blue-900 hover:underline font-semibold flex items-center gap-1 cursor-pointer">
-                  <HelpCircle className="w-3.5 h-3.5" /> What each stage does, and how to read it &rarr;
-                </button>
-                <button type="button" onClick={() => goToDoc('doc-tournament')} className="text-[11px] text-blue-700 hover:text-blue-900 hover:underline font-semibold flex items-center gap-1 cursor-pointer">
-                  <HelpCircle className="w-3.5 h-3.5" /> Tournament methodology and players &rarr;
-                </button>
-              </div>
-            </div>
-
-            <div className="bg-surface border border-slate-200/90 rounded-2xl p-5 shadow-xs space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Run the numbers</h3>
-                  <span className="text-[11px] text-slate-500">Each stage appears as it finishes, so the first answer arrives while the rest is still working. Every figure is in today&rsquo;s money.</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  {mcBusy && (
-                    <button type="button" onClick={handleCancelMC} className="px-3 py-1.5 rounded-xl text-xs font-bold border border-slate-300 bg-slate-100 hover:bg-slate-200 text-slate-700 cursor-pointer">Stop</button>
-                  )}
-                  <button onClick={handleRunAll} disabled={mcBusy}
-                    className="px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 dark:from-[#2C5C8F] dark:to-[#A9781F] dark:hover:from-[#204568] text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95 disabled:opacity-60">
-                    <Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300 dark:fill-[#FCD34D] dark:text-[#FCD34D]" />
-                    {isSimulating && !isOptimizing ? 'Testing…' : isOptimizing ? 'Solving…' : tournament.isEvaluating ? 'Comparing…' : '⚡ Run the numbers'}
-                  </button>
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-[11px] text-slate-600 pt-2.5 border-t border-slate-100">
-                <span className="text-slate-400">Always runs: how your current spend holds up.</span>
-                <label className="flex items-center gap-1.5 cursor-pointer select-none">
-                  <input type="checkbox" checked={mcStages.safeMax} onChange={(e) => setMcStages(s => ({ ...s, safeMax: e.target.checked }))} className="accent-indigo-600 cursor-pointer" />
-                  <span className="font-semibold text-slate-700">Also solve for the most I could spend</span>
-                </label>
-                <div className={`flex items-center bg-slate-100 border border-slate-200 rounded-xl p-1 ${mcStages.safeMax || safeMaxResult ? '' : 'opacity-40'}`}>
-                  <span className="text-slate-500 px-2">Target survival rate:</span>
-                  {[85, 90, 95].map(rate => <button key={rate} type="button" onClick={() => setTargetSurvivalRate(rate)} className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${targetSurvivalRate === rate ? 'bg-surface text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>{rate}%</button>)}
-                </div>
-                <label className="flex items-center gap-1.5 cursor-pointer select-none">
-                  <input type="checkbox" checked={mcStages.tournament} onChange={(e) => setMcStages(s => ({ ...s, tournament: e.target.checked }))} className="accent-indigo-600 cursor-pointer" />
-                  <span className="font-semibold text-slate-700">Also compare wrapper strategies</span>
-                </label>
-              </div>
-              {simProgress && <div className="w-full"><ProgressBar value={simProgress.value} label={simProgress.label} /></div>}
-            </div>
 
             {(simResult || safeMaxResult) && (
               <div className={`p-5 rounded-2xl shadow-xs border transition-all ${!simResult ? 'bg-slate-50 border-slate-200' : simResult.successRate >= 90 ? 'bg-emerald-50/90 border-emerald-200' : simResult.successRate >= 75 ? 'bg-amber-50/90 border-amber-200' : 'bg-rose-50/90 border-rose-200'}`}>
@@ -4986,54 +4952,6 @@ export default function App() {
               </div>
             )}
 
-            {fanPaths && (
-              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
-                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Dices className="w-4 h-4 text-indigo-600" /> The range of outcomes, year by year</h3>
-                    <span className="text-xs text-slate-500">Where {simResult.trials.toLocaleString()} simulated paths put your total pot at each age, spending {formatGBP(simResult.spend)} a year. Real purchasing power.</span>
-                  </div>
-                  <div className="flex items-center gap-3 text-[11px] bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl">
-                    <span className="flex items-center gap-1.5"><span className="w-3 h-2.5 rounded-sm" style={{ background: cp.fanBand, border: `1px solid ${cp.fanEdge}` }} />10th&ndash;90th</span>
-                    <span className="flex items-center gap-1.5"><span className="w-3.5 h-0.5 rounded" style={{ background: cp.fanMedian }} />Median</span>
-                  </div>
-                </div>
-                <div className="relative overflow-x-auto">
-                  <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="w-full h-auto select-none" onMouseLeave={() => setHoveredFanPoint(null)}>
-                    <g transform={`translate(${margin.left}, ${margin.top})`}>
-                      {fanYScale.ticks(6).map((t, i) => <g key={i} transform={`translate(0, ${fanYScale(t)})`}><line x2={innerWidth} stroke={cp.gridMajor} strokeDasharray="3,3" /><text x={-10} dy="0.32em" fill={cp.axisText} fontSize="10" textAnchor="end" fontFamily="monospace">£{(t / 1000).toFixed(0)}k</text></g>)}
-                      {histXScale.ticks(10).map((t, i) => <g key={i} transform={`translate(${histXScale(t)}, 0)`}><line y2={innerHeight} stroke={cp.gridMinor} /><text y={innerHeight + 20} fill={cp.axisText} fontSize="11" textAnchor="middle" fontFamily="monospace">{t}</text></g>)}
-                      {markers(histXScale)}
-                      <path d={fanPaths.band} fill={cp.fanBand} stroke="none" />
-                      <path d={fanPaths.lower} fill="none" stroke={cp.fanEdge} strokeWidth="1.5" strokeDasharray="5,4" />
-                      <path d={fanPaths.upper} fill="none" stroke={cp.fanEdge} strokeWidth="1.5" strokeDasharray="5,4" />
-                      <path d={fanPaths.median} fill="none" stroke={cp.fanMedian} strokeWidth="3" strokeLinecap="round" />
-                      <rect width={innerWidth} height={innerHeight} fill="transparent" onMouseMove={(e) => { const rect = e.currentTarget.getBoundingClientRect(); const age = Math.round(histXScale.invert((e.clientX - rect.left) * (innerWidth / Math.max(1, rect.width)))); setHoveredFanPoint(fanData.find(d => d.ageSelf === age) || null); }} />
-                      {hoveredFanPoint && (
-                        <g transform={`translate(${histXScale(hoveredFanPoint.ageSelf)}, 0)`}>
-                          <line y2={innerHeight} stroke={cp.hoverCrosshair} strokeWidth="1" strokeDasharray="2,2" />
-                          <circle cy={fanYScale(hoveredFanPoint.p50)} r="4" fill={cp.fanMedian} stroke={cp.hoverDotStroke} strokeWidth="2" />
-                        </g>
-                      )}
-                    </g>
-                  </svg>
-                  {hoveredFanPoint && (
-                    <div className="absolute top-2 right-2 bg-surface/95 border border-slate-200 rounded-xl p-2.5 text-[11px] font-mono shadow-sm pointer-events-none">
-                      <div className="font-bold text-slate-800 font-sans mb-1">Age {hoveredFanPoint.ageSelf}</div>
-                      <div className="text-emerald-700">90th: {formatGBP(hoveredFanPoint.p90)}</div>
-                      <div className="text-slate-800">Median: {formatGBP(hoveredFanPoint.p50)}</div>
-                      <div className="text-rose-700">10th: {formatGBP(hoveredFanPoint.p10)}</div>
-                    </div>
-                  )}
-                </div>
-                <p className="text-[11px] text-slate-500 leading-relaxed">
-                  {fanRuinAge !== null
-                    ? <><strong className="text-rose-700">The lower edge reaches zero at age {fanRuinAge}:</strong> one plan in ten has run dry by then. </>
-                    : <><strong className="text-emerald-700">The lower edge never reaches zero:</strong> more than nine plans in ten still hold something at age {terminalAge}. </>}
-                  The band widens because nothing cancels out the early years. No single path follows any of these three lines, and none of them is a forecast: each is a percentile of where {simResult.trials.toLocaleString()} paths had landed by that age, so the right-hand edge is the same 10th, 50th and 90th percentile pot reported below.
-                </p>
-              </div>
-            )}
 
             {sequenceLoss && (
               <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
@@ -5082,6 +5000,7 @@ export default function App() {
               </div>
             )}
 
+
             {simResult && (
               <details open={mcDetailOpen} onToggle={(e) => setMcDetailOpen(e.currentTarget.open)} className="bg-surface border border-slate-200/90 rounded-2xl shadow-xs">
                 <summary className="p-4 cursor-pointer text-xs font-bold text-slate-900 uppercase tracking-wider select-none">
@@ -5114,8 +5033,82 @@ export default function App() {
               </details>
             )}
 
+
+            {selectedCompare.length > 0 && (
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
+                <div>
+                  <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Table className="w-4 h-4 text-blue-600" /> Scenario Comparison</h2>
+                  <span className="text-xs text-slate-500">Every figure on the expected-return path, in today&rsquo;s money. Each scenario&rsquo;s retirement pot is read at its own retirement age. Click a column to sort.</span>
+                </div>
+                <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans">
+                      <tr>
+                        <th className="p-2.5">Scenario</th>
+                        {[['retireAge', 'Retires'], ['retirePot', 'Pot at retirement'], ['terminal', 'Terminal pot'], ['delta', 'vs current'], ['lifetimeTax', 'Lifetime tax']].map(([key, label]) => (
+                          <th key={key} className="p-2.5">
+                            <button type="button" onClick={() => sortCompareBy(key)} className="font-semibold hover:text-slate-900 cursor-pointer flex items-center gap-1">
+                              {label}{compareSort.key === key && <span className="text-[9px]">{compareSort.dir === 'desc' ? '▼' : '▲'}</span>}
+                            </button>
+                          </th>
+                        ))}
+                        <th className="p-2.5 text-right">Outcome</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-mono text-[11px]">
+                      {sortedCompareRows.map(r => (
+                        <tr key={r.id} className={`transition-colors ${r.isBase ? 'bg-slate-50/80' : 'hover:bg-slate-50/80'}`}>
+                          <td className="p-2 font-sans font-semibold text-slate-800">
+                            <span className="flex items-center gap-2">
+                              <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: r.tone }} />
+                              <span className="truncate max-w-[14rem]">{r.name}</span>
+                              {r.isBase && <span className="px-1.5 py-0.5 bg-slate-200 text-slate-600 rounded text-[9px] font-bold uppercase tracking-wide shrink-0">Baseline</span>}
+                            </span>
+                          </td>
+                          {r.error ? (
+                            <td colSpan={5} className="p-2 font-sans text-slate-400 italic">This scenario cannot be projected: {r.error}</td>
+                          ) : (
+                            <>
+                              <td className="p-2 text-slate-700">{r.retireAge}</td>
+                              <td className="p-2 text-slate-700">{formatGBP(r.retirePot)}</td>
+                              <td className="p-2 font-bold text-blue-700">{formatGBP(r.terminal)}</td>
+                              <td className={`p-2 font-semibold ${r.delta === null ? 'text-slate-300' : r.delta > 0 ? 'text-emerald-700' : r.delta < 0 ? 'text-rose-700' : 'text-slate-500'}`}>
+                                {r.delta === null ? '—' : `${r.delta > 0 ? '+' : r.delta < 0 ? '−' : ''}${formatGBP(Math.abs(r.delta))}`}
+                              </td>
+                              <td className="p-2 text-slate-600">{formatGBP(r.lifetimeTax)}</td>
+                            </>
+                          )}
+                          <td className="p-2 text-right">
+                            {r.error ? <span className="px-2 py-0.5 bg-slate-100 text-slate-500 rounded font-sans text-[10px] font-bold">Unavailable</span>
+                              : <span className={`px-2 py-0.5 rounded font-sans text-[10px] font-bold ${r.survived ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}`}>{outcomeLabel(r)}</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="text-[11px] text-slate-500 leading-relaxed">One steady real rate per wrapper, so this ranks the plans against each other rather than against a market. It carries no sequence-of-returns risk: for the chance each scenario survives, enter them in the tournament on the Strategy tab, which runs every scenario on the same market paths.</p>
+              </div>
+            )}
+
+            {renderSandboxPanel()}
+          </div>
+        )}
+
+        {/* TAB 5: STRATEGY - which split of the money wins, rather than what the outcome is */}
+        {activeTab === 'strategy' && (
+          <div className="space-y-6">
+            <div className="p-4 bg-indigo-50/80 border border-indigo-200 rounded-2xl text-xs text-slate-700 space-y-1.5 shadow-2xs">
+              <div className="flex items-center gap-2 font-bold text-indigo-950 text-sm"><Zap className="w-4 h-4 text-indigo-600" /> Strategy Tournament</div>
+              <p className="leading-relaxed">A different question from the one the Projection tab answers. That one asks what happens to your plan; this asks whether a <strong>different split of the same money</strong> would do better. Your spending and your total budget are held fixed, the budget is re-divided between wrappers, and every strategy is scored on identical market paths so the comparison is like for like.</p>
+              <p className="text-slate-500 text-[11px] leading-relaxed">Nothing here changes your plan on its own. Applying a winning strategy is a separate, deliberate click, and it lands in the Sandbox on the Projection tab so you can see it drawn before committing it.</p>
+              <div className="flex flex-wrap gap-x-5 gap-y-1 pt-0.5">
+                <button type="button" onClick={() => goToDoc('doc-tournament')} className="text-[11px] text-blue-700 hover:text-blue-900 hover:underline font-semibold flex items-center gap-1 cursor-pointer">
+                  <HelpCircle className="w-3.5 h-3.5" /> Tournament methodology and players &rarr;
+                </button>
+              </div>
+            </div>
             <WrapperStrategyTournament plan={plan} ctx={ctx} seed={mcSeed} scenarios={scenarios} activeScenarioId={activeScenarioId} state={tournament} setState={setTournament} cancelRef={tournamentCancelRef} onApplyStrategyToSandbox={handleApplyStrategyToSandbox} onApplyStrategyToPlan={handleApplyStrategyToPlan} onNavigateDocs={() => goToDoc('doc-tournament')} />
-            {renderSandboxPanel({ tab: 'simulation' })}
           </div>
         )}
 
@@ -5223,7 +5216,7 @@ export default function App() {
           <div className="space-y-6">
             <div id="doc-mc-buttons" className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-3">
               <h2 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Dices className="w-4 h-4 text-blue-600" /> The Three Stages of a Monte Carlo Run</h2>
-              <p className="text-xs text-slate-600 leading-relaxed">One button runs all three, and each result appears as its stage finishes. The first two use the same engine on the same {MC_TRIALS.toLocaleString()} randomised market paths and differ only in which side of the equation is held fixed: one fixes your spending and reports the risk, the other fixes the risk and reports the spending. The third leaves both alone and changes where the money sits instead. The last two can be switched off if you only want the fast answer.</p>
+              <p className="text-xs text-slate-600 leading-relaxed">Two of these run from one button on the Projection tab, each result appearing as its stage finishes. They use the same engine on the same {MC_TRIALS.toLocaleString()} randomised market paths and differ only in which side of the equation is held fixed: one fixes your spending and reports the risk, the other fixes the risk and reports the spending. The second can be switched off if you only want the fast answer. The third leaves both alone and changes where the money sits instead; it answers a different question, so it has its own tab and its own button.</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
                   <strong className="text-slate-800 block">Stage 1, always runs: "will this plan hold?"</strong>
@@ -5238,14 +5231,15 @@ export default function App() {
                   <p className="text-slate-500">Only affects stage 2. It is the share of paths you are asking the spending figure to survive, so a <em>lower</em> target returns a <em>higher</em> figure: 85% buys you more income now in exchange for a 1-in-7 chance of running short. 95% is the conventional planning benchmark. Changing it after a run offers to solve stage 2 again on its own, since nothing else depends on it.</p>
                 </div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
-                  <strong className="text-slate-800 block">Stage 3, optional: "would a different split do better?"</strong>
+                  <strong className="text-slate-800 block">On the Strategy tab: "would a different split do better?"</strong>
                   <p className="text-slate-500">Holds your spending and your budget fixed and re-splits the budget between wrappers, scoring each strategy on identical market paths. It is the slowest stage because it runs several full simulations, and two of its players search a range of candidates first. The methodology and the players are documented below.</p>
                 </div>
               </div>
               <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1 text-xs">
-                <strong className="text-slate-800 block">The range chart, and why it is not a pair of lines</strong>
+                <strong className="text-slate-800 block">The chart: one expected path, two ranges</strong>
                 <p className="text-slate-500">Stage 1 keeps every simulated path, not just its ending, so the chart can show where all {MC_TRIALS.toLocaleString()} of them stood at each age: the shaded band is the 10th to 90th percentile, the solid line the median. Read the right-hand edge and you get the same three pot figures reported underneath it, because both use the same quantile. No path follows any of the three lines, and the band widens with age because nothing cancels out the early years.</p>
-                <p className="text-slate-500">The Trajectory tab answers the same question more cheaply, with a shaded band either side of the expected line, and it is worth knowing exactly how the two differ. That band once drew both edges at a single steady rate, and was removed for being badly wrong: its lower edge finished a mean 23% above the simulated 10th-percentile pot, and 70% above it at worst. The diagnosis at the time blamed sequence-of-returns risk, and that was only half right. A fixed-rate band is also 24&ndash;29% out at age 50 in pure accumulation, years before any withdrawal &mdash; so something else was wrong, and it was the construction: the spread of an annualised return is &radic;(sp&sup2; + &sigma;&sup2;/T), which narrows with the horizon, so one rate cannot describe every age on a chart. Re-deriving it at each age brings the band to within 2&ndash;3% of the simulation, and that is what it now draws.</p>
+                <p className="text-slate-500">It shares an axis with the expected path and the modelled band, which is deliberate and used to be impossible: a fan of {MC_TRIALS.toLocaleString()} outcomes reaches far above a single smooth curve, so on separate charts each one flattened the other. What that shared axis shows is how little of the distribution the expected line accounts for. The line itself is well placed &mdash; it tracks the simulated median to within a few percent (measured &minus;3.5%, &minus;1.5% and +0.4% across three households), because the engine compounds the same rate it draws around as the median of each year&rsquo;s return. The point is the distance above and below it. Read on its own, a single curve looks like an answer; against the fan it is visibly one thread of a very wide cloth.</p>
+                <p className="text-slate-500">The modelled band answers the same question more cheaply, as a shaded band either side of the expected line, and it is worth knowing exactly how the two differ. That band once drew both edges at a single steady rate, and was removed for being badly wrong: its lower edge finished a mean 23% above the simulated 10th-percentile pot, and 70% above it at worst. The diagnosis at the time blamed sequence-of-returns risk, and that was only half right. A fixed-rate band is also 24&ndash;29% out at age 50 in pure accumulation, years before any withdrawal &mdash; so something else was wrong, and it was the construction: the spread of an annualised return is &radic;(sp&sup2; + &sigma;&sup2;/T), which narrows with the horizon, so one rate cannot describe every age on a chart. Re-deriving it at each age brings the band to within 2&ndash;3% of the simulation, and that is what it now draws.</p>
                 <p className="text-slate-500">What survives is the real difference between the two. The band cannot run dry, because a smooth line has no bad decade in it; the fan can, because it is made of paths that did. So the band&rsquo;s lower edge stays optimistic, and increasingly so as a plan weakens &mdash; 5.5% out at 99.5% survival, 16.2% at 97.3%, 98% at 91.3%. Use the band to see the shape of the range as you type, and the fan when the downside is the decision.</p>
                 <p className="text-slate-500">Where the lower edge touches zero, a tenth of the paths have run dry by that age. That is a statement no smooth line could have made.</p>
                 <p className="text-slate-500"><strong className="text-slate-800">Sequence risk, priced.</strong> The card under the chart puts a number on the same effect rather than describing it. It takes each tier&rsquo;s 10th-percentile annualised return &mdash; the unlucky column of the Config risk matrix, over your own horizon &mdash; compounds it evenly to age {terminalAge}, and sets that against the 10th-percentile pot the simulation actually produced. The two runs share an expected return, a plan and a horizon; all that separates them is the order the returns arrive in, so the difference is sequence risk in pounds. It is one-sided by nature: the same comparison at the 90th percentile comes out far smaller, and sometimes favourable, because selling units cheaply to live on is irreversible in a way that buying them cheaply is not. While you are still contributing it disappears, and can turn mildly favourable &mdash; a bumpy path buys more units when prices are low. This is also the one thing a published return forecast cannot supply, however detailed: withdrawal order is not a property of a return distribution.</p>
