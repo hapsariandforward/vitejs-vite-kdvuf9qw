@@ -1565,6 +1565,9 @@ function pathsForSeed(seed, trials, years) {
   return out;
 }
 
+// How many real trials to keep for the chart to draw. See samplePaths below.
+const SAMPLE_PATHS = 60;
+
 function summarizeTrials(results) {
   const n = results.length;
   if (!n) return null;
@@ -1582,7 +1585,7 @@ function summarizeTrials(results) {
    * Paths that run dry sit at zero and stay there, which is the point. The p10 line reaching the axis
    * at some age is the plain statement that one plan in ten is broke by then.
    */
-  let bands = null;
+  let bands = null, samplePaths = null;
   if (results[0] && results[0].path) {
     const years = results[0].path.length;
     const col = new Float64Array(n);
@@ -1595,11 +1598,24 @@ function summarizeTrials(results) {
       // published assumptions give
       bands.push({ t, p10: q(col, 0.10), p25: q(col, 0.25), p50: q(col, 0.50), p75: q(col, 0.75), p90: q(col, 0.90) });
     }
+    /*
+     * A handful of the ACTUAL trials, kept so the chart can draw real simulated futures rather than a
+     * reveal of the summary. Evenly spaced by index rather than randomly picked, so the same run always
+     * shows the same faces and the sample is not quietly reweighted toward anything; the trials are
+     * already in seed order, which has no relation to outcome, so evenly spaced is an unbiased sample.
+     *
+     * 60 of them: enough to show the spread has texture, few enough that the eye can still follow one.
+     */
+    const want = Math.min(SAMPLE_PATHS, n);
+    const stride = Math.max(1, Math.floor(n / want));
+    samplePaths = [];
+    for (let i = 0; i < n && samplePaths.length < want; i += stride) samplePaths.push(results[i].path.slice());
   }
   return {
     trials: n,
     successRate,
     bands,
+    samplePaths,
     standardError: Math.sqrt(Math.max(0, successRate * (100 - successRate) / n)),
     p10Terminal: q(pots, 0.10), p25Terminal: q(pots, 0.25), medianTerminal: q(pots, 0.50),
     p75Terminal: q(pots, 0.75), p90Terminal: q(pots, 0.90),
@@ -3401,11 +3417,11 @@ export default function App() {
     if (slide !== 4 && !seeAll) return;                              // only play once it is on screen
     mcPlayedFor.current = token;
     setMcReveal(0);
-    const start = performance.now(), ms = 1400;
+    const start = performance.now(), ms = 2200;
     let raf = 0;
     const step = () => {
       const t = Math.min(1, (performance.now() - start) / ms);
-      setMcReveal(t < 1 ? 1 - Math.pow(1 - t, 3) : 1);               // ease out, so the tail settles
+      setMcReveal(t);
       if (t < 1) raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);
@@ -3484,9 +3500,37 @@ export default function App() {
    * 10th/90th available as an outer pair from the legend. `reveal` is the animation clock - the fraction
    * of the horizon drawn so far - so the chart can play itself in once and then stay put.
    */
+  /*
+   * The two phases of the reveal, derived from one clock.
+   *
+   * DRAW (0 to 0.72): sixty of the real simulated futures sweep out from the left, each one a plan that
+   * lived through its own order of good and bad years. They already differ at the first point drawn,
+   * because stepYear applies a year's growth at row 0 - the chart opens slightly fanned rather than
+   * pinched, which is correct. SETTLE (0.72 to 1): they fade out as the percentile band fades in, so the
+   * summary is visibly made OF those paths rather than asserted over them.
+   *
+   * Drawing the actual trials matters. A wipe across a pre-computed band looks similar for a second and
+   * says nothing true: the fan would appear whether or not anything had been simulated.
+   */
+  const mcDraw = Math.min(1, mcReveal / 0.72);
+  const mcSettle = Math.max(0, (mcReveal - 0.72) / 0.28);
+  const mcSpaghetti = useMemo(() => {
+    const sample = simResult?.samplePaths;
+    if (!showFan || !sample || !sample.length || mcSettle >= 1) return null;
+    const age0 = currentAge;
+    const lastAge = Math.min(effectiveMaxVisibleAge, age0 + sample[0].length - 1);
+    const upto = age0 + Math.max(1, Math.round((lastAge - age0) * mcDraw));
+    const gen = d3.line().x(d => xScale(d.a)).y(d => yScale(Math.max(0, d.v))).curve(d3.curveMonotoneX);
+    return sample.map((pth, i) => {
+      const rows = [];
+      for (let t = 0; t < pth.length; t++) { const a = age0 + t; if (a > upto) break; rows.push({ a, v: pth[t] }); }
+      return rows.length > 1 ? { id: i, d: gen(rows) } : null;
+    }).filter(Boolean);
+  }, [simResult, showFan, mcDraw, mcSettle, currentAge, effectiveMaxVisibleAge, xScale, yScale]);
+
   const fanPaths = useMemo(() => {
     if (!fanVisible || fanVisible.length < 2) return null;
-    const cut = Math.max(2, Math.ceil(fanVisible.length * mcReveal));
+    const cut = Math.max(2, Math.ceil(fanVisible.length * Math.max(mcSettle, mcReveal >= 1 ? 1 : 0)));
     const rows = fanVisible.slice(0, cut);
     const x = (d) => xScale(d.ageSelf);
     const line = (key) => d3.line().x(x).y(d => yScale(Math.max(0, d[key]))).curve(d3.curveMonotoneX)(rows);
@@ -3494,7 +3538,7 @@ export default function App() {
       band: d3.area().x(x).y0(d => yScale(Math.max(0, d.p25))).y1(d => yScale(d.p75)).curve(d3.curveMonotoneX)(rows),
       median: line('p50'), q25: line('p25'), q75: line('p75'), lower: line('p10'), upper: line('p90')
     };
-  }, [fanVisible, xScale, yScale, mcReveal]);
+  }, [fanVisible, xScale, yScale, mcReveal, mcSettle]);
   // The first age at which a tenth of the paths are broke. Worth naming: it is the most actionable thing
   // on the chart, and a smooth deterministic line could never have produced it. Read off the whole fan,
   // not the visible slice, so dragging the horizon slider cannot change the answer.
@@ -4097,16 +4141,26 @@ export default function App() {
                 <path d={bandPaths.lo} fill="none" stroke={edge} strokeWidth="1.5" strokeDasharray="5,4" />
                 <path d={bandPaths.hi} fill="none" stroke={edge} strokeWidth="1.5" strokeDasharray="5,4" />
               </>}
-              {!isRate && fanPaths && <>
-                <path d={fanPaths.band} fill={band} stroke="none" />
-                <path d={fanPaths.q25} fill="none" stroke={edge} strokeWidth="1.5" />
-                <path d={fanPaths.q75} fill="none" stroke={edge} strokeWidth="1.5" />
-                <path d={fanPaths.median} fill="none" stroke={cp.fanMedian} strokeWidth="2.5" strokeLinecap="round" />
-              </>}
-              {outerPaths && <>
-                <path d={outerPaths.lo} fill="none" stroke={outer} strokeWidth="1.25" strokeDasharray="2,3" />
-                <path d={outerPaths.hi} fill="none" stroke={outer} strokeWidth="1.25" strokeDasharray="2,3" />
-              </>}
+              {/* the real trials, drawing themselves out, then dissolving into the band they make up */}
+              {!isRate && mcSpaghetti && (
+                <g opacity={1 - mcSettle}>
+                  {mcSpaghetti.map(sp => <path key={sp.id} d={sp.d} fill="none" stroke={cp.fanMedian} strokeWidth="1" strokeOpacity="0.4" strokeLinecap="round" />)}
+                </g>
+              )}
+              {!isRate && fanPaths && (
+                <g opacity={mcReveal >= 1 ? 1 : mcSettle}>
+                  <path d={fanPaths.band} fill={band} stroke="none" />
+                  <path d={fanPaths.q25} fill="none" stroke={edge} strokeWidth="1.5" />
+                  <path d={fanPaths.q75} fill="none" stroke={edge} strokeWidth="1.5" />
+                  <path d={fanPaths.median} fill="none" stroke={cp.fanMedian} strokeWidth="2.5" strokeLinecap="round" />
+                </g>
+              )}
+              {outerPaths && (
+                <g opacity={isRate ? 1 : (mcReveal >= 1 ? 1 : mcSettle)}>
+                  <path d={outerPaths.lo} fill="none" stroke={outer} strokeWidth="1.25" strokeDasharray="2,3" />
+                  <path d={outerPaths.hi} fill="none" stroke={outer} strokeWidth="1.25" strokeDasharray="2,3" />
+                </g>
+              )}
               {themedSeries.map(s => (activeSeries[s.id] && pathGenerators[s.id]) ? <path key={s.id} d={pathGenerators[s.id]} fill="none" stroke={s.color} strokeWidth={s.strokeWidth} strokeDasharray={s.dash} strokeLinecap="round" /> : null)}
               {sandboxLinePath && <path d={sandboxLinePath} fill="none" stroke={cp.sandboxDash} strokeWidth="3.5" strokeDasharray="6,4" strokeLinecap="round" />}
               {comparePaths.map(c => <path key={c.id} d={c.d} fill="none" stroke={c.tone} strokeWidth="2.5" strokeDasharray="5,3" strokeLinecap="round" />)}
