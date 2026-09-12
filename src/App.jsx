@@ -166,8 +166,8 @@ const Z90 = 1.2815515655446004;
 const Z75 = 0.6744897501960817;
 // the bands the UI will draw, each with the share of outcomes it claims to sit outside
 const BAND_QUANTILES = {
-  quartile: { z: Z75, button: 'Show upper and lower quartiles', short: 'Quartiles', label: '1 in 4', lowPct: '25th', highPct: '75th' },
-  decile: { z: Z90, button: 'Show 10th and 90th percentiles', short: '10th / 90th', label: '1 in 10', lowPct: '10th', highPct: '90th' }
+  quartile: { z: Z75, button: 'Upper/lower quartiles', short: 'Upper/lower quartiles', label: '1 in 4', lowPct: '25th', highPct: '75th' },
+  decile: { z: Z90, button: '10th/90th percentiles', short: '10th/90th percentiles', label: '1 in 10', lowPct: '10th', highPct: '90th' }
 };
 
 /*
@@ -219,6 +219,42 @@ function luckyBand(real, vol, years, sigmaParam = 0) {
  * reports where the unlucky path itself runs dry, which is the cue the UI uses to say the line has
  * stopped being trustworthy. bandcurve.test.mjs pins all of this.
  */
+/*
+ * Standard normal CDF, via the Zelen & Severo 26.2.17 rational approximation (|error| < 7.5e-8). Needed
+ * to turn a z back into "what share of outcomes is this", which is the only way to state a rate-based
+ * result as a survival PERCENTAGE rather than as a count of the handful of lines that happen to be drawn.
+ */
+function normalCdf(z) {
+  const t = 1 / (1 + 0.2316419 * Math.abs(z));
+  const d = 0.3989422804014327 * Math.exp(-z * z / 2);
+  const p = d * t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  return z >= 0 ? 1 - p : p;
+}
+
+/*
+ * The share of outcomes a smooth compounded plan survives.
+ *
+ * Every quantile curve either lasts to the terminal age or runs dry, and worse quantiles fail first, so
+ * there is a single crossing: bisect on z for the unluckiest rate that still survives, then read off how
+ * much of the distribution sits at or above it. That is directly comparable to the simulation's survival
+ * rate, which is what makes the side-by-side table honest - a count of "4 of 5 lines" is an artefact of
+ * how many lines were drawn, not a property of the plan.
+ *
+ * Expect it to flatter: a smooth path cannot run dry mid-way and recover, and cannot be forced to sell
+ * into a crash, so it survives rates a real sequence would not.
+ */
+function smoothSurvivalRate(plan, { steps = 9 } = {}) {
+  const survives = (z) => quantileCurve(plan, z).failAge === null;
+  let lo = -3.5, hi = 3.5;                       // beyond these, the normal has nothing left to say
+  if (survives(lo)) return 100;
+  if (!survives(hi)) return 0;
+  for (let i = 0; i < steps; i++) {
+    const mid = (lo + hi) / 2;
+    if (survives(mid)) hi = mid; else lo = mid;
+  }
+  return (1 - normalCdf(hi)) * 100;
+}
+
 function quantileCurve(plan, z) {
   const base = resolveMpaa(plan);
   const profiles = isPlainObject(base.riskProfiles) ? base.riskProfiles : DEFAULT_RISK_PROFILES;
@@ -2403,8 +2439,8 @@ function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
 }
 
 // Namespace used by the UI (mirrors the modular engine.js exports)
-const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, DEFAULT_RISK_SOURCE, BAND_QUANTILES, CMA_PRESETS, applyCmaPreset, realFromNominal, luckyBand, quantileRate, quantileCurve, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, marginalRateAt, taxBreakpoints, TAX_REGION_LABELS, calculateUKNetIncome, nicFor, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, salaryAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSearchPlayer, bridgeIsaAnnual, liquidRealRate, buildTournament, buildPolicyCandidates, pickBest };
-export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, DEFAULT_RISK_SOURCE, BAND_QUANTILES, CMA_PRESETS, applyCmaPreset, realFromNominal, luckyBand, quantileRate, quantileCurve, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans, buildPolicyCandidates, pickBest, accumulationOutlay, solveEscalation, applyEscalationToPlan };
+const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, DEFAULT_RISK_SOURCE, BAND_QUANTILES, CMA_PRESETS, applyCmaPreset, realFromNominal, luckyBand, quantileRate, quantileCurve, normalCdf, smoothSurvivalRate, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, marginalRateAt, taxBreakpoints, TAX_REGION_LABELS, calculateUKNetIncome, nicFor, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, salaryAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSearchPlayer, bridgeIsaAnnual, liquidRealRate, buildTournament, buildPolicyCandidates, pickBest };
+export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, DEFAULT_RISK_SOURCE, BAND_QUANTILES, CMA_PRESETS, applyCmaPreset, realFromNominal, luckyBand, quantileRate, quantileCurve, normalCdf, smoothSurvivalRate, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans, buildPolicyCandidates, pickBest, accumulationOutlay, solveEscalation, applyEscalationToPlan };
 
 
 const STORAGE_KEY = 'rp_plan_full_v28';          // unchanged: old saved plans are migrated by normalizePlan
@@ -3355,10 +3391,11 @@ export default function App() {
    * toggled from each chart's own legend. Same shape on both sides is the whole point: a reader comparing
    * them should be comparing method, not percentile.
    */
-  const [bandMode, setBandMode] = useState('quartile');   // 'quartile' | 'decile' | 'off'
-  const [showRateOuter, setShowRateOuter] = useState(false);
-  const [showMcOuter, setShowMcOuter] = useState(false);
-  const [showFan, setShowFan] = useState(true);
+  // One control for both charts. They exist to be read against each other, so letting them sit on
+  // different percentiles would make the only comparison that matters impossible to trust.
+  const [bandMode, setBandMode] = useState('quartile');   // 'quartile' | 'decile'
+  // The Monte Carlo step exists to show its range, so there is nothing to switch off there.
+  const showFan = true;
   const bandSpec = BAND_QUANTILES[bandMode] || null;
   // Both quantile pairs, so the outer toggle costs nothing at the moment it is pressed. Four
   // deterministic sweeps, about 38ms on a 45-year plan, recomputed only when the plan itself changes.
@@ -3381,21 +3418,21 @@ export default function App() {
   const bandData = useMemo(() => {
     if (!bandCurves) return null;
     return bandCurves.lo.pot
-      .map((d, i) => ({ ageSelf: d.ageSelf, lo: d[bandKey], hi: bandCurves.hi.pot[i][bandKey], mid: rateCurves?.mid?.[i]?.[bandKey] ?? d[bandKey] }))
+      .map((d, i) => ({ ageSelf: d.ageSelf, lo: d[bandKey], hi: bandCurves.hi.pot[i][bandKey] }))
       .filter(d => d.ageSelf <= effectiveMaxVisibleAge);
-  }, [bandCurves, rateCurves, bandKey, effectiveMaxVisibleAge]);
+  }, [bandCurves, bandKey, effectiveMaxVisibleAge]);
 
   /*
-   * PINCH: every range is DRAWN as though it left a single point at the first age, and it did not.
+   * PINCH, on the Monte Carlo chart only: it is DRAWN as though every path left a single point, and they
+   * did not. stepYear applies a year's growth at row 0, so the first plotted value already carries that
+   * path's own first-year return - measured, an 81%-of-the-mean spread before the chart has drawn
+   * anything. The sixty animated trials and the band they dissolve into converge on the same point, which
+   * is what makes the reveal read as a fan opening rather than sixty unrelated lines.
    *
-   * stepYear applies a year's growth at row 0, so the first plotted value already carries that path's own
-   * first-year return - measured, an 81%-of-the-mean spread before the chart has drawn anything. Honest,
-   * and it reads as a mistake: the eye expects a fan to have an origin.
-   *
-   * So this is a deliberate cosmetic lie, and it is confined to the path geometry. bandData, fanData and
-   * simResult are untouched, which means the tooltip, the tiles and the side-by-side table all still
-   * report the true first-year figures. Only the first drawn point moves, and only to the middle of its
-   * own first year.
+   * A deliberate cosmetic lie, confined to the path geometry: bandData, fanData and simResult are
+   * untouched, so the tooltip, the tiles and the side-by-side table all still report the true first-year
+   * figures. The rate-based chart is NOT pinched - it is the reference the Monte Carlo is read against,
+   * and it draws what it computes.
    */
   const pinchY = (rows, key, anchorKey) => (d, i) => yScale(Math.max(0, i === 0 ? rows[0][anchorKey] : d[key]));
 
@@ -3423,13 +3460,9 @@ export default function App() {
    * a replay on every visit would be an animation you have to sit through rather than one you watched.
    */
   const [mcReveal, setMcReveal] = useState(0);
-  const mcPlayedFor = useRef(null);
   useEffect(() => {
-    if (!fanData.length) { mcPlayedFor.current = null; setMcReveal(0); return; }
-    const token = `${simResult?.trials}|${simResult?.spend}|${fanData.length}`;
-    if (mcPlayedFor.current === token) { setMcReveal(1); return; }   // already watched: show it finished
-    if (slide !== 4 && !seeAll) return;                              // only play once it is on screen
-    mcPlayedFor.current = token;
+    if (!fanData.length) { setMcReveal(0); return; }
+    if (slide !== 4 && !seeAll) { setMcReveal(0); return; }   // rewound, so arriving always plays it
     setMcReveal(0);
     const start = performance.now(), ms = 2200;
     let raf = 0;
@@ -3443,8 +3476,27 @@ export default function App() {
   }, [fanData, simResult, slide, seeAll]);
 
   // ------------------------------------------------------------ chart scales
-  const chartWidth = 960, chartHeight = 420;
-  const margin = { top: 25, right: 35, bottom: 45, left: 80 };
+  /*
+   * The viewBox is chosen for the screen, not fixed.
+   *
+   * A 960x420 box scaled into a phone is about 400x175 of actual pixels: a letterbox that squashes a
+   * forty-five year range into less height than the text beside it, and the one chart on the tab that
+   * most needs room. On a narrow screen the box goes taller than it is wide (560x620), which fills the
+   * portrait space the device actually has. The margins shrink with it, since an 80px left gutter is a
+   * seventh of a phone's width.
+   *
+   * Everything downstream reads innerWidth/innerHeight, so the scales, the paths and the markers all
+   * follow without knowing about any of this.
+   */
+  const [viewportW, setViewportW] = useState(() => (typeof window === 'undefined' ? 1280 : window.innerWidth));
+  useEffect(() => {
+    const onResize = () => setViewportW(window.innerWidth);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  const isNarrow = viewportW < 640;
+  const chartWidth = isNarrow ? 560 : 960, chartHeight = isNarrow ? 620 : 420;
+  const margin = isNarrow ? { top: 18, right: 14, bottom: 40, left: 58 } : { top: 25, right: 35, bottom: 45, left: 80 };
   const innerWidth = chartWidth - margin.left - margin.right;
   const innerHeight = chartHeight - margin.top - margin.bottom;
   const xScale = useMemo(() => d3.scaleLinear().domain([currentAge, Math.max(currentAge + 1, effectiveMaxVisibleAge)]).range([0, innerWidth]), [currentAge, effectiveMaxVisibleAge, innerWidth]);
@@ -3471,37 +3523,20 @@ export default function App() {
     if (!bandData || bandData.length < 2) return null;
     const x = (d) => xScale(d.ageSelf);
     return {
-      area: d3.area().x(x).y0(pinchY(bandData, 'lo', 'mid')).y1(pinchY(bandData, 'hi', 'mid')).curve(d3.curveMonotoneX)(bandData),
-      lo: d3.line().x(x).y(pinchY(bandData, 'lo', 'mid')).curve(d3.curveMonotoneX)(bandData),
-      hi: d3.line().x(x).y(pinchY(bandData, 'hi', 'mid')).curve(d3.curveMonotoneX)(bandData)
+      area: d3.area().x(x).y0(d => yScale(Math.max(0, d.lo))).y1(d => yScale(d.hi)).curve(d3.curveMonotoneX)(bandData),
+      lo: d3.line().x(x).y(d => yScale(Math.max(0, d.lo))).curve(d3.curveMonotoneX)(bandData),
+      hi: d3.line().x(x).y(d => yScale(d.hi)).curve(d3.curveMonotoneX)(bandData)
     };
   }, [bandData, xScale, yScale]);
-  const mcOuterPaths = useMemo(() => {
-    if (!showMcOuter || !fanVisible || fanVisible.length < 2) return null;
-    const rows = fanVisible.slice(0, Math.max(2, Math.ceil(fanVisible.length * mcReveal)));
-    const x = (d) => xScale(d.ageSelf);
-    return {
-      lo: d3.line().x(x).y(pinchY(rows, 'p10', 'p50')).curve(d3.curveMonotoneX)(rows),
-      hi: d3.line().x(x).y(pinchY(rows, 'p90', 'p50')).curve(d3.curveMonotoneX)(rows)
-    };
-  }, [showMcOuter, fanVisible, mcReveal, xScale, yScale]);
-  // the 10th/90th pair the rate chart's legend can add outside its quartile band
-  const rateOuterPaths = useMemo(() => {
-    if (!showRateOuter || !rateCurves) return null;
-    const rows = rateCurves.d.lo.pot
-      .map((d, i) => ({ ageSelf: d.ageSelf, lo: d[bandKey], hi: rateCurves.d.hi.pot[i][bandKey], mid: rateCurves.mid?.[i]?.[bandKey] ?? d[bandKey] }))
-      .filter(d => d.ageSelf <= effectiveMaxVisibleAge);
-    if (rows.length < 2) return null;
-    const x = (d) => xScale(d.ageSelf);
-    return {
-      lo: d3.line().x(x).y(pinchY(rows, 'lo', 'mid')).curve(d3.curveMonotoneX)(rows),
-      hi: d3.line().x(x).y(pinchY(rows, 'hi', 'mid')).curve(d3.curveMonotoneX)(rows)
-    };
-  }, [showRateOuter, rateCurves, bandKey, effectiveMaxVisibleAge, xScale, yScale]);
+  // The sandbox and each saved scenario are legend entries like any other series, so they need somewhere
+  // to keep their on/off state. The sandbox starts on - it appears because you just edited something -
+  // while saved scenarios start off, since a chart that silently draws every scenario you ever kept is
+  // unreadable the moment you have more than two.
+  const [showSandboxLine, setShowSandboxLine] = useState(true);
   const sandboxLinePath = useMemo(() => {
-    if (!isSandboxModified || !sandboxTimeline.length) return null;
+    if (!showSandboxLine || !isSandboxModified || !sandboxTimeline.length) return null;
     return d3.line().x(d => xScale(d.ageSelf)).y(d => yScale(d.totalCombined)).curve(d3.curveMonotoneX)(sandboxTimeline.filter(d => d.ageSelf <= effectiveMaxVisibleAge));
-  }, [isSandboxModified, sandboxTimeline, effectiveMaxVisibleAge, xScale, yScale]);
+  }, [showSandboxLine, isSandboxModified, sandboxTimeline, effectiveMaxVisibleAge, xScale, yScale]);
   // Same generator as the sandbox line, one per overlaid scenario. Like the sandbox these are raw engine
   // rows, so the pot is read off totalCombined rather than the profile-aware `expected` key.
   const comparePaths = useMemo(() => compareRuns.filter(r => r.rows).map(r => ({
@@ -3525,6 +3560,9 @@ export default function App() {
    *
    * Drawing the actual trials matters. A wipe across a pre-computed band looks similar for a second and
    * says nothing true: the fan would appear whether or not anything had been simulated.
+   *
+   * It replays on every arrival at the step. The clock is reset whenever the step is not on screen, so
+   * coming back rewinds it rather than resuming a finished animation.
    */
   const mcDraw = Math.min(1, mcReveal / 0.72);
   const mcSettle = Math.max(0, (mcReveal - 0.72) / 0.28);
@@ -3549,11 +3587,13 @@ export default function App() {
     const rows = fanVisible.slice(0, cut);
     const x = (d) => xScale(d.ageSelf);
     const line = (key) => d3.line().x(x).y(pinchY(rows, key, 'p50')).curve(d3.curveMonotoneX)(rows);
+    // the same percentiles the rate-based chart is showing, so the two can be laid over each other
+    const lo = bandMode === 'decile' ? 'p10' : 'p25', hi = bandMode === 'decile' ? 'p90' : 'p75';
     return {
-      band: d3.area().x(x).y0(pinchY(rows, 'p25', 'p50')).y1(pinchY(rows, 'p75', 'p50')).curve(d3.curveMonotoneX)(rows),
-      median: line('p50'), q25: line('p25'), q75: line('p75'), lower: line('p10'), upper: line('p90')
+      band: d3.area().x(x).y0(pinchY(rows, lo, 'p50')).y1(pinchY(rows, hi, 'p50')).curve(d3.curveMonotoneX)(rows),
+      median: line('p50'), edgeLo: line(lo), edgeHi: line(hi)
     };
-  }, [fanVisible, xScale, yScale, mcReveal, mcSettle]);
+  }, [fanVisible, xScale, yScale, mcReveal, mcSettle, bandMode]);
   // The first age at which a tenth of the paths are broke. Worth naming: it is the most actionable thing
   // on the chart, and a smooth deterministic line could never have produced it. Read off the whole fan,
   // not the visible slice, so dragging the horizon slider cannot change the answer.
@@ -3606,20 +3646,19 @@ export default function App() {
       p75: simResult.p75Terminal, p90: simResult.p90Terminal
     };
     const row = (label, key) => ({ label, rate: rate[key], mc: mc[key], pct: mc[key] > 0 ? (rate[key] - mc[key]) / mc[key] * 100 : 0 });
-    // how many of the five rate-based curves are still solvent at the end: the closest thing a set of
-    // smooth lines has to a survival rate, and directly comparable to the Monte Carlo's
-    const solvent = [rateCurves.d.lo, rateCurves.q.lo, rateCurves.q.hi, rateCurves.d.hi].filter(c => c.failAge === null).length
-      + (deterministicVerdict.survived ? 1 : 0);
+    // Both columns as a percentage of outcomes, so the row compares like with like. Counting how many of
+    // the drawn lines survive would measure how many lines were drawn, not the plan.
+    const smoothRate = E.smoothSurvivalRate(resolvedPlan);
     const mcRetire = fanData.find(d => d.ageSelf === ctx.owners[0].retireAge);
     return {
       quantiles: [row('10th percentile', 'p10'), row('25th percentile', 'p25'), row('Median', 'p50'), row('75th percentile', 'p75'), row('90th percentile', 'p90')],
       extras: [
         { label: `Median pot at retirement (${ctx.owners[0].retireAge})`, rate: formatGBP(atRetire(rateCurves.mid)?.totalCombined ?? 0), mc: mcRetire ? formatGBP(mcRetire.p50) : '—', note: 'expected path vs simulated median' },
-        { label: 'Survives to the end', rate: `${solvent} of 5 lines`, mc: `${simResult.successRate.toFixed(1)}% of paths`, note: 'a smooth line cannot run dry' },
+        { label: `Survives to ${ctx.terminalAge}`, rate: `${smoothRate.toFixed(1)}%`, mc: `${simResult.successRate.toFixed(1)}%`, note: smoothRate >= simResult.successRate ? `flattered by ${(smoothRate - simResult.successRate).toFixed(1)} pts` : '' },
         { label: `Stranded before ${nmpa}`, rate: deterministicVerdict.failReason === 'pre-access' ? 'yes' : 'no', mc: `${simResult.preNmpaFailRate.toFixed(1)}% of paths`, note: 'pension locked, bridge spent' }
       ]
     };
-  }, [simResult, rateCurves, ctx, deterministicVerdict, fanData, nmpa]);
+  }, [simResult, rateCurves, resolvedPlan, ctx, deterministicVerdict, fanData, nmpa]);
 
   const sequenceLoss = useMemo(() => {
     if (!simResult || !Number.isFinite(simResult.p10Terminal)) return null;
@@ -3770,15 +3809,6 @@ export default function App() {
     setSandboxCustomized(false);
     setPlan(prev => planFromSandbox(prev));
     flash('Sandbox applied to plan inputs');
-  };
-  // Scores the six strategies against the sandbox figures instead of the saved plan, so a sandbox worth
-  // keeping can be tested before it is written back. The plan is frozen at the moment of the click — later
-  // sandbox edits do not silently change what the displayed results were run on.
-  const handleRunTournamentFromSandbox = () => {
-    const base = E.normalizePlan(clone(planFromSandbox(plan)));
-    setTournament(prev => ({ ...prev, basePlan: base, results: null, autoRun: prev.autoRun + 1 }));
-    setActiveTab('strategy');
-    flash('Running the tournament on your sandbox figures', 4000);
   };
   const handleResetSandbox = () => { setSandboxCustomized(false); setSandboxAccounts(sandboxFromPlan(plan)); setSandboxRetire(sandboxRetireFromPlan(plan)); };
   const updateSandboxRetire = (key, value) => {
@@ -4109,6 +4139,20 @@ export default function App() {
     </div>
   );
 
+  /*
+   * One band control, rendered on both chart steps and driving both of them. It used to be split - a mode
+   * picker on one chart and a 10th/90th checkbox in each legend - which allowed the two charts to sit on
+   * different percentiles, quietly destroying the only comparison they exist to support.
+   */
+  const bandToggle = (
+    <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 px-1 py-1 rounded-xl text-xs">
+      {['quartile', 'decile'].map(k => (
+        <button key={k} type="button" onClick={() => setBandMode(k)} title={`Draw both charts at the ${BAND_QUANTILES[k].lowPct} and ${BAND_QUANTILES[k].highPct} percentile`}
+          className={`px-2.5 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${bandMode === k ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}>{BAND_QUANTILES[k].button}</button>
+      ))}
+    </div>
+  );
+
   const slideNav = (n) => (
     <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-100">
       <div className="flex items-center gap-1.5">
@@ -4138,18 +4182,13 @@ export default function App() {
     const isRate = kind === 'rate';
     const band = isRate ? cp.rateBand : cp.fanBand;
     const edge = isRate ? cp.rateEdge : cp.fanEdge;
-    const outer = isRate ? cp.rateOuter : cp.fanOuter;
-    const outerOn = isRate ? showRateOuter : showMcOuter;
-    const setOuter = isRate ? setShowRateOuter : setShowMcOuter;
-    const outerPaths = isRate ? rateOuterPaths : mcOuterPaths;
-    const ready = isRate ? !!bandPaths : !!fanPaths;
     return (
       <>
         <div className="relative overflow-x-auto">
           <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="w-full h-auto select-none" onMouseLeave={() => setHoveredPoint(null)}>
             <g transform={`translate(${margin.left}, ${margin.top})`}>
-              {yScale.ticks(6).map((t, i) => <g key={i} transform={`translate(0, ${yScale(t)})`}><line x2={innerWidth} stroke={cp.gridMajor} strokeDasharray="3,3" /><text x={-10} dy="0.32em" fill={cp.axisText} fontSize="10" textAnchor="end" fontFamily="monospace">£{(t / 1000).toFixed(0)}k</text></g>)}
-              {xScale.ticks(10).map((t, i) => <g key={i} transform={`translate(${xScale(t)}, 0)`}><line y2={innerHeight} stroke={cp.gridMinor} /><text y={innerHeight + 20} fill={cp.axisText} fontSize="11" textAnchor="middle" fontFamily="monospace">{t}</text></g>)}
+              {yScale.ticks(isNarrow ? 5 : 6).map((t, i) => <g key={i} transform={`translate(0, ${yScale(t)})`}><line x2={innerWidth} stroke={cp.gridMajor} strokeDasharray="3,3" /><text x={-8} dy="0.32em" fill={cp.axisText} fontSize={isNarrow ? 12 : 10} textAnchor="end" fontFamily="monospace">{t >= 1000000 ? `£${(t / 1000000).toFixed(t >= 10000000 ? 0 : 1)}m` : `£${(t / 1000).toFixed(0)}k`}</text></g>)}
+              {xScale.ticks(isNarrow ? 5 : 10).map((t, i) => <g key={i} transform={`translate(${xScale(t)}, 0)`}><line y2={innerHeight} stroke={cp.gridMinor} /><text y={innerHeight + 20} fill={cp.axisText} fontSize={isNarrow ? 13 : 11} textAnchor="middle" fontFamily="monospace">{t}</text></g>)}
               {markers(xScale)}
               {isRate && bandPaths && <>
                 <path d={bandPaths.area} fill={band} stroke="none" />
@@ -4165,15 +4204,9 @@ export default function App() {
               {!isRate && fanPaths && (
                 <g opacity={mcReveal >= 1 ? 1 : mcSettle}>
                   <path d={fanPaths.band} fill={band} stroke="none" />
-                  <path d={fanPaths.q25} fill="none" stroke={edge} strokeWidth="1.5" />
-                  <path d={fanPaths.q75} fill="none" stroke={edge} strokeWidth="1.5" />
+                  <path d={fanPaths.edgeLo} fill="none" stroke={edge} strokeWidth="1.5" />
+                  <path d={fanPaths.edgeHi} fill="none" stroke={edge} strokeWidth="1.5" />
                   <path d={fanPaths.median} fill="none" stroke={cp.fanMedian} strokeWidth="2.5" strokeLinecap="round" />
-                </g>
-              )}
-              {outerPaths && (
-                <g opacity={isRate ? 1 : (mcReveal >= 1 ? 1 : mcSettle)}>
-                  <path d={outerPaths.lo} fill="none" stroke={outer} strokeWidth="1.25" strokeDasharray="2,3" />
-                  <path d={outerPaths.hi} fill="none" stroke={outer} strokeWidth="1.25" strokeDasharray="2,3" />
                 </g>
               )}
               {themedSeries.map(s => (activeSeries[s.id] && pathGenerators[s.id]) ? <path key={s.id} d={pathGenerators[s.id]} fill="none" stroke={s.color} strokeWidth={s.strokeWidth} strokeDasharray={s.dash} strokeLinecap="round" /> : null)}
@@ -4207,12 +4240,24 @@ export default function App() {
               <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: s.color }} />{s.label}{activeSeries[s.id] && <Check className="w-3 h-3 text-slate-600" />}
             </button>
           ))}
-          <span className="w-px h-5 bg-slate-200 mx-1" />
-          <button type="button" disabled={!ready} onClick={() => setOuter(!outerOn)}
-            className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center gap-2 transition-all cursor-pointer border disabled:opacity-40 disabled:cursor-not-allowed ${outerOn ? 'bg-slate-100 border-slate-300 text-slate-900 font-semibold' : 'bg-surface border-slate-200 text-slate-400 opacity-70'}`}>
-            <span className="w-3.5 h-0 border-t-2 border-dotted" style={{ borderColor: outer }} />10th &amp; 90th{outerOn && <Check className="w-3 h-3 text-slate-600" />}
-          </button>
-          {isSandboxModified && <span className="flex items-center gap-2 text-xs font-mono font-bold text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1 rounded-xl"><span className="w-2.5 h-2.5 rounded-full bg-amber-500 border border-amber-600" /> Sandbox (dashed)</span>}
+          {(isSandboxModified || scenarios.filter(sc => sc.id !== activeScenarioId).length > 0) && <span className="w-px h-5 bg-slate-200 mx-1" />}
+          {isSandboxModified && (
+            <button type="button" onClick={() => setShowSandboxLine(v => !v)}
+              className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center gap-2 transition-all cursor-pointer border ${showSandboxLine ? 'bg-amber-50 border-amber-300 text-amber-800 font-semibold' : 'bg-surface border-slate-200 text-slate-400 opacity-60'}`}>
+              <span className="w-3.5 h-0 border-t-2 border-dashed" style={{ borderColor: cp.sandboxDash }} />Sandbox{showSandboxLine && <Check className="w-3 h-3 text-amber-700" />}
+            </button>
+          )}
+          {scenarios.filter(sc => sc.id !== activeScenarioId).map(sc => {
+            const run = compareRuns.find(r => r.id === sc.id);
+            const atCap = !run && selectedCompare.length >= MAX_COMPARE;
+            return (
+              <button key={sc.id} type="button" disabled={atCap} onClick={() => toggleCompare(sc.id)} title={atCap ? `Up to ${MAX_COMPARE} scenarios at once` : sc.name}
+                className={`px-2.5 py-1.5 rounded-xl text-xs font-medium flex items-center gap-2 transition-all border max-w-[14rem] ${run ? 'bg-slate-100 border-slate-300 text-slate-900 font-semibold cursor-pointer' : atCap ? 'bg-surface border-slate-200 text-slate-300 cursor-not-allowed' : 'bg-surface border-slate-200 text-slate-400 opacity-70 cursor-pointer hover:opacity-100'}`}>
+                <span className="w-3.5 h-0 border-t-2 border-dashed shrink-0" style={{ borderColor: run ? run.tone : 'currentColor' }} />
+                <span className="truncate">{sc.name}</span>{run && <Check className="w-3 h-3 text-slate-600 shrink-0" />}
+              </button>
+            );
+          })}
         </div>
       </>
     );
@@ -4235,13 +4280,17 @@ export default function App() {
         </div>
       </div>
       {!open ? null : <>
+      {isSandboxModified && (
+        <div className="flex items-start gap-2 p-3 rounded-xl border border-rose-200 bg-rose-50 text-rose-800 text-xs font-semibold">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-px" />
+          <span>Adjusted sandbox line now visible in chart projections above. Apply it to Plan Inputs to keep it, or save it there as a scenario.</span>
+        </div>
+      )}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 pb-3 border-y border-slate-100">
         <div><h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Wrapper Sandbox Controls</h4><span className="text-[11px] text-slate-500">Adjust retirement ages and individual wrappers below, or reset back to your baseline plan inputs.</span></div>
         <div className="flex items-center gap-2 flex-wrap">
           <button onClick={handleResetSandbox} disabled={!isSandboxModified} className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all border ${isSandboxModified ? 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-300 cursor-pointer' : 'bg-slate-50 text-slate-300 border-slate-200 cursor-not-allowed'}`}><RotateCcw className="w-3.5 h-3.5" /> Reset Sandbox</button>
           <button onClick={handleApplySandboxToPlan} disabled={!isSandboxModified} className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs ${isSandboxModified ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 dark:from-[#C77A2E] dark:to-[#B0631E] dark:hover:from-[#B0631E] dark:hover:to-[#8A4C17] text-white cursor-pointer active:scale-95' : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'}`}><Check className="w-3.5 h-3.5" /> Apply to Plan Inputs</button>
-          <button onClick={handleRunTournamentFromSandbox} title="Score the six wrapper strategies against these sandbox figures instead of your saved plan inputs"
-            className="px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer active:scale-95"><Zap className="w-3.5 h-3.5" /> Re-run Tournament on Sandbox</button>
         </div>
       </div>
       <div className="p-4 bg-slate-50/80 border border-slate-200 rounded-2xl space-y-3">
@@ -4365,8 +4414,9 @@ export default function App() {
           <div className="h-px bg-indigo-600/25 mt-[3px]" />
         </div>
 
-        {/* Scenario Toolbar */}
-        {activeTab !== 'home' && (
+        {/* Scenario Toolbar. Plan Inputs only: saving a scenario means saving THE PLAN, so it belongs
+            beside the plan, not floating over a chart where it reads as saving what is on screen. */}
+        {activeTab === 'inputs' && (
         <div className="bg-surface border border-slate-200/90 rounded-2xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3 flex-wrap">
             <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700"><Bookmark className="w-4 h-4 text-blue-600" /><span>Active Scenario:</span></div>
@@ -5215,12 +5265,7 @@ export default function App() {
                 <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
                   {slideHead(3, 'Rate based', 'One steady rate per wrapper, compounded. Redraws as you type.')}
                   <div className="flex flex-wrap items-center gap-3">
-                    <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 px-1 py-1 rounded-xl text-xs">
-                      {[['quartile', BAND_QUANTILES.quartile.short, BAND_QUANTILES.quartile.button], ['decile', BAND_QUANTILES.decile.short, BAND_QUANTILES.decile.button], ['off', 'No band', 'Expected line only']].map(([k, label, title]) => (
-                        <button key={k} type="button" onClick={() => setBandMode(k)} title={title}
-                          className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${bandMode === k ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}>{label}</button>
-                      ))}
-                    </div>
+                    {bandToggle}
                     <div className="flex items-center gap-3 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl text-xs">
                       <span className="text-slate-600 whitespace-nowrap">Horizon: <strong>Age {effectiveMaxVisibleAge}</strong></span>
                       <input type="range" min={currentAge + 1} max={terminalAge} value={effectiveMaxVisibleAge} onChange={(e) => setMaxVisibleAge(Number(e.target.value))} className="w-32 sm:w-40 accent-blue-600 cursor-pointer" />
@@ -5228,11 +5273,9 @@ export default function App() {
                   </div>
                   {renderProjectionChart('rate')}
                   <p className="text-[11px] text-slate-500 leading-relaxed">
-                    <strong className="text-slate-700">Its weakness: this line cannot go bust.</strong> A casino lets a winner keep playing but stops a loser at zero, and a smooth curve only ever models the first half of that. It has no bad decade in it, so it never has to sell units cheaply to pay the bills, and its lower edge quietly keeps compounding through years a real plan would not have survived.
-                    {bandCurves && bandCurves.lo.failAge !== null
-                      ? <> Here that shows: <strong className="text-rose-700">the lower edge runs dry at {bandCurves.lo.failAge}</strong>, and past that point it is not a floor, it is broken.</>
-                      : <> Measured at the final age, the lower edge is 5.5% optimistic on a plan surviving 99.5% of the time and 98% optimistic on one surviving 91.3% &mdash; the weaker the plan, the more flattering this chart.</>}
-                    {' '}Use it to see the shape of the range as you type. Use the next screen when the downside is the decision.
+                    <strong className="text-slate-700">The band is the {bandSpec.lowPct} to {bandSpec.highPct} percentile, each edge compounded at that age&rsquo;s own rate.</strong>
+                    {' '}<strong className="text-rose-700">The weakness: none of these lines can go bust.</strong> A casino lets a winner keep playing but stops a loser at zero. This chart only models the winner. No line here ever sells cheap to pay a bill, so the bottom edge flatters you &mdash; and the weaker the plan, the more it flatters.
+                    {bandCurves && bandCurves.lo.failAge !== null && <> <strong className="text-rose-700">Below age {bandCurves.lo.failAge} the bottom edge is broken, not low.</strong></>}
                   </p>
                   {slideNav(3)}
                 </div>
@@ -5243,10 +5286,7 @@ export default function App() {
                 <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
                   {slideHead(4, 'Monte Carlo', `${simResult.trials.toLocaleString()} randomised futures, same axes as the last screen.`)}
                   <div className="flex flex-wrap items-center gap-3">
-                    <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 px-1 py-1 rounded-xl text-xs">
-                      <span className="text-slate-500 px-1.5">Range:</span>
-                      <button type="button" onClick={() => setShowFan(!showFan)} className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${showFan ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-500 hover:text-slate-900'}`}>{showFan ? 'On' : 'Off'}</button>
-                    </div>
+                    {bandToggle}
                     <div className="flex items-center gap-3 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl text-xs">
                       <span className="text-slate-600 whitespace-nowrap">Horizon: <strong>Age {effectiveMaxVisibleAge}</strong></span>
                       <input type="range" min={currentAge + 1} max={terminalAge} value={effectiveMaxVisibleAge} onChange={(e) => setMaxVisibleAge(Number(e.target.value))} className="w-32 sm:w-40 accent-blue-600 cursor-pointer" />
@@ -5254,9 +5294,10 @@ export default function App() {
                   </div>
                   {renderProjectionChart('mc')}
                   <p className="text-[11px] text-slate-500 leading-relaxed">
-                    <strong className="text-slate-700">Its strength: these futures can go bust, and some of them do.</strong> Every line is a plan that lived through its own run of good and bad years in a particular order, sold units at whatever price those years offered, and stopped dead if it reached zero. That is the half a smooth curve leaves out, and it is drawn at the same quartiles as the previous screen so the two can be read against each other directly.
+                    <strong className="text-emerald-700">The strength: these futures can go bust, and some do.</strong> Each line lived one particular order of good and bad years, sold at whatever price those years offered, and stopped dead at zero. That is the half the previous chart leaves out.
+                    {' '}The band is the same {bandSpec.lowPct} to {bandSpec.highPct} percentile, so the two charts can be read against each other directly.
                     {fanRuinAge !== null
-                      ? <> <strong className="text-rose-700">A tenth of these futures are broke by {fanRuinAge}.</strong> No smooth line could have told you that.</>
+                      ? <> <strong className="text-rose-700">A tenth are broke by {fanRuinAge}.</strong></>
                       : <> Fewer than one in ten are broke by {terminalAge}.</>}
                   </p>
                   {slideNav(4)}
