@@ -3074,7 +3074,7 @@ export default function App() {
   // Sandbox overrides: { [accountId]: { contrib, growth, balance?, contribByYear? } }
   const sandboxFromPlan = (p) => {
     const init = {};
-    (p?.accounts || []).forEach(a => { init[a.id] = { contrib: E.num(a.contrib, 0), growth: E.num(a.growth, 0) }; });
+    (p?.accounts || []).forEach(a => { init[a.id] = { contrib: E.num(a.contrib, 0), growth: E.num(a.growth, 0), balance: E.num(a.balance, 0) }; });
     return init;
   };
   // Retirement-age overrides mirror the engine's blank-input fallback so the sandbox starts on the modelled age.
@@ -3787,8 +3787,17 @@ export default function App() {
       try {
         const parsed = JSON.parse(event.target.result);
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
-        setSandboxCustomized(false); setPlan(E.normalizePlan(parsed)); setSimResult(null); setSafeMaxResult(null); flash('Plan imported');
-      } catch (err) { window.alert('Invalid JSON configuration file.'); }
+        if (!parsed.demographics && !parsed.accounts && !parsed.spending) throw new Error('not a plan');
+        setSandboxCustomized(false); setPlan(E.normalizePlan(parsed)); setSimResult(null); setSafeMaxResult(null);
+        setSlide(1); setSeeAll(false); setSandboxRevealed(false);
+        flash(`Imported ${file.name}`);
+      } catch (err) {
+        // The picker no longer filters by type, so a wrong file is a realistic outcome and the message
+        // has to say which wrong it is rather than leaving the user guessing at their own file.
+        window.alert(err.message === 'not a plan'
+          ? `${file.name} is valid JSON but does not look like a plan export: it has no demographics, accounts or spending. Use a file saved with Export JSON.`
+          : `${file.name} could not be read as JSON. Check it is the file you exported from this planner and that it downloaded completely.`);
+      }
     };
     reader.readAsText(file, 'UTF-8');
     e.target.value = '';
@@ -4148,7 +4157,7 @@ export default function App() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Sparkles className="w-4 h-4 text-amber-500" /> Sandbox</h3>
-            <p className="text-xs text-slate-500 mt-0.5">Test contributions, escalation rates and tournament strategies without modifying your base plan inputs.</p>
+            <p className="text-xs text-slate-500 mt-0.5">Change balances, contributions, escalation or retirement age here and the projection follows, without touching your saved plan inputs.</p>
           </div>
           <button type="button" onClick={() => setSandboxOpen(o => !o)} className="shrink-0 px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 cursor-pointer">
             {open ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
@@ -4217,15 +4226,16 @@ export default function App() {
       )}
       <div className="overflow-x-auto border border-slate-200 rounded-xl">
         <table className="w-full text-left text-xs border-collapse">
-          <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans"><tr><th className="p-3">Portfolio Wrapper</th>{isCouple && <th className="p-3">Owner</th>}<th className="p-3">Annual Contribution (£)</th><th className="p-3">Quick Adjust</th><th className="p-3">Escalation (% / yr)</th><th className="p-3 text-right">Status</th></tr></thead>
+          <thead className="bg-slate-100/80 border-b border-slate-200 text-slate-600 font-semibold font-sans"><tr><th className="p-3">Portfolio Wrapper</th>{isCouple && <th className="p-3">Owner</th>}<th className="p-3">Balance Today (£)</th><th className="p-3">Annual Contribution (£)</th><th className="p-3">Quick Adjust</th><th className="p-3">Escalation (% / yr)</th><th className="p-3 text-right">Status</th></tr></thead>
           <tbody className="divide-y divide-slate-100 font-mono">
             {displayedAccounts.map(acc => {
-              const sb = sandboxAccounts[acc.id] || { contrib: acc.contrib, growth: acc.growth };
+              const sb = sandboxAccounts[acc.id] || { contrib: acc.contrib, growth: acc.growth, balance: acc.balance };
               const isModified = E.num(acc.contrib, 0) !== E.num(sb.contrib, 0) || E.num(acc.growth, 0) !== E.num(sb.growth, 0) || (sb.balance !== undefined && E.num(sb.balance, 0) !== E.num(acc.balance, 0)) || !!sb.contribByYear;
               return (
                 <tr key={acc.id} className={`transition-colors ${isModified ? 'bg-amber-50/40' : 'hover:bg-slate-50/60'}`}>
                   <td className="p-3 font-sans font-bold text-slate-800">{acc.category}<span className="block text-[10px] text-slate-400 font-normal">Base: {formatGBP(E.num(acc.contrib, 0))} / yr @ {acc.growth || 0}%{sb.balance !== undefined && E.num(sb.balance, 0) !== E.num(acc.balance, 0) ? ` · balance ${formatGBP(E.num(acc.balance, 0))} → ${formatGBP(sb.balance)}` : ''}</span></td>
                   {isCouple && <td className="p-3 font-sans text-slate-600">{acc.owner}</td>}
+                  <td className="p-3"><input type="number" min="0" step="1000" value={sb.balance ?? E.num(acc.balance, 0)} onFocus={handleFocus} onChange={(e) => updateSandboxField(acc.id, 'balance', e.target.value)} className="w-32 p-1.5 bg-surface border border-slate-300 rounded font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500" /></td>
                   <td className="p-3"><div className="flex items-center gap-1.5"><input type="number" min="0" step="250" value={sb.contrib} onFocus={handleFocus} onChange={(e) => updateSandboxField(acc.id, 'contrib', e.target.value)} className="w-28 p-1.5 bg-surface border border-slate-300 rounded font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500" />{sb.contribByYear && <span className="px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[10px] font-sans" title="Year-by-year schedule from a phased strategy; editing replaces it">phased</span>}</div></td>
                   <td className="p-3"><div className="flex items-center gap-1">{[-1000, -500, 500, 1000].map(d => <button key={d} onClick={() => adjustSandboxContrib(acc.id, d)} className="px-1.5 py-1 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded text-[10px] font-sans font-semibold text-slate-700 cursor-pointer">{d > 0 ? '+' : ''}{Math.abs(d) >= 1000 ? `${d / 1000}k` : d}</button>)}</div></td>
                   <td className="p-3"><div className="flex items-center gap-1.5"><input type="number" step="0.5" value={sb.growth} onFocus={handleFocus} onChange={(e) => updateSandboxField(acc.id, 'growth', e.target.value)} className="w-20 p-1.5 bg-surface border border-slate-300 rounded text-slate-900 font-bold focus:outline-none focus:ring-2 focus:ring-amber-500" /><span className="text-slate-400 font-sans">%</span></div></td>
@@ -4415,7 +4425,13 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <button onClick={handleExportJSON} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border border-slate-200"><Download className="w-3.5 h-3.5" /> Export JSON</button>
                 <button onClick={() => fileInputRef.current?.click()} className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer border border-slate-200"><Upload className="w-3.5 h-3.5" /> Import JSON</button>
-                <input type="file" ref={fileInputRef} onChange={handleImportJSON} accept=".json" className="hidden" />
+                {/* No `accept` filter, deliberately. Android's document picker matches on MIME type rather
+                    than extension, and the providers behind it report .json as anything from
+                    application/json to text/plain to application/octet-stream - so an extension filter
+                    greys the file out and the user cannot select their own export at all. The handler
+                    validates the contents and says so plainly if they are wrong, which is the check that
+                    actually protects anything; the picker filter was only ever a hint. */}
+                <input type="file" ref={fileInputRef} onChange={handleImportJSON} className="hidden" />
                 <button onClick={handleResetDefaults} className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer"><RotateCcw className="w-3.5 h-3.5" /> Clear All Inputs</button>
               </div>
             </div>
