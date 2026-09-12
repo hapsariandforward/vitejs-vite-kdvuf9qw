@@ -3221,6 +3221,66 @@ export default function App() {
     const hit = fanData.find(d => d.p10 <= 0);
     return hit ? hit.ageSelf : null;
   }, [fanData]);
+
+  /*
+   * Sequence risk, priced.
+   *
+   * A published return band - ours, or an institutional one - is a statement about the annualised return
+   * of a holding left alone. It is silent about withdrawals, because the information simply is not in a
+   * marginal return distribution: once money is coming out, the outcome depends on the ORDER returns
+   * arrive in. This measures that gap in pounds, which is the most useful thing the simulation knows
+   * that a rate band does not.
+   *
+   * Take each tier's 10th-percentile annualised rate, compound it smoothly to the terminal age, and
+   * compare against the 10th-percentile pot the simulation actually produced. Three things to note:
+   *
+   *  - The horizon is totalYears + 1. stepYear runs t = 0..totalYears inclusive, so a plan reporting
+   *    thirty years compounds thirty-one times; using totalYears understates every rate by ~3% of
+   *    itself, which reads as model error rather than an off-by-one.
+   *  - Every tier moves to its own 10th percentile at once. That is coherent rather than doubly
+   *    pessimistic: the engine draws a single market factor per year, so the wrappers are perfectly
+   *    correlated and a bad market is bad for all of them simultaneously.
+   *  - resolvedPlan, not plan, so the smooth run carries the same resolved MPAA state the simulation
+   *    had. riskProfiles is a top-level key that resolveMpaa never touches.
+   */
+  const sequenceLoss = useMemo(() => {
+    if (!simResult || !Number.isFinite(simResult.p10Terminal)) return null;
+    const T = ctx.totalYears + 1;
+    const smoothPotAt = (edge) => {
+      const flat = {};
+      Object.entries(activeRiskMatrix).forEach(([k, v]) => {
+        const b = E.luckyBand(E.num(v.real, 0) / 100, E.num(v.volatility, 12) / 100, T, E.num(v.sigmaParam, 0) / 100);
+        flat[k] = { ...v, real: b[edge] * 100, volatility: 0, sigmaParam: 0 };
+      });
+      const c = E.buildContext({ ...resolvedPlan, riskProfiles: flat });
+      return E.evaluateRows(c, E.simulateDeterministic(c, 'expected')).terminalPot;
+    };
+    const smoothLow = smoothPotAt('unlucky');
+    const smoothHigh = smoothPotAt('lucky');
+    const actualLow = simResult.p10Terminal, actualHigh = simResult.p90Terminal;
+    const gapLow = smoothLow - actualLow, gapHigh = smoothHigh - actualHigh;
+    const pctLow = smoothLow > 0 ? (gapLow / smoothLow) * 100 : 0;
+    const pctHigh = smoothHigh > 0 ? (gapHigh / smoothHigh) * 100 : 0;
+    /*
+     * Four states, because the number alone does not say which story it is telling.
+     *
+     * A small gap survives even with no withdrawals at all (measured: 0.8% on a 35-to-65 accumulation
+     * plan) because a contribution stream weights the early years differently from the late ones, so the
+     * terminal pot stops being a monotone function of the annualised return. That is contribution
+     * timing, not forced selling, and calling it a loss would overclaim. The same 0.8% also appears on a
+     * genuinely withdrawing plan whose pot is large relative to the draw - a different reason for the
+     * same small number, so magnitude has to be read alongside whether the plan draws down at all.
+     * Below MATERIAL_PCT the figure is dominated by the first effect; a real sequence loss on these
+     * fixtures runs 12-26%, an order of magnitude clear of it.
+     */
+    const MATERIAL_PCT = 2;
+    const drawdownYears = ctx.terminalAge - Math.min(...ctx.owners.map(o => o.retireAge));
+    const state = actualLow <= 0 ? 'ruin'
+      : pctLow >= MATERIAL_PCT ? 'loss'
+        : drawdownYears <= 0 ? 'buying' : 'small';
+    return { smoothLow, smoothHigh, actualLow, actualHigh, gapLow, gapHigh, pctLow, pctHigh, state, smoothSurvives: smoothLow > 0 };
+  }, [simResult, ctx.totalYears, ctx.terminalAge, ctx.owners, resolvedPlan, activeRiskMatrix]);
+
   const [hoveredFanPoint, setHoveredFanPoint] = useState(null);
 
   const histMaxY = useMemo(() => Math.max(Math.max(0, ...historicalTimeline.map(d => d.totalCombined)) * 1.12, 100000), [historicalTimeline]);
@@ -4417,7 +4477,10 @@ export default function App() {
                 <thead><tr className="border-b border-slate-200 text-slate-500 font-semibold"><th className="pb-2">Allocation Category</th><th className="pb-2">Expected Real Return (% pa)</th><th className="pb-2">Unlucky, 10th %ile (% pa)</th><th className="pb-2">Lucky, 90th %ile (% pa)</th><th className="pb-2">Nominal Return (% pa)</th><th className="pb-2">Annual Volatility (σ % pa)</th><th className="pb-2">Forecast Uncertainty (% pa)</th></tr></thead>
                 <tbody className="divide-y divide-slate-100 font-mono">
                   {Object.entries(activeRiskMatrix).map(([key, val]) => {
-                    const band = E.luckyBand(E.num(val.real, 0) / 100, E.num(val.volatility, 12) / 100, ctx.totalYears, E.num(val.sigmaParam, 0) / 100);
+                    // totalYears + 1, not totalYears: stepYear runs t = 0..totalYears inclusive, so the plan
+                    // compounds one more time than its stated length. Matching it here is what lets the rate
+                    // in this column actually compound to the pot quoted under the Monte Carlo fan.
+                    const band = E.luckyBand(E.num(val.real, 0) / 100, E.num(val.volatility, 12) / 100, ctx.totalYears + 1, E.num(val.sigmaParam, 0) / 100);
                     return (
                     <tr key={key} className="hover:bg-slate-50/80">
                       <td className="py-2.5 font-sans font-bold text-slate-800">{val.label || key}</td>
@@ -4813,6 +4876,53 @@ export default function App() {
               </div>
             )}
 
+            {sequenceLoss && (
+              <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><ArrowDownRight className="w-4 h-4 text-rose-600" /> What the order of returns costs you</h3>
+                  <span className="text-xs text-slate-500">A return forecast tells you what a holding left alone should earn. It cannot tell you this, because the answer is not in the returns &mdash; it is in the order they arrive.</span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+                  <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80">
+                    <span className="text-slate-500 block mb-0.5">Unlucky return, arriving smoothly</span>
+                    <span className="text-base font-bold font-mono text-slate-700">{formatGBP(sequenceLoss.smoothLow)}</span>
+                    <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">the 10th %ile rate, compounded to {terminalAge}</span>
+                  </div>
+                  <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80">
+                    <span className="text-slate-500 block mb-0.5">Unlucky return, arriving in any order</span>
+                    <span className="text-base font-bold font-mono text-rose-700">{formatGBP(sequenceLoss.actualLow)}</span>
+                    <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">the simulation&rsquo;s 10th %ile pot</span>
+                  </div>
+                  <div className="bg-slate-50 p-3 rounded-xl border border-slate-200/80">
+                    <span className="text-slate-500 block mb-0.5">Sequence risk</span>
+                    {sequenceLoss.state === 'ruin'
+                      ? <span className="text-base font-black font-mono text-rose-700">{fanRuinAge !== null ? `Broke by ${fanRuinAge}` : 'Runs dry'}</span>
+                      : <span className={`text-base font-black font-mono ${sequenceLoss.state === 'loss' ? 'text-rose-700' : 'text-slate-700'}`}>{sequenceLoss.gapLow > 0 ? '−' : '+'}{formatGBP(Math.abs(sequenceLoss.gapLow))}</span>}
+                    <span className="text-[10px] text-slate-400 block mt-0.5 font-mono">{sequenceLoss.state === 'ruin' ? 'no 10th %ile pot to compare' : `${Math.abs(sequenceLoss.pctLow).toFixed(1)}% of the smooth figure`}</span>
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-slate-500 leading-relaxed">
+                  {sequenceLoss.state === 'loss' && <>
+                    <strong className="text-rose-700">Losing {formatGBP(sequenceLoss.gapLow)} to bad timing alone:</strong> an unlucky <em>rate</em>, arriving evenly, leaves {formatGBP(sequenceLoss.smoothLow)} at {terminalAge}. One plan in ten ends below {formatGBP(sequenceLoss.actualLow)}. Nothing separates those two figures but the order the same returns came in. It is one-sided: run the same comparison at the 90th percentile and {sequenceLoss.pctHigh < 0
+                      ? <>the simulation comes out <em>ahead</em> of the smooth figure, {formatGBP(sequenceLoss.actualHigh)} against {formatGBP(sequenceLoss.smoothHigh)}</>
+                      : <>it costs just {sequenceLoss.pctHigh.toFixed(1)}%, {formatGBP(sequenceLoss.smoothHigh)} smooth against {formatGBP(sequenceLoss.actualHigh)} actual, next to {sequenceLoss.pctLow.toFixed(1)}% at the bottom</>}. Selling units cheaply to live on is irreversible in a way that buying them cheaply is not.{' '}
+                  </>}
+                  {sequenceLoss.state === 'buying' && <>
+                    <strong className="text-emerald-700">Nothing here to lose to sequence risk.</strong> This plan never draws the pot down, so no run of bad years can force a sale. The small difference shown is contribution timing rather than order of returns &mdash; money paid in later is exposed to fewer years of compounding than a steady rate assumes &mdash; and it falls either way. {sequenceLoss.gapHigh < 0 ? <>The upside makes the point: {formatGBP(sequenceLoss.actualHigh)} actual against {formatGBP(sequenceLoss.smoothHigh)} smooth, <em>ahead</em> of the even path, because a bumpy one buys more units when prices are low. </> : null}While you are buying, volatility is mildly on your side. Expect that to reverse sharply once the plan is living off the pot.{' '}
+                  </>}
+                  {sequenceLoss.state === 'small' && <>
+                    <strong className="text-emerald-700">The order of returns costs you very little here.</strong> An unlucky rate arriving evenly leaves {formatGBP(sequenceLoss.smoothLow)} at {terminalAge}; one plan in ten ends below {formatGBP(sequenceLoss.actualLow)}, {sequenceLoss.gapLow >= 0 ? <>a difference of {sequenceLoss.pctLow.toFixed(1)}%</> : <>which is actually {Math.abs(sequenceLoss.pctLow).toFixed(1)}% <em>ahead</em> of the even path</>}. You are drawing down, but not hard enough relative to the pot for a bad early run to force selling at the bottom &mdash; the withdrawals are being met without liquidating into a fall. That is the position sequence risk is least able to hurt. It is also sensitive to spending: raising the annual draw is what turns this figure from a rounding error into a real number.{' '}
+                  </>}
+                  {sequenceLoss.state === 'ruin' && <>
+                    <strong className="text-rose-700">Sequence risk here is a date, not an amount.</strong> More than one plan in ten runs dry{fanRuinAge !== null ? <> &mdash; the lower edge hits zero at age {fanRuinAge}</> : null}, so there is no 10th percentile pot left to compare against. {sequenceLoss.smoothSurvives ? <>The same unlucky <em>rate</em> arriving evenly would have left {formatGBP(sequenceLoss.smoothLow)} at {terminalAge}: the shortfall is caused by <em>when</em> the bad years land, not by the average return being too low.</> : <>The unlucky rate does not survive the plan even arriving evenly, so the returns themselves are short before order is considered.</>}{' '}
+                  </>}
+                  Both figures come from the same forecast band shown in the Config risk matrix, over this plan&rsquo;s own horizon. The only difference is that one arrives evenly and the other does not.
+                </p>
+              </div>
+            )}
+
             {simResult && (
               <details open={mcDetailOpen} onToggle={(e) => setMcDetailOpen(e.currentTarget.open)} className="bg-surface border border-slate-200/90 rounded-2xl shadow-xs">
                 <summary className="p-4 cursor-pointer text-xs font-bold text-slate-900 uppercase tracking-wider select-none">
@@ -4978,6 +5088,7 @@ export default function App() {
                 <p className="text-slate-500">Stage 1 keeps every simulated path, not just its ending, so the chart can show where all {MC_TRIALS.toLocaleString()} of them stood at each age: the shaded band is the 10th to 90th percentile, the solid line the median. Read the right-hand edge and you get the same three pot figures reported underneath it, because both use the same quantile. No path follows any of the three lines, and the band widens with age because nothing cancels out the early years.</p>
                 <p className="text-slate-500">The Trajectory tab used to answer this with two deterministic lines run at a steady 90th and 10th percentile rate. The upper one was close to the simulated 90th-percentile pot. The lower one was not: it finished a mean 23% above the simulated 10th-percentile pot, and 70% above it at worst. The reason is sequence-of-returns risk, which applies only while you are withdrawing. A bad run of years early in retirement forces selling units cheaply and the loss never comes back, and a constant rate has no bad years to express that with. Holding one household fixed and changing only the length of drawdown isolates it: −2.5% over 7 years, +16.3% over 32, −0.9% with no withdrawals at all, and 0.3% once volatility is set to nearly zero. So the lines went, and the distribution took their place.</p>
                 <p className="text-slate-500">Where the lower edge touches zero, a tenth of the paths have run dry by that age. That is a statement no smooth line could have made.</p>
+                <p className="text-slate-500"><strong className="text-slate-800">Sequence risk, priced.</strong> The card under the chart puts a number on the same effect rather than describing it. It takes each tier&rsquo;s 10th-percentile annualised return &mdash; the unlucky column of the Config risk matrix, over your own horizon &mdash; compounds it evenly to age {terminalAge}, and sets that against the 10th-percentile pot the simulation actually produced. The two runs share an expected return, a plan and a horizon; all that separates them is the order the returns arrive in, so the difference is sequence risk in pounds. It is one-sided by nature: the same comparison at the 90th percentile comes out far smaller, and sometimes favourable, because selling units cheaply to live on is irreversible in a way that buying them cheaply is not. While you are still contributing it disappears, and can turn mildly favourable &mdash; a bumpy path buys more units when prices are low. This is also the one thing a published return forecast cannot supply, however detailed: withdrawal order is not a property of a return distribution.</p>
               </div>
               <p className="text-xs text-slate-600 leading-relaxed"><strong className="text-slate-800">Reading any of it honestly.</strong> Every figure is in today&rsquo;s money. The headline carries a &plusmn; sampling error: at {MC_TRIALS.toLocaleString()} trials a difference smaller than that is noise, so treat 94.2% and 95.1% as the same answer. Check the <strong>pre-SIPP access failure</strong> line separately: a plan can survive overall while still stranding you before age {nmpa}, which is a bridging problem, not a saving-enough problem. A path counts as failed in any year that living costs or a one-off cost cannot be met from an accessible wrapper, or if the terminal pot ends below your bequest floor. Paths are seeded, so the same seed reproduces the result exactly; change the seed in Config to test a different draw of markets.</p>
               <p className="text-[11px] text-slate-500 leading-relaxed">No stage changes your plan on its own. Applying a strategy from stage 3 is a separate, deliberate click.</p>
