@@ -113,6 +113,17 @@ const INCOME_TYPES = {
 };
 const incomeTypeOf = (key) => INCOME_TYPES[key] || INCOME_TYPES.otherTaxable;
 
+/*
+ * Where income tax bands are set. Wales has the power to vary its rates under the Welsh Rates of Income
+ * Tax but has set them equal to rUK every year since devolution, so it is an alias rather than a second
+ * table — choosing it confirms the answer rather than changing it, and the Config note says so.
+ */
+const TAX_REGION_LABELS = {
+  ruk: 'England & Northern Ireland',
+  wales: 'Wales',
+  scotland: 'Scotland'
+};
+
 const DEFAULT_CONFIG = {
   valuationDate: '',                 // '' => today (resolved at run time)
   inflation: 2.5,
@@ -125,6 +136,22 @@ const DEFAULT_CONFIG = {
   higherBandLimit: 125140,           // income level at which additional rate starts
   higherTaxRate: 40,
   additionalTaxRate: 45,
+  // Where you are tax resident. Income tax bands are devolved; National Insurance, capital gains tax,
+  // the personal allowance and its taper are not, and do not follow this setting.
+  taxRegion: 'ruk',                  // 'ruk' | 'scotland' | 'wales'
+  // Scottish bands (2025/26). Six of them, and a higher rate that starts £6,608 earlier than rUK.
+  // Each limit is the income at which the *next* band starts, matching basicBandLimit's convention.
+  scotStarterRate: 19,
+  scotStarterLimit: 15397,
+  scotBasicRate: 20,
+  scotBasicLimit: 27491,
+  scotIntermediateRate: 21,
+  scotIntermediateLimit: 43662,
+  scotHigherRate: 42,
+  scotHigherLimit: 75000,
+  scotAdvancedRate: 45,
+  scotAdvancedLimit: 125140,
+  scotTopRate: 48,
   // Employee National Insurance (Class 1, 2025/26)
   nicPrimaryThreshold: 12570,
   nicUpperEarningsLimit: 50270,
@@ -328,6 +355,7 @@ function normalizePlan(raw) {
   if (!plan.config.valuationDate || isNaN(new Date(plan.config.valuationDate).getTime())) plan.config.valuationDate = todayISO();
   if (plan.demographics.planningMode !== 'single') plan.demographics.planningMode = 'couple';
   if (!DECUMULATION_POLICIES[plan.spending.decumulationPolicy]) plan.spending.decumulationPolicy = 'Bracket Fill Basic';
+  if (!TAX_REGION_LABELS[plan.config.taxRegion]) plan.config.taxRegion = DEFAULT_CONFIG.taxRegion;
   if (!['Phased Drawdown', 'Full 25% Lump Sum'].includes(plan.spending.drawdownStrategy)) plan.spending.drawdownStrategy = 'Phased Drawdown';
   // accounts: always the eight canonical wrappers, in canonical order, keeping any user values
   const rawAccounts = Array.isArray(src.accounts) ? src.accounts.filter(isPlainObject) : [];
@@ -393,7 +421,57 @@ function taxParams(cfgIn) {
   const basicWidth = Math.max(0, basicLimit - pa);                 // basic band measured in taxable income
   const higherTop = Math.max(basicWidth, higherLimit - paAt(higherLimit)); // higher band upper limit in taxable income
   const taperEnd = taperRate > 0 ? thr + pa / taperRate : Infinity;
-  return { __isParams: true, pa, thr, taperRate, basicLimit, higherLimit, basicRate, higherRate, addRate, nicPT, nicUEL, nicMain, nicUpper, c4Main, c4Upper, erNic, erPass, pclsProp, lsa, isaAllowance, pensionAllowance, pensionNoEarningsLimit, mpaaLimit, aaTaperThr, aaTaperRate, aaTaperFloor, aaAt, cgtEnabled, cgtAnnualExempt, cgtBasicRate, cgtHigherRate, paAt, basicWidth, higherTop, taperEnd };
+
+  /*
+   * The band ladder. Income tax bands are devolved, so which set applies depends on where you live —
+   * but only the bands are: National Insurance, capital gains tax, the personal allowance and its taper
+   * are reserved and are read from their own fields above, untouched by the region.
+   *
+   * Wales sets its own rates under the Welsh Rates of Income Tax but has matched rUK every year since
+   * the power was devolved, so it is an alias rather than a separate table. If that ever changes it
+   * becomes a table here and nothing else moves.
+   *
+   * `grossLimits` are incomes at which the next band starts, the convention basicBandLimit already used.
+   * `ladder` converts them to taxable income — income less whatever allowance survives the taper at that
+   * income — because that is the space incomeTax slices in. The running max keeps it non-decreasing even
+   * if someone types a lower threshold above a higher one in Config.
+   */
+  const region = ['ruk', 'scotland', 'wales'].includes(cfg.taxRegion) ? cfg.taxRegion : DEFAULT_CONFIG.taxRegion;
+  const rate = (key) => clamp(num(cfg[key], DEFAULT_CONFIG[key]), 0, 99) / 100;
+  const limit = (key) => Math.max(0, num(cfg[key], DEFAULT_CONFIG[key]));
+  const bandSpec = region === 'scotland'
+    ? [[limit('scotStarterLimit'), rate('scotStarterRate')], [limit('scotBasicLimit'), rate('scotBasicRate')],
+      [limit('scotIntermediateLimit'), rate('scotIntermediateRate')], [limit('scotHigherLimit'), rate('scotHigherRate')],
+      [limit('scotAdvancedLimit'), rate('scotAdvancedRate')], [Infinity, rate('scotTopRate')]]
+    : [[basicLimit, basicRate], [higherLimit, higherRate], [Infinity, addRate]];
+  const grossLimits = bandSpec.map(([l]) => l).filter(l => Number.isFinite(l));
+  let running = 0;
+  const ladder = bandSpec.map(([l, r]) => {
+    const top = Number.isFinite(l) ? Math.max(running, l - paAt(l)) : Infinity;
+    if (Number.isFinite(top)) running = top;
+    return { top, rate: r };
+  });
+  // The income at which the first materially higher rate begins: where "fill the basic-rate band" should
+  // stop. rUK's basic band ends where the higher rate starts, but Scotland's does not — three bands sit
+  // below its 42% rate — so this is derived rather than read off a band name.
+  const higherRateStartsAt = region === 'scotland' ? limit('scotIntermediateLimit') : basicLimit;
+  // Capital gains tax charges the basic rate up to the *UK* basic-rate band even for a Scottish taxpayer,
+  // so this is deliberately computed from the rUK figures and does not follow the region.
+  const cgtBandWidth = Math.max(0, Math.max(pa, num(DEFAULT_CONFIG.basicBandLimit)) - pa);
+  // Relief at source is given at the statutory 20% to everyone, including a Scottish starter-rate payer.
+  const reliefAtSource = clamp(num(DEFAULT_CONFIG.basicTaxRate), 0, 99) / 100;
+
+  return { __isParams: true, pa, thr, taperRate, basicLimit, higherLimit, basicRate, higherRate, addRate, nicPT, nicUEL, nicMain, nicUpper, c4Main, c4Upper, erNic, erPass, pclsProp, lsa, isaAllowance, pensionAllowance, pensionNoEarningsLimit, mpaaLimit, aaTaperThr, aaTaperRate, aaTaperFloor, aaAt, cgtEnabled, cgtAnnualExempt, cgtBasicRate, cgtHigherRate, paAt, basicWidth, higherTop, taperEnd, region, ladder, grossLimits, higherRateStartsAt, cgtBandWidth, reliefAtSource };
+}
+
+// The marginal rate on the next pound of income, used where a decision depends on which band someone is in.
+function marginalRateAt(income, cfg) {
+  const p = taxParams(cfg);
+  const g = Math.max(0, num(income, 0));
+  const taxable = Math.max(0, g - p.paAt(g));
+  if (taxable <= 0) return 0;
+  for (const b of p.ladder) if (taxable <= b.top) return b.rate;
+  return p.ladder[p.ladder.length - 1].rate;
 }
 
 function incomeTax(gross, cfg) {
@@ -401,10 +479,14 @@ function incomeTax(gross, cfg) {
   const g = Math.max(0, num(gross, 0));
   if (g <= 0) return 0;
   const taxable = Math.max(0, g - p.paAt(g));
-  const basic = Math.min(taxable, p.basicWidth);
-  const higher = Math.min(Math.max(0, taxable - p.basicWidth), Math.max(0, p.higherTop - p.basicWidth));
-  const add = Math.max(0, taxable - p.higherTop);
-  return basic * p.basicRate + higher * p.higherRate + add * p.addRate;
+  // Walks whichever ladder the region gave us: three bands for rUK and Wales, six for Scotland.
+  let tax = 0, prev = 0;
+  for (const b of p.ladder) {
+    if (taxable <= prev) break;
+    tax += (Math.min(taxable, b.top) - prev) * b.rate;
+    prev = b.top;
+  }
+  return tax;
 }
 function calculateUKNetIncome(gross, cfg) { const g = Math.max(0, num(gross, 0)); return g - incomeTax(g, cfg); }
 /*
@@ -423,13 +505,15 @@ function nicFor(gross, cfg, selfEmployed = false) {
 }
 function calculateUKTaxAndNIC(income, cfg, selfEmployed = false) { return incomeTax(income, cfg) + nicFor(income, cfg, selfEmployed); }
 
-// Income-tax breakpoints (gross income) where the marginal rate changes; used by the analytic solver.
+/*
+ * Income-tax breakpoints (gross income) where the marginal rate changes; used by the analytic solver in
+ * grossPensionNeededForNet, which relies on its objective being linear *between* consecutive breakpoints.
+ * Missing one does not raise an error, it silently bends a line the solver assumes is straight — so every
+ * band the ladder has must contribute its own point, which is why this is generated rather than listed.
+ * The ladder is derived from these same gross limits, so each limit is exactly where its band ends.
+ */
 function taxBreakpoints(p) {
-  const pts = [p.pa, p.basicLimit, p.thr, p.taperEnd];
-  // gross income where taxable income reaches higherTop
-  if (p.higherTop >= p.taperEnd - p.paAt(p.taperEnd)) pts.push(p.higherTop + p.paAt(p.higherTop));
-  else if (p.higherTop + p.pa <= p.thr) pts.push(p.higherTop + p.pa);
-  else pts.push((p.higherTop + p.pa - p.taperRate * p.thr) / (1 + p.taperRate));
+  const pts = [p.pa, ...p.grossLimits, p.thr, p.taperEnd];
   return pts.filter(x => Number.isFinite(x) && x > 0).sort((a, b) => a - b);
 }
 
@@ -1106,7 +1190,7 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
     for (const step of ctx.policySteps) {
       if (remaining() <= 0.005) break;
       if (step === 'penPA') pensionTier(() => P.pa);
-      else if (step === 'penBasic') pensionTier(() => P.basicLimit);
+      else if (step === 'penBasic') pensionTier(() => P.higherRateStartsAt);
       else if (step === 'penAny') pensionTier(() => Infinity);
       else tier(step);
     }
@@ -1142,7 +1226,7 @@ function stepYear(ctx, state, t, market = 'expected', spendOverride = null) {
       // Unused personal allowance cannot be set against capital gains, so the band available to gains is
       // the basic-rate width less TAXABLE income (income after PA) — never the full gross-income headroom.
       const taxableIncome = Math.max(0, taxable[o.key] - P.paAt(taxable[o.key]));
-      const basicRoom = Math.max(0, P.basicWidth - taxableIncome);
+      const basicRoom = Math.max(0, P.cgtBandWidth - taxableIncome);
       const atBasic = Math.min(taxableGain, basicRoom);
       const bill = atBasic * P.cgtBasicRate + (taxableGain - atBasic) * P.cgtHigherRate;
       if (bill <= 0) return;
@@ -1794,11 +1878,11 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
     const o = owners[0];
     const isaSelfBal = acc[o.ids.isa] ? acc[o.ids.isa].balance : 0;
     const aaRoom = Math.max(0, Math.min(P.aaAt(o.salary), o.salary > 0 ? o.salary : P.pensionAllowance) - alloc.penByOwner[0]);
-    const gross = Math.min(aaRoom, spare / (1 - P.basicRate), isaSelfBal / (1 - P.basicRate));
+    const gross = Math.min(aaRoom, spare / (1 - P.reliefAtSource), isaSelfBal / (1 - P.reliefAtSource));
     if (!(gross > 250)) return null;
-    const net = gross * (1 - P.basicRate);
+    const net = gross * (1 - P.reliefAtSource);
     const reliefTotal = o.salary > 0 ? incomeTax(o.salary, P) - incomeTax(Math.max(0, o.salary - gross), P) : gross * P.higherRate;
-    const refund = Math.max(0, reliefTotal - gross * P.basicRate);
+    const refund = Math.max(0, reliefTotal - gross * P.reliefAtSource);
     return { transfer: { net, gross, refund, fromId: o.ids.isa, toId: o.ids.pen, refundId: o.ids.cash }, reliefExtra: gross - net + refund };
   };
 
@@ -1935,7 +2019,7 @@ function buildTournament(rawPlan, { emergencyFloor = 25000, scope = 'contributio
       const accessAge = Math.max(o.retireAge, ctx.nmpa);
       const drawYears = Math.max(1, ctx.terminalAge - accessAge);
       const guaranteedTaxable = o.statePension + ctx.otherIncomes.filter(i => i.owner === o.key && !i.taxFree).reduce((s, i) => s + i.amount, 0);
-      const taxableRoom = Math.max(0, P.basicLimit - guaranteedTaxable);
+      const taxableRoom = Math.max(0, P.higherRateStartsAt - guaranteedTaxable);
       const grossWithdrawal = taxableRoom / Math.max(0.01, 1 - P.pclsProp);
       const targetPot = grossWithdrawal * annuityFactor(a.real, drawYears);
       const yrs = Math.max(0, o.retireAge - o.age0);
@@ -2072,7 +2156,7 @@ function pickBest(cands, tol = 0.5, preAccessCap = Infinity) {
 }
 
 // Namespace used by the UI (mirrors the modular engine.js exports)
-const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, luckyBand, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, calculateUKNetIncome, nicFor, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, salaryAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSearchPlayer, bridgeIsaAnnual, liquidRealRate, buildTournament, buildPolicyCandidates, pickBest };
+const E = { num, clamp, isBlank, round250, HISTORICAL_DATA, HISTORICAL_FIRST_YEAR, HISTORICAL_LAST_YEAR, getHistoricalPoint, RISK_EQUITY_WEIGHTS, DEFAULT_RISK_PROFILES, luckyBand, OWNERS, OWNER_LABEL, CATEGORIES, CATEGORY_LABEL, accountId, DEFAULT_CONFIG, BLANK_PLAN, DECUMULATION_POLICIES, todayISO, calculateYearFraction, normalizePlan, taxParams, incomeTax, marginalRateAt, taxBreakpoints, TAX_REGION_LABELS, calculateUKNetIncome, nicFor, calculateUKTaxAndNIC, calculateMarginalRelief, netCostOfPensionContrib, grossUpNet, grossUpNetIncremental, grossPensionNeededForNet, mulberry32, gaussianPath, buildContext, spendTargetAtAge, freshState, stepYear, simulateDeterministic, simulateHistorical, FAIL_TOLERANCE, evaluateRows, runTrial, pathsForSeed, summarizeTrials, monteCarlo, optimizeSpend, annuityFactor, fvContribStream, bridgeRequirement, contribAtYear, salaryAtYear, relevantEarningsAtYear, mpaaAppliesAtYear, carryForwardAtYear, resolveMpaa, wrapperHeadroomAtYear, INCOME_TYPES, incomeTypeOf, allocateBudget, applyAllocationToPlan, accumulationOutlay, solveEscalation, applyEscalationToPlan, diffStrategyPlans, resolveSearchPlayer, bridgeIsaAnnual, liquidRealRate, buildTournament, buildPolicyCandidates, pickBest };
 export { HISTORICAL_DATA, RISK_EQUITY_WEIGHTS, getHistoricalPoint, DEFAULT_RISK_PROFILES, luckyBand, calculateUKTaxAndNIC, calculateMarginalRelief, grossUpNet, normalizePlan, buildContext, simulateDeterministic, simulateHistorical, monteCarlo, optimizeSpend, buildTournament, diffStrategyPlans, buildPolicyCandidates, pickBest, accumulationOutlay, solveEscalation, applyEscalationToPlan };
 
 
@@ -2437,7 +2521,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, scenarios = [], activeScen
   // balancing steers new money to the smaller pension, which throws away relief when that owner sits in
   // a lower band — measured at ~£45k of relief lost against ~£26k of retirement tax saved
   const reliefBandsDiffer = isCouple && ctx.owners.length > 1
-    && (ctx.owners[0].salary > P.basicLimit) !== (ctx.owners[1].salary > P.basicLimit);
+    && E.marginalRateAt(ctx.owners[0].salary, P) !== E.marginalRateAt(ctx.owners[1].salary, P);
 
   const handleRun = async () => {
     if (!preview) return;
@@ -3051,7 +3135,7 @@ export default function App() {
   const updateRiskField = (riskKey, field, value) => setPlan(prev => ({ ...prev, riskProfiles: { ...(prev.riskProfiles || E.DEFAULT_RISK_PROFILES), [riskKey]: { ...(prev.riskProfiles || E.DEFAULT_RISK_PROFILES)[riskKey], [field]: parseInputNumber(value) } } }));
   const updateDemographics = (field, value) => setPlan(prev => ({ ...prev, demographics: { ...(prev.demographics || {}), [field]: field === 'planningMode' ? value : parseInputNumber(value) } }));
   const updateSpending = (field, value) => setPlan(prev => ({ ...prev, spending: { ...(prev.spending || {}), [field]: (field === 'drawdownStrategy' || field === 'decumulationPolicy') ? value : parseInputNumber(value) } }));
-  const updateConfig = (field, value) => setPlan(prev => ({ ...prev, config: { ...(prev.config || {}), [field]: (field === 'valuationDate' || typeof value === 'boolean') ? value : parseInputNumber(value) } }));
+  const updateConfig = (field, value) => setPlan(prev => ({ ...prev, config: { ...(prev.config || {}), [field]: (field === 'valuationDate' || field === 'taxRegion' || typeof value === 'boolean') ? value : parseInputNumber(value) } }));
   const updateListItem = (listKey, id, patch) => setPlan(p => ({ ...p, [listKey]: (p[listKey] || []).map(i => i.id === id ? { ...i, ...patch } : i) }));
   // spending bands live under plan.spending rather than at the top level, so they get their own helpers
   // instead of teaching updateListItem to walk a nested path
@@ -3651,10 +3735,10 @@ export default function App() {
               <div className="relative max-w-2xl space-y-2">
                 <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2"><Info className="w-4 h-4 text-slate-500" /> What this model will not tell you</h3>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  It covers UK income tax and its personal-allowance taper, National Insurance for employees and the self-employed, the annual
-                  allowance with taper and carry-forward, the MPAA, ISA limits, realisation-based CGT, the {Math.round(P.pclsProp * 100)}% tax-free
-                  element and the pre-SIPP access bridge. It does <em>not</em> cover Scottish or Welsh income tax, inheritance tax on the wider
-                  estate, defined benefit accrual, or care costs.
+                  It covers UK income tax and its personal-allowance taper, including the Scottish and Welsh bands, National Insurance for
+                  employees and the self-employed, the annual allowance with taper and carry-forward, the MPAA, ISA limits, realisation-based
+                  CGT, the {Math.round(P.pclsProp * 100)}% tax-free element and the pre-SIPP access bridge. It does <em>not</em> cover
+                  inheritance tax on the wider estate, defined benefit accrual, or care costs.
                 </p>
                 <p className="text-xs text-slate-600 leading-relaxed">
                   Assumption and gap is listed below. Weigh accordingly.
@@ -4095,7 +4179,7 @@ export default function App() {
                     {Object.entries(E.DECUMULATION_POLICIES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
                   </select>
                   <span className="text-[10px] text-slate-400 mt-1 block">
-                    {plan?.spending?.decumulationPolicy === 'Bracket Fill Basic' ? `Fills the £${P.pa.toLocaleString()} allowance, then draws pension income up to £${P.basicLimit.toLocaleString()} before touching cash, GIA and ISAs.`
+                    {plan?.spending?.decumulationPolicy === 'Bracket Fill Basic' ? `Fills the £${P.pa.toLocaleString()} allowance, then draws pension income up to £${P.higherRateStartsAt.toLocaleString()} before touching cash, GIA and ISAs.`
                       : plan?.spending?.decumulationPolicy === 'Bracket Fill' ? `Draws pension only up to £${P.pa.toLocaleString()} (0% tax), then cash, GIA and ISAs; pension income above the allowance is the last resort.`
                       : 'Liquidates each wrapper to zero in rigid sequential order.'}
                   </span>
@@ -4204,11 +4288,34 @@ export default function App() {
 
             <div className="bg-surface border border-slate-200/90 p-5 rounded-2xl shadow-xs space-y-4">
               <h3 className="text-xs font-bold text-blue-700 uppercase tracking-wider">UK Income Tax, National Insurance &amp; Pension Allowances</h3>
-              <p className="text-[11px] text-slate-500">Defaults are rUK 2025/26 (frozen to April 2028). Scottish bands differ. All thresholds are held constant in real terms.</p>
+              <p className="text-[11px] text-slate-500">Defaults are 2025/26 (frozen to April 2028), and all thresholds are held constant in real terms.</p>
+              <div className="pb-1">
+                <label className="text-slate-600 font-semibold block mb-1 text-xs">Where you pay income tax</label>
+                <select value={plan?.config?.taxRegion ?? 'ruk'} onChange={(e) => updateConfig('taxRegion', e.target.value)} className="w-full sm:w-80 p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs text-blue-700 font-bold focus:bg-surface focus:ring-2 focus:ring-blue-500 focus:outline-none cursor-pointer">
+                  {Object.entries(E.TAX_REGION_LABELS).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+                </select>
+                <span className="text-[10px] text-slate-400 mt-1 block">
+                  {plan?.config?.taxRegion === 'scotland'
+                    ? 'Scotland sets six bands, and its higher rate starts at £43,662 rather than £50,270. Only income tax is devolved: National Insurance, capital gains tax, the personal allowance and its taper are the same everywhere, and relief at source on a pension contribution is 20% for everyone.'
+                    : plan?.config?.taxRegion === 'wales'
+                      ? 'Wales can vary its rates under the Welsh Rates of Income Tax but has set them equal to England and Northern Ireland every year so far, so this returns the same figures. It is here so the answer is confirmed rather than assumed.'
+                      : 'Three bands at 20, 40 and 45%. Choose Scotland for its six-band set, or Wales, whose rates currently match these.'}
+                </span>
+              </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs font-mono">
                 {[
-                  ['personalAllowance', 'Personal Allowance (£)'], ['paTaperThreshold', 'PA Taper Threshold (£)'], ['paTaperRate', 'PA Taper Rate (% of excess)'], ['basicBandLimit', 'Higher Rate Starts At (£ income)'],
-                  ['basicTaxRate', 'Basic Rate (%)'], ['higherBandLimit', 'Additional Rate Starts At (£ income)'], ['higherTaxRate', 'Higher Rate (%)'], ['additionalTaxRate', 'Additional Rate (%)'],
+                  ['personalAllowance', 'Personal Allowance (£)'], ['paTaperThreshold', 'PA Taper Threshold (£)'], ['paTaperRate', 'PA Taper Rate (% of excess)'],
+                  ...(plan?.config?.taxRegion === 'scotland' ? [
+                    ['scotStarterRate', 'Starter Rate (%)'], ['scotStarterLimit', 'Basic Rate Starts At (£ income)'],
+                    ['scotBasicRate', 'Basic Rate (%)'], ['scotBasicLimit', 'Intermediate Rate Starts At (£ income)'],
+                    ['scotIntermediateRate', 'Intermediate Rate (%)'], ['scotIntermediateLimit', 'Higher Rate Starts At (£ income)'],
+                    ['scotHigherRate', 'Higher Rate (%)'], ['scotHigherLimit', 'Advanced Rate Starts At (£ income)'],
+                    ['scotAdvancedRate', 'Advanced Rate (%)'], ['scotAdvancedLimit', 'Top Rate Starts At (£ income)'],
+                    ['scotTopRate', 'Top Rate (%)']
+                  ] : [
+                    ['basicBandLimit', 'Higher Rate Starts At (£ income)'], ['basicTaxRate', 'Basic Rate (%)'],
+                    ['higherBandLimit', 'Additional Rate Starts At (£ income)'], ['higherTaxRate', 'Higher Rate (%)'], ['additionalTaxRate', 'Additional Rate (%)']
+                  ]),
                   ['nicPrimaryThreshold', 'NIC Primary Threshold (£)'], ['nicUpperEarningsLimit', 'NIC Upper Earnings Limit (£)'], ['nicMainRate', 'NIC Main Rate (%)'], ['nicUpperRate', 'NIC Upper Rate (%)'],
                   ['class4MainRate', 'Class 4 Main Rate (%, self-employed)'], ['class4UpperRate', 'Class 4 Upper Rate (%, self-employed)'],
                   ['employerNicRate', 'Employer NIC Rate (%)'], ['pclsProportion', 'PCLS Tax-Free (%)'], ['pclsMaxCap', 'Lump Sum Allowance (£ LSA)'],
@@ -4773,7 +4880,12 @@ export default function App() {
               <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider pt-1">Not modelled yet</h3>
               <ul className="list-disc pl-5 text-xs text-slate-600 space-y-1">
                 <li><strong>Lumpy self-employed profits.</strong> Trading profit is carried as a single figure that grows at a steady rate, exactly like a salary. Real self-employment swings year to year, and a bad year can waste an annual allowance that carry-forward only partly recovers. <strong>Class 2 NIC</strong> is also not charged: it stopped being mandatory above the Small Profits Threshold in 2024, and the voluntary route for those below it does not change a projection. Payments on account, the trading allowance, capital allowances and incorporation are all out of scope.</li>
-                <li><strong>Scottish and Welsh income tax:</strong> rates and bands are rest-of-UK throughout.</li>
+                <li><strong>Devolved income tax:</strong> covered. Set where you pay tax in Config. Scotland uses its own six bands, Wales
+                  is offered but currently matches England and Northern Ireland. Only the bands are devolved: National Insurance, capital gains
+                  tax, the personal allowance and its taper apply unchanged, and relief at source on a pension contribution stays at 20%.
+                  Note that the region only shows up where the model actually routes income through the tax calculation - pension drawdown,
+                  the state pension and other taxable income - so it does not change a projection whose earning years are all before anyone
+                  has retired.</li>
                 <li><strong>Inheritance tax on the estate.</strong> The pension death tax setting applies a haircut to leftover pension only, so it represents the <em>extra</em> tax a pension suffers relative to an ISA, not IHT on everything.</li>
                 <li><strong>Defined benefit pensions</strong> beyond entering them as a taxable income stream; no accrual, revaluation or transfer values.</li>
                 <li><strong>Care costs, the Lifetime ISA, the National Minimum Wage floor on salary sacrifice, dividend and savings-interest taxation inside the GIA, share pooling and the 30-day CGT rule.</strong></li>
