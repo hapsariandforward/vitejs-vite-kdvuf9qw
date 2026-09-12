@@ -2639,7 +2639,7 @@ function WrapperStrategyTournament({ plan, ctx, seed, scenarios = [], activeScen
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-xs font-bold text-slate-900 leading-tight flex items-center gap-1">{isBest && <Trophy className="w-3.5 h-3.5 text-emerald-600" />}{res.name}{res.isEntrant && <span className="ml-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[9px] font-bold uppercase tracking-wider">Saved scenario</span>}</span>
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${st.successRate >= 90 ? 'bg-emerald-100 text-emerald-800' : st.successRate >= 75 ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-800'}`}>{st.successRate.toFixed(1)}% Safe</span>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${st.successRate >= 90 ? 'bg-emerald-100 text-emerald-800' : st.successRate >= 75 ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-800'}`}>{st.successRate.toFixed(1)}% survive</span>
                     </div>
                     <p className="text-[11px] text-slate-500 leading-normal">{res.description}</p>
                     {summaryLines.length > 0 && (
@@ -2789,7 +2789,7 @@ export default function App() {
   const [hoveredPoint, setHoveredPoint] = useState(null);
   const [hoveredHistPoint, setHoveredHistPoint] = useState(null);
 
-  const [targetConfidence, setTargetConfidence] = useState(90);
+  const [targetSurvivalRate, setTargetSurvivalRate] = useState(90);
   // One run, three stages. `simResult` is always the plan exactly as entered; `safeMaxResult` is the
   // solve, which describes a different spend and so cannot share the same card. Keeping them apart is
   // what stops the metric tiles quietly changing meaning depending on which button was pressed last.
@@ -3136,22 +3136,22 @@ export default function App() {
    * the risk and reports the spending. It bisects on the spend, re-running the search at each step, then
    * confirms the answer over the full path count, which is why it costs more than stage 1.
    */
-  const runStageSafeMax = async (confidence, scale = { from: 0, to: 1 }) => {
+  const runStageSafeMax = async (targetRate, scale = { from: 0, to: 1 }) => {
     const span = scale.to - scale.from;
-    setSimProgress({ label: `Solving for the most you could spend at ${confidence}%…`, value: scale.from });
+    setSimProgress({ label: `Solving for the most you could spend at ${targetRate}%…`, value: scale.from });
     await tick();
     const paths = E.pathsForSeed(mcSeed, SEARCH_TRIALS, ctx.totalYears);
     const rateAt = (spend) => { let s = 0; for (const zs of paths) if (E.runTrial(ctx, zs, spend).survived) s++; return (s / SEARCH_TRIALS) * 100; };
     let low = 0, result;
-    if (rateAt(0) < confidence) {
+    if (rateAt(0) < targetRate) {
       result = { spend: 0, note: 'Even zero spending fails the target. Check the pre-SIPP access gap, one-off costs or the bequest floor.' };
     } else {
       let high = Math.max(20000, ctx.targetSpend * 2, 150000), guard = 0;
-      while (rateAt(high) >= confidence && guard++ < 8) { low = high; high *= 2; }
+      while (rateAt(high) >= targetRate && guard++ < 8) { low = high; high *= 2; }
       for (let iter = 0; iter < 14; iter++) {
         const mid = E.round250((low + high) / 2);
         if (mid <= low || mid >= high) break;
-        if (rateAt(mid) >= confidence) low = mid; else high = mid;
+        if (rateAt(mid) >= targetRate) low = mid; else high = mid;
         setSimProgress({ label: `Narrowing… £${low.toLocaleString()}–£${high.toLocaleString()}`, value: scale.from + span * (0.1 + 0.5 * (iter + 1) / 14) });
         await tick();
         if (mcCancelRef.current) break;
@@ -3163,7 +3163,7 @@ export default function App() {
       onProgress: (f) => setSimProgress({ label: `Confirming £${result.spend.toLocaleString()} over ${MC_TRIALS.toLocaleString()} paths…`, value: scale.from + span * (0.6 + 0.4 * f) })
     });
     if (mcCancelRef.current) return null;
-    const res = { spend: result.spend, note: result.note, confidence, stats };
+    const res = { spend: result.spend, note: result.note, targetRate, stats };
     setSafeMaxResult(res);
     return res;
   };
@@ -3187,7 +3187,7 @@ export default function App() {
       if (mcCancelRef.current) return;
       if (wantSafeMax) {
         setIsOptimizing(true);
-        await runStageSafeMax(targetConfidence, { from: 0.35, to: 1 });
+        await runStageSafeMax(targetSurvivalRate, { from: 0.35, to: 1 });
       }
     } finally {
       setIsSimulating(false); setIsOptimizing(false); setSimProgress(null);
@@ -3196,12 +3196,12 @@ export default function App() {
     if (mcStages.tournament) setTournament(prev => ({ ...prev, autoRun: prev.autoRun + 1 }));
   };
 
-  // Re-solve stage 2 alone, which is what a change of confidence needs: stage 1 does not depend on it.
+  // Re-solve stage 2 alone, which is what a change of target survival rate needs: stage 1 does not depend on it.
   const handleResolveSafeMax = async () => {
     if (isSimulating || isOptimizing) return;
     mcCancelRef.current = false;
     setIsOptimizing(true);
-    try { await runStageSafeMax(targetConfidence); }
+    try { await runStageSafeMax(targetSurvivalRate); }
     finally { setIsOptimizing(false); setSimProgress(null); }
   };
 
@@ -3209,7 +3209,7 @@ export default function App() {
 
   // Derived once for the verdict strip, which reports whichever stages have landed so far.
   const mcBusy = isSimulating || isOptimizing || tournament.isEvaluating;
-  const safeMaxStale = !!safeMaxResult && safeMaxResult.confidence !== targetConfidence;
+  const safeMaxStale = !!safeMaxResult && safeMaxResult.targetRate !== targetSurvivalRate;
   const tournamentBest = tournament.results && tournament.results.bestId
     ? tournament.results.players.find(p => p.id === tournament.results.bestId) : null;
   const tournamentBaselinePlayer = tournament.results
@@ -4254,8 +4254,8 @@ export default function App() {
                   <span className="font-semibold text-slate-700">Also solve for the most I could spend</span>
                 </label>
                 <div className={`flex items-center bg-slate-100 border border-slate-200 rounded-xl p-1 ${mcStages.safeMax || safeMaxResult ? '' : 'opacity-40'}`}>
-                  <span className="text-slate-500 px-2">Confidence:</span>
-                  {[85, 90, 95].map(rate => <button key={rate} type="button" onClick={() => setTargetConfidence(rate)} className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${targetConfidence === rate ? 'bg-surface text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>{rate}%</button>)}
+                  <span className="text-slate-500 px-2">Target survival rate:</span>
+                  {[85, 90, 95].map(rate => <button key={rate} type="button" onClick={() => setTargetSurvivalRate(rate)} className={`px-2 py-0.5 rounded-lg font-semibold transition-all cursor-pointer ${targetSurvivalRate === rate ? 'bg-surface text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'}`}>{rate}%</button>)}
                 </div>
                 <label className="flex items-center gap-1.5 cursor-pointer select-none">
                   <input type="checkbox" checked={mcStages.tournament} onChange={(e) => setMcStages(s => ({ ...s, tournament: e.target.checked }))} className="accent-indigo-600 cursor-pointer" />
@@ -4287,13 +4287,13 @@ export default function App() {
                       <p className="text-sm text-slate-900 leading-snug">
                         {safeMaxResult.spend > 0 ? (
                           <>
-                            You could take up to <strong className="font-mono font-bold text-indigo-700">{formatGBP(safeMaxResult.spend)}</strong> a year and still clear {safeMaxResult.confidence}%
+                            You could take up to <strong className="font-mono font-bold text-indigo-700">{formatGBP(safeMaxResult.spend)}</strong> a year and still clear {safeMaxResult.targetRate}%
                             {simResult && simResult.spend > 0 && Math.abs(safeMaxResult.spend - simResult.spend) >= 250 && (
                               <span className="text-slate-600">, {formatGBP(Math.abs(safeMaxResult.spend - simResult.spend))} a year {safeMaxResult.spend > simResult.spend ? 'more' : 'less'} than you entered</span>
                             )}.
                           </>
                         ) : (
-                          <>No level of spending at all clears {safeMaxResult.confidence}%, so the solver returned nothing.</>
+                          <>No level of spending at all clears {safeMaxResult.targetRate}%, so the solver returned nothing.</>
                         )}
                         {safeMaxResult.note && <span className="block text-[11px] text-rose-700 font-semibold mt-0.5">{safeMaxResult.note}</span>}
                       </p>
@@ -4308,7 +4308,7 @@ export default function App() {
                     )}
                     {safeMaxStale && !mcBusy && (
                       <button type="button" onClick={handleResolveSafeMax} className="text-[11px] text-blue-700 hover:text-blue-900 hover:underline font-semibold cursor-pointer">
-                        Solve again at {targetConfidence}% &rarr;
+                        Solve again at {targetSurvivalRate}% &rarr;
                       </button>
                     )}
                     <p className="text-[11px] text-slate-500 font-mono pt-0.5">
@@ -4382,7 +4382,7 @@ export default function App() {
                 <div className="px-5 pb-5 space-y-4">
                   {[
                     { key: 'entered', label: 'Your plan as entered', spend: simResult.spend, st: simResult, accent: 'blue' },
-                    ...(safeMaxResult ? [{ key: 'solved', label: `At the ${safeMaxResult.confidence}% safe maximum`, spend: safeMaxResult.spend, st: safeMaxResult.stats, accent: 'indigo' }] : [])
+                    ...(safeMaxResult ? [{ key: 'solved', label: `At the ${safeMaxResult.targetRate}% safe maximum`, spend: safeMaxResult.spend, st: safeMaxResult.stats, accent: 'indigo' }] : [])
                   ].map(row => (
                     <div key={row.key} className="space-y-2">
                       <div className="flex items-baseline gap-2">
@@ -4519,15 +4519,15 @@ export default function App() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
                   <strong className="text-slate-800 block">Stage 1, always runs: "will this plan hold?"</strong>
-                  <p className="text-slate-500">Takes the target living expenditure from Plan Inputs exactly as entered and runs it through {MC_TRIALS.toLocaleString()} paths. The answer is a <strong>survival rate</strong>: the share of paths that funded every year to age {terminalAge} without running dry and finished above your bequest floor. Use it once you know roughly what you want to spend. This stage reports a probability rather than targeting one, so the confidence setting does not affect it.</p>
+                  <p className="text-slate-500">Takes the target living expenditure from Plan Inputs exactly as entered and runs it through {MC_TRIALS.toLocaleString()} paths. The answer is a <strong>survival rate</strong>: the share of paths that funded every year to age {terminalAge} without running dry and finished above your bequest floor. Use it once you know roughly what you want to spend. This stage reports a probability rather than targeting one, so the target survival rate does not affect it.</p>
                 </div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
                   <strong className="text-slate-800 block">Stage 2, optional: "how much could I spend?"</strong>
-                  <p className="text-slate-500">Ignores your target figure and solves for the <strong>largest annual spend</strong> that still survives at the confidence level you pick. It bisects on the spending amount, re-running the full simulation at each step, which is why it takes longer than the first stage. At 95% it finds the spend that fails in no more than 1 path in 20. Because it describes a different spend from the one you entered, it gets its own line in the verdict and its own row of figures, rather than overwriting stage 1.</p>
+                  <p className="text-slate-500">Ignores your target figure and solves for the <strong>largest annual spend</strong> that still survives at the target survival rate you pick. It bisects on the spending amount, re-running the full simulation at each step, which is why it takes longer than the first stage. At 95% it finds the spend that fails in no more than 1 path in 20. Because it describes a different spend from the one you entered, it gets its own line in the verdict and its own row of figures, rather than overwriting stage 1.</p>
                 </div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
-                  <strong className="text-slate-800 block">The confidence setting (85 / 90 / 95%)</strong>
-                  <p className="text-slate-500">Only affects stage 2. It is the survival rate you are willing to accept, so a <em>lower</em> confidence returns a <em>higher</em> spending figure: 85% buys you more income now in exchange for a 1-in-7 chance of running short. 95% is the conventional planning benchmark. Changing it after a run offers to solve stage 2 again on its own, since nothing else depends on it.</p>
+                  <strong className="text-slate-800 block">The target survival rate (85 / 90 / 95%)</strong>
+                  <p className="text-slate-500">Only affects stage 2. It is the share of paths you are asking the spending figure to survive, so a <em>lower</em> target returns a <em>higher</em> figure: 85% buys you more income now in exchange for a 1-in-7 chance of running short. 95% is the conventional planning benchmark. Changing it after a run offers to solve stage 2 again on its own, since nothing else depends on it.</p>
                 </div>
                 <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
                   <strong className="text-slate-800 block">Stage 3, optional: "would a different split do better?"</strong>
